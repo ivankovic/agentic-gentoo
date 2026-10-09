@@ -1,0 +1,5 @@
+# Link with mold. No target-cpu=native: these repos build binaries that ship
+# (cargo deb, cargo package, release tarballs) and must run on other CPUs.
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]

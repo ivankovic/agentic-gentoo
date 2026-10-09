@@ -100,8 +100,31 @@ in each config; [quickshell/Theme.qml](home/.config/quickshell/Theme.qml) is the
 - Phases 0–7: done.
 - Phase 8: done. Volume, brightness and media keys use niri's default binds (`wpctl`,
   `brightnessctl`, `playerctl`). `fwupdmgr` reports no firmware updates.
-- Phase 9: in progress. Done: SSH keys, git, `gh`, repos cloned to `~/src/<repo>` (same flat
-  layout as domaci). Next: rustup, mold, cmake, ninja, tio, cargo config.
+- Phase 9: done. SSH keys, git, `gh`, repos cloned to `~/src/<repo>` (same flat layout as
+  domaci), developer tools (below). omnidiff builds and all tests pass:
+  [bench/2026-10-09-omnidiff.md](bench/2026-10-09-omnidiff.md).
+
+## Developer tools: system vs user
+
+Rule: tools go through Portage (patchable via `/etc/portage/patches`, upgraded with @world, and
+own projects can later be deployed from git via a local overlay); only what projects pin lives
+in the home directory.
+
+| | System (Portage) | User (`~`) |
+|---|---|---|
+| Rust | `rust-bin` (Portage builds Rust ebuilds with it), mold, cargo-nextest, cargo-audit | rustup stable + clippy, rustfmt, rust-analyzer, llvm-tools, rust-src, musl target; cargo-llvm-cov, cargo-deb, cargo-about (`cargo install --locked`) |
+| JS | nodejs 24 LTS (masked `>=25`; 22 isn't on the binhost) | bun (official installer, `~/.bun`), `node_modules` |
+| Python | uv | Python versions and venvs, managed by uv |
+| Other | hugo, typst, stylua, tio, go, podman (rootless) + podman-compose | — |
+
+Skipped: Android SDK/JDK (eInk-markdown-editor, possibly dead), zig (only omnidiff's and
+friends-and-family-ca's release workflows use it), Nix.
+
+`~/.cargo/config.toml` links with mold but leaves out `target-cpu=native` (the runbook had it):
+these repos build binaries that ship.
+
+podman's `containers-common` needs `net-firewall/iptables[nftables]`
+([portage/package.use/podman](portage/package.use/podman)).
 
 ## SSH and git (not stored here)
 

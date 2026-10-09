@@ -1,10 +1,18 @@
 app-admin/sudo
+app-containers/podman
+app-containers/podman-compose
 app-editors/neovim
 app-eselect/eselect-repository
 app-misc/brightnessctl
 app-portage/eix
 app-portage/gentoolkit
+app-text/typst
+dev-python/uv
+dev-util/cargo-audit
+dev-util/cargo-nextest
 dev-util/github-cli
+dev-util/rustup
+dev-util/stylua
 dev-vcs/git
 gui-apps/foot
 gui-apps/mako
@@ -24,6 +32,8 @@ media-libs/libva-intel-media-driver
 media-sound/playerctl
 media-video/pipewire
 media-video/wireplumber
+net-dialup/tio
+net-libs/nodejs
 net-misc/networkmanager
 net-wireless/bluez
 sys-apps/fwupd
@@ -31,6 +41,7 @@ sys-apps/xdg-desktop-portal-gnome
 sys-apps/zram-generator
 sys-auth/polkit
 sys-boot/efibootmgr
+sys-devel/mold
 sys-firmware/intel-microcode
 sys-firmware/sof-firmware
 sys-fs/btrfs-progs
@@ -41,4 +52,5 @@ sys-kernel/gentoo-kernel
 sys-kernel/linux-firmware
 sys-power/power-profiles-daemon
 sys-power/thermald
+www-apps/hugo
 www-client/firefox-bin
