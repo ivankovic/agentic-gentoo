@@ -1,0 +1,9 @@
+[user]
+	email = marko@ivankovic.me
+	name = Marko Ivankovic
+[push]
+	default = simple
+[merge]
+	conflictStyle = zdiff3
+[init]
+	defaultBranch = main

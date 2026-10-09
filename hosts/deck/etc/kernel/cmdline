@@ -1,0 +1,1 @@
+rd.luks.name=9e6393f4-5800-4971-aa10-aa2ea004c044=root root=/dev/mapper/root rootflags=subvol=@ rw quiet
