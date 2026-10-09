@@ -1,0 +1,19 @@
+/* Dark academia palette for GTK3 Adwaita-dark; same values as quickshell/Theme.qml.
+   Adwaita hardcodes most colours, so the main surfaces are overridden directly. */
+@define-color theme_bg_color #241d18;
+@define-color theme_fg_color #ebdfca;
+@define-color theme_base_color #2f2620;
+@define-color theme_text_color #ebdfca;
+@define-color theme_selected_bg_color #c9a46a;
+@define-color theme_selected_fg_color #1c1612;
+@define-color borders #54453a;
+
+window.background, .background { background-color: #241d18; color: #ebdfca; }
+headerbar, .titlebar { background: #1c1612; color: #ebdfca; border-color: #54453a; box-shadow: none; }
+headerbar:backdrop, .titlebar:backdrop { background: #241d18; }
+.view, textview text, iconview, treeview.view { background-color: #2f2620; color: #ebdfca; }
+entry { background-color: #2f2620; color: #ebdfca; border-color: #54453a; }
+entry:focus { border-color: #c9a46a; box-shadow: inset 0 0 0 1px #c9a46a; }
+menu, .menu, .context-menu, popover.background { background-color: #2f2620; color: #ebdfca; }
+selection, *:selected, .view:selected { background-color: #c9a46a; color: #1c1612; }
+button.suggested-action { background: #c9a46a; color: #1c1612; border-color: #a8864f; }

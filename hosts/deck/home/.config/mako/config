@@ -1,1 +1,20 @@
-font=Iosevka 11
+font=Iosevka Etoile 11
+
+# Dark academia palette; same values as quickshell/Theme.qml.
+background-color=#2f2620f2
+text-color=#ebdfca
+border-color=#54453a
+progress-color=over #54453a
+border-size=1
+border-radius=10
+padding=12,16
+margin=16
+width=360
+default-timeout=8000
+
+[urgency=low]
+text-color=#c9b89f
+
+[urgency=critical]
+border-color=#b0645a
+default-timeout=0

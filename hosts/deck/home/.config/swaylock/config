@@ -1,0 +1,31 @@
+# Dark academia palette; same values as quickshell/Theme.qml.
+color=1c1612
+font=Iosevka Etoile
+font-size=20
+indicator-radius=90
+indicator-thickness=6
+show-failed-attempts
+ignore-empty-password
+
+inside-color=241d18
+inside-clear-color=241d18
+inside-ver-color=241d18
+inside-wrong-color=241d18
+ring-color=54453a
+ring-clear-color=8eaa9e
+ring-ver-color=c9a46a
+ring-wrong-color=b0645a
+key-hl-color=c9a46a
+bs-hl-color=c08a7e
+line-color=00000000
+line-clear-color=00000000
+line-ver-color=00000000
+line-wrong-color=00000000
+separator-color=00000000
+text-color=ebdfca
+text-clear-color=ebdfca
+text-ver-color=ebdfca
+text-wrong-color=c98073
+layout-bg-color=00000000
+layout-border-color=00000000
+layout-text-color=c9b89f
