@@ -11,8 +11,10 @@ dev-python/uv
 dev-util/cargo-audit
 dev-util/cargo-nextest
 dev-util/github-cli
+dev-util/omnidiff
 dev-util/rustup
 dev-util/stylua
+dev-util/tree-sitter-cli
 dev-vcs/git
 gui-apps/foot
 gui-apps/mako
@@ -36,6 +38,7 @@ net-dialup/tio
 net-libs/nodejs
 net-misc/networkmanager
 net-wireless/bluez
+sys-apps/fd
 sys-apps/fwupd
 sys-apps/xdg-desktop-portal-gnome
 sys-apps/zram-generator

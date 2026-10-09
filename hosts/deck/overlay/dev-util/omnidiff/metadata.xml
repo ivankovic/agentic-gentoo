@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+	<maintainer type="person">
+		<email>marko@ivankovic.me</email>
+		<name>Marko Ivankovic</name>
+	</maintainer>
+	<longdescription lang="en">
+		OmniDiff is a content-aware diff tool. Instead of aligning two files line by line, it
+		parses code with tree-sitter and matches the two syntax trees, so a change is reported
+		as what it structurally is - an insertion, a deletion, an update, or a move - rather
+		than as whichever lines happened to line up. Pictures, archives, fonts, cursors,
+		message catalogs and PDFs are diffed by what they hold: pixels, files, glyphs, frames,
+		messages and pages.
+
+		It runs as an interactive terminal UI, as a plain-text batch formatter, or as a JSON
+		emitter for editor integrations, and it works as a git difftool backend and a
+		Jujutsu (jj) diff formatter.
+	</longdescription>
+	<upstream>
+		<bugs-to>https://github.com/ivankovic/omnidiff/issues</bugs-to>
+		<remote-id type="github">ivankovic/omnidiff</remote-id>
+		<remote-id type="cratesio">omnidiff</remote-id>
+	</upstream>
+</pkgmetadata>

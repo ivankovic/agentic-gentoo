@@ -7,3 +7,10 @@
 	conflictStyle = zdiff3
 [init]
 	defaultBranch = main
+[difftool "omnidiff"]
+	cmd = omnidiff \"$LOCAL\" \"$REMOTE\"
+[diff]
+	tool = omnidiff
+	external = omnidiff
+[difftool]
+	prompt = false

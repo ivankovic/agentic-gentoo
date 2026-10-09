@@ -64,6 +64,7 @@ Secrets (SSH keys, `gh` token, Wi-Fi passwords) stay on the machine; see [Secret
 - **Extra keywords:** `gui-wm/niri`, `gui-apps/quickshell` and `app-misc/brightnessctl` (GURU) need
   `~amd64`. quickshell is built with `-crash-handler` (avoids keywording `dev-cpp/cpptrace`) and
   without the Hyprland, i3 and X11 modules.
+  `app-editors/neovim` (and `dev-lua/luv`) are `~amd64` for 0.12, which nvim-treesitter requires.
 - **Extra packages** in world beyond the runbook: `www-client/firefox-bin`, `sys-fs/udisks`,
   `sys-boot/efibootmgr`, `dev-util/github-cli`; `app-crypt/pinentry -qt6`.
 
@@ -140,6 +141,21 @@ friends-and-family-ca's release workflows use it), Nix.
 `~/.cargo/config.toml` links with mold but leaves out `target-cpu=native` (the runbook had it):
 these repos build binaries that ship.
 
+## Local overlay
+
+[overlay/](overlay/) is the source of the `local` repository. It is deployed root-owned with
+`sudo rsync -a --delete --chown=root:root overlay/ /var/db/repos/local/`
+([portage/repos.conf/local.conf](portage/repos.conf/local.conf)); Portage never reads this checkout.
+
+| Package | Ebuild | Notes |
+|---|---|---|
+| `dev-util/omnidiff` | `9999` (installed, in world) | Live: clones `main`, crates from Cargo.lock at unpack; `**` keyword. Rebuild with `emerge @live-rebuild` |
+| | `0.2.0` | Upstream's release ebuild from omnidiff's `packaging/gentoo`, unchanged (still says `RUST_MIN_VER=1.88.0`; Cargo.toml needs 1.92) |
+
+Built with Portage's Rust (rust-bin), not rustup. Installs the binary, man page and
+bash/zsh/fish completions. git uses it as `diff.tool` and `diff.external`, as on core
+([home/.gitconfig](home/.gitconfig)).
+
 podman's `containers-common` needs `net-firewall/iptables[nftables]`
 ([portage/package.use/podman](portage/package.use/podman)).
 
@@ -152,5 +168,5 @@ Keys and SSH config stay on the machine; this repo is public. Layout, for refere
 - The MikroTik key is shared with core (`id_ed25519_mikrotik`).
 - Host keys were taken from core's `known_hosts`, not accepted on first use.
 - `gh` authenticated with `--git-protocol ssh --skip-ssh-key`.
-- Global git config: [home/.gitconfig](home/.gitconfig). Core's codediff/delta settings are left
-  out until codediff is installed.
+- Global git config: [home/.gitconfig](home/.gitconfig). omnidiff (codediff's new name) replaces
+  core's codediff difftool/external settings; core's `[delta]` block is left out (no pager uses it).
