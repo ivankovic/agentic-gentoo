@@ -1,6 +1,7 @@
 app-admin/sudo
 app-editors/neovim
 app-eselect/eselect-repository
+app-misc/brightnessctl
 app-portage/eix
 app-portage/gentoolkit
 dev-util/github-cli
@@ -21,6 +22,7 @@ media-fonts/noto
 media-fonts/noto-emoji
 media-fonts/symbols-nerd-font
 media-libs/libva-intel-media-driver
+media-sound/playerctl
 media-video/pipewire
 media-video/wireplumber
 net-misc/networkmanager

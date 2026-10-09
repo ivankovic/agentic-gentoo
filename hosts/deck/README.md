@@ -56,15 +56,15 @@ LUKS and filesystem UUIDs. Replace them on any other machine.
 - **User** is `m`, not `marko`.
 - **Fonts.** Added `media-fonts/symbols-nerd-font`, `noto` and `noto-emoji`; without an icon font the
   default waybar config shows squares. fontconfig maps sans-serif, serif and monospace to Iosevka.
-- **Extra keywords:** `gui-wm/niri` and `gui-apps/fuzzel` need `~amd64`.
+- **Extra keywords:** `gui-wm/niri`, `gui-apps/fuzzel` and `app-misc/brightnessctl` (GURU) need `~amd64`.
 - **Extra packages** in world beyond the runbook: `www-client/firefox-bin`, `sys-fs/udisks`,
   `sys-boot/efibootmgr`, `dev-util/github-cli`; `app-crypt/pinentry -qt6`.
 
 ## Status
 
 - Phases 0–7: done.
-- Phase 8: done except `app-misc/brightnessctl` (GURU, needs `~amd64`), so brightness keys don't
-  work yet. `fwupdmgr` reports no firmware updates.
+- Phase 8: done. Volume, brightness and media keys use niri's default binds (`wpctl`,
+  `brightnessctl`, `playerctl`). `fwupdmgr` reports no firmware updates.
 - Phase 9: in progress. Done: SSH keys, git, `gh`, repos cloned to `~/src/<repo>` (same flat
   layout as domaci). Next: rustup, mold, cmake, ninja, tio, cargo config.
 
