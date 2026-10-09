@@ -55,8 +55,7 @@ PanelWindow {
         Text {
             anchors.right: parent.right
             text: Qt.formatDateTime(clock.date, "HH:mm")
-            color: Theme.parchment
-            opacity: 0.92
+            color: Theme.antique
             font.family: Theme.serif
             font.pixelSize: 30
         }
@@ -76,8 +75,7 @@ PanelWindow {
 
             Text {
                 text: Qt.formatDateTime(clock.date, "dddd, d MMMM")
-                color: Theme.linen
-                opacity: 0.85
+                color: Theme.antique
                 font.family: Theme.serif
                 font.italic: true
                 font.pixelSize: 13

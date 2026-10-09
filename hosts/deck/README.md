@@ -77,6 +77,7 @@ in each config; [quickshell/Theme.qml](home/.config/quickshell/Theme.qml) is the
 | taupe / linen | `#8a7866` / `#c9b89f` | muted and secondary text |
 | parchment | `#ebdfca` | text |
 | brass | `#c9a46a` | accent: focus ring, highlights, active toggles |
+| antique | `#a67c45` | deeper brass for the floating clock, legible on light and dark windows |
 | oxblood · sage · ochre · slate | `#b0645a` `#9ea67e` `#d6ac63` `#8b9eab` | red, green, yellow, blue |
 
 - **Shell.** waybar and fuzzel are gone. Quickshell ([home/.config/quickshell](home/.config/quickshell/))

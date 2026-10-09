@@ -16,6 +16,7 @@ Singleton {
     readonly property color parchment: "#ebdfca"
 
     readonly property color brass: "#c9a46a"
+    readonly property color antique: "#a67c45" // deeper brass; reads on light and dark
     readonly property color rose: "#c08a7e"
     readonly property color oxblood: "#b0645a"
     readonly property color sage: "#9ea67e"
