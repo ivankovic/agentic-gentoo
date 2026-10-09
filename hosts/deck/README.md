@@ -85,11 +85,20 @@ in each config; [quickshell/Theme.qml](home/.config/quickshell/Theme.qml) is the
 | oxblood · sage · ochre · slate | `#b0645a` `#9ea67e` `#d6ac63` `#8b9eab` | red, green, yellow, blue |
 
 - **Shell.** waybar and fuzzel are gone. Quickshell ([home/.config/quickshell](home/.config/quickshell/))
-  draws a click-through clock in the top-right on the top layer, so fullscreen windows cover it, and
-  the Mod+D omni panel: clock, battery, Wi-Fi, Bluetooth, power profile and keep-awake toggles,
-  volume and brightness, now playing; typing searches apps, actions (lock, suspend, power, toggles,
-  profiles, screenshot) and evaluates arithmetic. The panel blurs what's behind it
-  (ext-background-effect, supported by niri 26.04).
+  runs as a systemd user service that restarts on failure
+  ([quickshell.service](home/.config/systemd/user/quickshell.service); enable once with
+  `systemctl --user enable --now quickshell.service`). It draws:
+  - a click-through clock in the top-right on the top layer, so fullscreen windows cover it. It
+    shows the keyboard layout when it isn't US, a coffee cup while keep-awake is on, and the battery
+    level in oxblood below 15%. Notifications go out at 15% and 5%.
+  - an OSD near the bottom for volume, brightness and layout changes. The brightness keys go through
+    `qs ipc call brightness up|down` so it sees them, falling back to `brightnessctl`.
+  - the Mod+D omni panel: clock, battery, Wi-Fi, Bluetooth, power profile and keep-awake toggles,
+    volume and brightness, now playing. The › on the Wi-Fi and Bluetooth tiles opens a network
+    picker (with a password field for new networks) and a device list (search, pair, connect).
+    Typing searches open windows (from `niri msg -j event-stream`), apps (ranked by how often they
+    were launched here), actions, and evaluates arithmetic. The panel blurs what's behind it
+    (ext-background-effect, supported by niri 26.04).
 - **GTK.** `gtk-3.0` and `gtk-4.0` prefer dark and carry `gtk.css` overrides; libadwaita takes the
   palette fully, GTK3 Adwaita only on its main surfaces. Also set once, outside the repo:
   `gsettings set org.gnome.desktop.interface color-scheme prefer-dark` (and `font-name 'Iosevka 11'`,

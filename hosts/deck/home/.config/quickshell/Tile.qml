@@ -9,7 +9,10 @@ Rectangle {
     property string label
     property string detail
     property bool active
+    // Shows a › on the right that opens a detail page.
+    property bool expandable
     signal clicked
+    signal expanded
 
     Layout.fillWidth: true
     implicitHeight: 64
@@ -24,7 +27,7 @@ Rectangle {
     RowLayout {
         anchors.fill: parent
         anchors.leftMargin: 14
-        anchors.rightMargin: 10
+        anchors.rightMargin: root.expandable ? 44 : 10
         spacing: 12
 
         Text {
@@ -64,5 +67,31 @@ Rectangle {
         hoverEnabled: true
         cursorShape: Qt.PointingHandCursor
         onClicked: root.clicked()
+    }
+
+    Rectangle {
+        visible: root.expandable
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        width: 40
+        radius: root.radius
+        color: more.containsMouse ? Qt.alpha(Theme.parchment, 0.08) : "transparent"
+
+        Text {
+            anchors.centerIn: parent
+            text: Theme.glyph(0xF0142)
+            color: Theme.linen
+            font.family: Theme.icons
+            font.pixelSize: 18
+        }
+
+        MouseArea {
+            id: more
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.expanded()
+        }
     }
 }

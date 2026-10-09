@@ -1,0 +1,15 @@
+# Clock, Mod+D omni panel and OSD (~/.config/quickshell), restarted if it crashes.
+# Enable once: systemctl --user enable --now quickshell.service
+[Unit]
+Description=Quickshell desktop shell
+PartOf=graphical-session.target
+After=graphical-session.target
+Requisite=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/qs
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

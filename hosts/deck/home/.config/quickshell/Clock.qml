@@ -52,17 +52,56 @@ PanelWindow {
             shadowVerticalOffset: 1
         }
 
-        Text {
+        Row {
             anchors.right: parent.right
-            text: Qt.formatDateTime(clock.date, "HH:mm")
-            color: Theme.antique
-            font.family: Theme.serif
-            font.pixelSize: 30
+            spacing: 10
+
+            // Below 15% and not charging: the level in oxblood next to the time.
+            Row {
+                visible: Battery.low
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 3
+
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: Theme.glyph(Battery.critical ? 0xF0083 : 0xF007A)
+                    color: Theme.oxblood
+                    font.family: Theme.icons
+                    font.pixelSize: 16
+                }
+
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: Math.round(Battery.level * 100) + "%"
+                    color: Theme.oxblood
+                    font.family: Theme.serif
+                    font.pixelSize: 16
+                }
+            }
+
+            Text {
+                text: Qt.formatDateTime(clock.date, "HH:mm")
+                color: Battery.critical ? Theme.oxblood : Theme.antique
+                font.family: Theme.serif
+                font.pixelSize: 30
+            }
         }
 
         Row {
             anchors.right: parent.right
             spacing: 6
+
+            // Only when not on the first (US) layout.
+            Text {
+                visible: Niri.layoutIndex !== 0 && Niri.layout !== ""
+                anchors.verticalCenter: parent.verticalCenter
+                text: Niri.layoutCode(Niri.layout)
+                color: Theme.antique
+                font.family: Theme.sans
+                font.pixelSize: 11
+                font.bold: true
+                font.letterSpacing: 0.8
+            }
 
             Text {
                 visible: Session.keepAwake

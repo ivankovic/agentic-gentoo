@@ -10,8 +10,9 @@ import Quickshell.Services.Mpris
 import Quickshell.Services.Pipewire
 import Quickshell.Services.UPower
 
-// Mod+D: status at a glance, plus one search field for apps and actions.
-// An empty query shows the dashboard; typing replaces it with results.
+// Mod+D: status at a glance, plus one search field for open windows, apps and
+// actions. An empty query shows the dashboard (or the Wi-Fi or Bluetooth page);
+// typing replaces it with results.
 PanelWindow {
     id: root
 
@@ -29,15 +30,20 @@ PanelWindow {
     WlrLayershell.keyboardFocus: visible ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
     BackgroundEffect.blurRegion: Region { item: card }
 
+    // "", "wifi" or "bluetooth".
+    property string page: ""
+
     function open() {
         search.text = "";
-        brightness.refresh();
+        page = "";
+        Brightness.refresh();
         visible = true;
         search.forceActiveFocus();
     }
 
     function close() {
         visible = false;
+        page = "";
     }
 
     IpcHandler {
@@ -52,6 +58,12 @@ PanelWindow {
             root.open();
             search.text = text;
         }
+
+        // Open on a page: `qs ipc call omni page wifi` or `bluetooth`.
+        function page(name: string): void {
+            root.open();
+            root.page = name;
+        }
     }
 
     // --- State ---------------------------------------------------------------
@@ -60,11 +72,6 @@ PanelWindow {
         id: clock
         precision: SystemClock.Minutes
     }
-
-    readonly property var battery: UPower.displayDevice
-    readonly property bool charging: battery.state === UPowerDeviceState.Charging
-        || battery.state === UPowerDeviceState.PendingCharge
-        || battery.state === UPowerDeviceState.FullyCharged
 
     readonly property var sink: Pipewire.defaultAudioSink
     PwObjectTracker {
@@ -79,57 +86,19 @@ PanelWindow {
 
     readonly property var player: Mpris.players.values.find(p => p.isPlaying) ?? Mpris.players.values[0] ?? null
 
-    QtObject {
-        id: brightness
-
-        property real value: 0
-
-        function refresh() {
-            reader.running = true;
-        }
-
-        function set(v) {
-            value = Math.max(0.01, v);
-            writer.restart();
-        }
-
-        property Process reader: Process {
-            // e.g. "intel_backlight,backlight,9600,50%,19200"
-            command: ["brightnessctl", "--class=backlight", "-m", "info"]
-            stdout: StdioCollector {
-                onStreamFinished: {
-                    const f = text.trim().split(",");
-                    if (f.length >= 5)
-                        brightness.value = Number(f[2]) / Number(f[4]);
-                }
-            }
-        }
-
-        // Coalesce slider drags into at most one brightnessctl call per 50 ms.
-        property Timer writer: Timer {
-            interval: 50
-            onTriggered: Quickshell.execDetached(["brightnessctl", "--class=backlight", "set", Math.round(brightness.value * 100) + "%"])
-        }
-    }
-
-    function duration(seconds) {
-        const h = Math.floor(seconds / 3600);
-        const m = Math.round((seconds % 3600) / 60);
-        return h > 0 ? `${h} h ${m} min` : `${m} min`;
-    }
-
-    readonly property string batteryDetail: {
-        if (battery.state === UPowerDeviceState.FullyCharged)
-            return "Full";
-        if (charging)
-            return battery.timeToFull > 0 ? `${duration(battery.timeToFull)} to full` : "Charging";
-        return battery.timeToEmpty > 0 ? `${duration(battery.timeToEmpty)} left` : "On battery";
-    }
-
     readonly property var profiles: [PowerProfile.PowerSaver, PowerProfile.Balanced]
         .concat(PowerProfiles.hasPerformanceProfile ? [PowerProfile.Performance] : [])
     readonly property var profileNames: ["Power saver", "Balanced", "Performance"]
     readonly property var profileIcons: [0xF032A, 0xF05D1, 0xF04C5]
+
+    // Scan for networks only while the Wi-Fi page is open; stop Bluetooth discovery on leaving.
+    onPageChanged: {
+        if (wifi)
+            wifi.scannerEnabled = page === "wifi";
+        if (bluetooth && page !== "bluetooth" && bluetooth.discovering)
+            bluetooth.discovering = false;
+        psk.network = null;
+    }
 
     // --- Search --------------------------------------------------------------
 
@@ -146,7 +115,9 @@ PanelWindow {
         { name: "Log out", keywords: "quit exit niri session", icon: 0xF0343, run: () => spawn(["niri", "msg", "action", "quit", "--skip-confirmation"]) },
         { name: "Screenshot", keywords: "capture screen", icon: 0xF0100, run: () => screenshot.start() },
         { name: Networking.wifiEnabled ? "Turn Wi-Fi off" : "Turn Wi-Fi on", keywords: "wifi wireless network", icon: 0xF05A9, run: () => Networking.wifiEnabled = !Networking.wifiEnabled },
+        { name: "Wi-Fi networks", keywords: "wifi wireless network connect ssid", icon: 0xF05A9, stay: true, run: () => { search.text = ""; page = "wifi"; } },
         { name: bluetooth?.enabled ? "Turn Bluetooth off" : "Turn Bluetooth on", keywords: "bluetooth bt", icon: 0xF00AF, run: () => { if (bluetooth) bluetooth.enabled = !bluetooth.enabled; } },
+        { name: "Bluetooth devices", keywords: "bluetooth bt headphones pair connect", icon: 0xF00AF, stay: true, run: () => { search.text = ""; page = "bluetooth"; } },
         { name: Session.keepAwake ? "Stop keeping awake" : "Keep awake", keywords: "caffeine idle inhibit", icon: 0xF0176, run: () => Session.keepAwake = !Session.keepAwake },
         { name: "Power saver", keywords: "profile battery", icon: 0xF032A, run: () => PowerProfiles.profile = PowerProfile.PowerSaver },
         { name: "Balanced", keywords: "profile power", icon: 0xF05D1, run: () => PowerProfiles.profile = PowerProfile.Balanced },
@@ -202,10 +173,19 @@ PanelWindow {
         if (r !== null)
             out.push({ name: `= ${r}`, detail: "Copy to clipboard", icon: 0xF00EC, score: 1000, run: () => spawn(["wl-copy", String(r)]) });
 
+        // Open windows rank just above launching the same app again.
+        for (const w of Niri.windows) {
+            const app = DesktopEntries.heuristicLookup(w.app_id);
+            const appName = app?.name ?? w.app_id ?? "";
+            const s = Math.max(score(w.title, q, true), score(appName, q) * 0.9, score(w.app_id, q) * 0.9);
+            if (s > 0)
+                out.push({ name: w.title || appName, detail: `${appName} · window`, image: app?.icon ?? w.app_id ?? "", score: s + 8, run: () => Niri.focusWindow(w.id) });
+        }
+
         for (const a of actions) {
             const s = Math.max(score(a.name, q, true), score(a.keywords, q) * 0.7);
             if (s > 0)
-                out.push({ name: a.name, detail: "Action", icon: a.icon, score: s + 5, run: a.run });
+                out.push({ name: a.name, detail: "Action", icon: a.icon, score: s + 5, stay: a.stay, run: a.run });
         }
 
         for (const app of DesktopEntries.applications.values) {
@@ -213,7 +193,7 @@ PanelWindow {
                 continue;
             const s = Math.max(score(app.name, q, true), score(app.genericName, q) * 0.8, score(app.keywords.join(" "), q) * 0.6);
             if (s > 0)
-                out.push({ name: app.name, detail: app.genericName || app.comment, image: app.icon, score: s, run: () => app.execute() });
+                out.push({ name: app.name, detail: app.genericName || app.comment, image: app.icon, score: s + Launches.boost(app.id), run: () => { Launches.record(app.id); app.execute(); } });
         }
 
         return out.sort((a, b) => b.score - a.score).slice(0, 8);
@@ -222,7 +202,8 @@ PanelWindow {
     function activate(item) {
         if (!item)
             return;
-        close();
+        if (!item.stay)
+            close();
         item.run();
     }
 
@@ -301,7 +282,10 @@ PanelWindow {
 
                     Keys.onPressed: event => {
                         if (event.key === Qt.Key_Escape) {
-                            root.close();
+                            if (root.page && !search.text)
+                                root.page = "";
+                            else
+                                root.close();
                         } else if (event.key === Qt.Key_Down || event.key === Qt.Key_Tab) {
                             list.incrementCurrentIndex();
                         } else if (event.key === Qt.Key_Up || event.key === Qt.Key_Backtab) {
@@ -316,7 +300,7 @@ PanelWindow {
 
                     Text {
                         visible: !search.text
-                        text: "Search apps and actions…"
+                        text: "Search windows, apps and actions…"
                         color: Theme.taupe
                         font: search.font
                     }
@@ -380,10 +364,12 @@ PanelWindow {
                         }
 
                         Text {
+                            Layout.maximumWidth: 360
                             text: row.modelData.name
                             color: Theme.parchment
                             font.family: Theme.serif
                             font.pixelSize: 15
+                            elide: Text.ElideRight
                         }
 
                         Text {
@@ -418,7 +404,7 @@ PanelWindow {
 
             // Dashboard.
             ColumnLayout {
-                visible: !list.visible
+                visible: !list.visible && root.page === ""
                 Layout.fillWidth: true
                 spacing: 16
 
@@ -447,7 +433,7 @@ PanelWindow {
                     Item { Layout.fillWidth: true }
 
                     ColumnLayout {
-                        visible: root.battery.isLaptopBattery
+                        visible: Battery.present
                         spacing: 2
 
                         RowLayout {
@@ -455,15 +441,15 @@ PanelWindow {
                             spacing: 6
 
                             Text {
-                                text: Theme.glyph(root.charging ? 0xF0084 : 0xF0079)
-                                color: root.battery.percentage < 0.15 && !root.charging ? Theme.oxblood : Theme.brass
+                                text: Theme.glyph(Battery.charging ? 0xF0084 : 0xF0079)
+                                color: Battery.low ? Theme.oxblood : Theme.brass
                                 font.family: Theme.icons
                                 font.pixelSize: 18
                             }
 
                             Text {
-                                text: Math.round(root.battery.percentage * 100) + "%"
-                                color: Theme.parchment
+                                text: Math.round(Battery.level * 100) + "%"
+                                color: Battery.low ? Theme.oxblood : Theme.parchment
                                 font.family: Theme.serif
                                 font.pixelSize: 22
                             }
@@ -471,7 +457,7 @@ PanelWindow {
 
                         Text {
                             Layout.alignment: Qt.AlignRight
-                            text: root.batteryDetail
+                            text: Battery.detail
                             color: Theme.taupe
                             font.family: Theme.sans
                             font.pixelSize: 12
@@ -492,7 +478,9 @@ PanelWindow {
                             : root.wifiNetwork ? `${root.wifiNetwork.name} · ${Math.round(root.wifiNetwork.signalStrength * 100)}%`
                             : "Not connected"
                         active: Networking.wifiEnabled
+                        expandable: true
                         onClicked: Networking.wifiEnabled = !Networking.wifiEnabled
+                        onExpanded: root.page = "wifi"
                     }
 
                     Tile {
@@ -503,7 +491,9 @@ PanelWindow {
                             : root.bluetoothConnected.length ? root.bluetoothConnected.map(d => d.name).join(", ")
                             : "No devices"
                         active: root.bluetooth?.enabled ?? false
+                        expandable: root.bluetooth !== null
                         onClicked: if (root.bluetooth) root.bluetooth.enabled = !root.bluetooth.enabled
+                        onExpanded: root.page = "bluetooth"
                     }
 
                     Tile {
@@ -537,8 +527,8 @@ PanelWindow {
 
                 SliderRow {
                     icon: 0xF00DF
-                    value: brightness.value
-                    onMoved: v => brightness.set(v)
+                    value: Brightness.value
+                    onMoved: v => Brightness.set(v)
                 }
 
                 // Now playing.
@@ -603,6 +593,272 @@ PanelWindow {
                             }
                         }
                     }
+                }
+            }
+
+            // Wi-Fi and Bluetooth pages share a header: back, title, on/off.
+            RowLayout {
+                visible: !list.visible && root.page !== ""
+                Layout.fillWidth: true
+                spacing: 10
+
+                Text {
+                    text: Theme.glyph(0xF0141)
+                    color: Theme.linen
+                    font.family: Theme.icons
+                    font.pixelSize: 22
+
+                    MouseArea {
+                        anchors.fill: parent
+                        anchors.margins: -6
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.page = ""
+                    }
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    text: root.page === "wifi" ? "Wi-Fi" : "Bluetooth"
+                    color: Theme.parchment
+                    font.family: Theme.serif
+                    font.pixelSize: 22
+                }
+
+                // Bluetooth only: look for new devices.
+                Pill {
+                    visible: root.page === "bluetooth" && (root.bluetooth?.enabled ?? false)
+                    text: root.bluetooth?.discovering ? "Searching…" : "Search"
+                    active: root.bluetooth?.discovering ?? false
+                    onClicked: root.bluetooth.discovering = !root.bluetooth.discovering
+                }
+
+                Pill {
+                    readonly property bool on: root.page === "wifi" ? Networking.wifiEnabled : (root.bluetooth?.enabled ?? false)
+                    text: on ? "On" : "Off"
+                    active: on
+                    onClicked: {
+                        if (root.page === "wifi")
+                            Networking.wifiEnabled = !Networking.wifiEnabled;
+                        else if (root.bluetooth)
+                            root.bluetooth.enabled = !root.bluetooth.enabled;
+                    }
+                }
+            }
+
+            // Password for a secured network that NetworkManager doesn't know yet.
+            RowLayout {
+                id: psk
+
+                property var network: null
+                property string error: ""
+
+                visible: !list.visible && root.page === "wifi" && network !== null
+                Layout.fillWidth: true
+                spacing: 10
+
+                Text {
+                    text: Theme.glyph(0xF033E)
+                    color: Theme.brass
+                    font.family: Theme.icons
+                    font.pixelSize: 18
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: 36
+                    radius: 8
+                    color: Qt.alpha(Theme.parchment, 0.05)
+                    border.width: 1
+                    border.color: pskInput.activeFocus ? Qt.alpha(Theme.brass, 0.6) : Qt.alpha(Theme.parchment, 0.1)
+
+                    TextInput {
+                        id: pskInput
+
+                        anchors.fill: parent
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 12
+                        verticalAlignment: TextInput.AlignVCenter
+                        echoMode: TextInput.Password
+                        color: Theme.parchment
+                        font.family: Theme.sans
+                        font.pixelSize: 14
+
+                        Keys.onReturnPressed: {
+                            psk.error = "";
+                            psk.network.connectWithPsk(text);
+                            text = "";
+                        }
+                        Keys.onEscapePressed: {
+                            psk.network = null;
+                            search.forceActiveFocus();
+                        }
+
+                        Text {
+                            visible: !pskInput.text
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: psk.error || `Password for ${psk.network?.name ?? ""}`
+                            color: psk.error ? Theme.oxblood : Theme.taupe
+                            font: pskInput.font
+                        }
+                    }
+                }
+            }
+
+            ListView {
+                id: pageList
+
+                visible: !list.visible && root.page !== ""
+                Layout.fillWidth: true
+                implicitHeight: Math.min(Math.max(contentHeight, 44), 352)
+                interactive: contentHeight > height
+                clip: true
+                spacing: 2
+
+                model: {
+                    if (root.page === "wifi") {
+                        if (!root.wifi || !Networking.wifiEnabled)
+                            return [];
+                        // Connected, then saved, then by signal.
+                        return root.wifi.networks.values
+                            .filter(n => n.name)
+                            .sort((a, b) => (b.connected - a.connected) || (b.known - a.known) || (b.signalStrength - a.signalStrength));
+                    }
+                    if (root.page === "bluetooth") {
+                        if (!root.bluetooth?.enabled)
+                            return [];
+                        return root.bluetooth.devices.values
+                            .filter(d => d.paired || d.connected || (root.bluetooth.discovering && d.deviceName))
+                            .sort((a, b) => (b.connected - a.connected) || (b.paired - a.paired) || a.name.localeCompare(b.name));
+                    }
+                    return [];
+                }
+
+                delegate: Rectangle {
+                    id: item
+
+                    required property var modelData
+                    readonly property bool isWifi: root.page === "wifi"
+                    readonly property bool busy: isWifi ? modelData.stateChanging
+                        : modelData.state === BluetoothDeviceState.Connecting || modelData.state === BluetoothDeviceState.Disconnecting || modelData.pairing
+
+                    width: pageList.width
+                    height: 44
+                    radius: 8
+                    color: hover.containsMouse ? Qt.alpha(Theme.brass, 0.12) : "transparent"
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 10
+                        anchors.rightMargin: 12
+                        spacing: 12
+
+                        Text {
+                            Layout.preferredWidth: 24
+                            horizontalAlignment: Text.AlignHCenter
+                            text: Theme.glyph(!item.isWifi ? 0xF00AF
+                                : item.modelData.signalStrength > 0.66 ? 0xF0928
+                                : item.modelData.signalStrength > 0.33 ? 0xF0925
+                                : 0xF091F)
+                            color: item.modelData.connected ? Theme.brass : Theme.linen
+                            font.family: Theme.icons
+                            font.pixelSize: 18
+                        }
+
+                        Text {
+                            Layout.maximumWidth: 320
+                            text: item.modelData.name
+                            color: Theme.parchment
+                            font.family: Theme.serif
+                            font.pixelSize: 15
+                            elide: Text.ElideRight
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: {
+                                const d = item.modelData;
+                                if (item.busy)
+                                    return d.connected ? "Disconnecting…" : "Connecting…";
+                                if (item.isWifi) {
+                                    if (d.connected)
+                                        return "Connected";
+                                    if (d.known)
+                                        return "Saved";
+                                    return d.security === WifiSecurityType.Open ? "Open" : "Secured";
+                                }
+                                if (d.connected)
+                                    return d.batteryAvailable ? `Connected · ${Math.round(d.battery * 100)}%` : "Connected";
+                                return d.paired ? "Paired" : "Pair";
+                            }
+                            color: item.modelData.connected ? Theme.brass : Theme.taupe
+                            font.family: Theme.sans
+                            font.pixelSize: 12
+                            elide: Text.ElideRight
+                        }
+
+                        Text {
+                            visible: item.isWifi && item.modelData.security !== WifiSecurityType.Open
+                            text: Theme.glyph(0xF033E)
+                            color: Theme.taupe
+                            font.family: Theme.icons
+                            font.pixelSize: 13
+                        }
+                    }
+
+                    // A device being paired from this list connects as soon as pairing succeeds.
+                    Connections {
+                        target: item.isWifi ? null : item.modelData
+                        function onPairedChanged() {
+                            if (item.modelData.paired) {
+                                item.modelData.trusted = true;
+                                item.modelData.connect();
+                            }
+                        }
+                    }
+
+                    Connections {
+                        target: item.isWifi ? item.modelData : null
+                        function onConnectionFailed(reason) {
+                            psk.network = item.modelData;
+                            psk.error = "Wrong password? Try again.";
+                            pskInput.forceActiveFocus();
+                        }
+                    }
+
+                    MouseArea {
+                        id: hover
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            const d = item.modelData;
+                            if (item.busy)
+                                return;
+                            if (d.connected) {
+                                d.disconnect();
+                            } else if (!item.isWifi) {
+                                d.paired ? d.connect() : d.pair();
+                            } else if (d.known || d.security === WifiSecurityType.Open) {
+                                d.connect();
+                            } else {
+                                psk.network = d;
+                                psk.error = "";
+                                pskInput.forceActiveFocus();
+                            }
+                        }
+                    }
+                }
+
+                Text {
+                    anchors.centerIn: parent
+                    visible: pageList.count === 0
+                    text: root.page === "wifi"
+                        ? (Networking.wifiEnabled ? "Looking for networks…" : "Wi-Fi is off.")
+                        : (root.bluetooth?.enabled ? "No paired devices. Search to find some." : "Bluetooth is off.")
+                    color: Theme.taupe
+                    font.family: Theme.serif
+                    font.italic: true
+                    font.pixelSize: 14
                 }
             }
         }
