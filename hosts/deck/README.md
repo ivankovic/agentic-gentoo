@@ -47,6 +47,10 @@ Paths mirror the `~/system` layout proposed in research overview §2.5.
 `etc/kernel/cmdline`, `etc/dracut.conf.d/10-luks.conf` and `etc/fstab` contain this machine's
 LUKS and filesystem UUIDs. Replace them on any other machine.
 
+Deploy with `./deploy.sh deck` (diff) and `./deploy.sh deck apply` from the repository root. Only
+tracked files under `home/`, `etc/` and `portage/` are installed; nothing on the system is deleted.
+Secrets (SSH keys, `gh` token, Wi-Fi passwords) stay on the machine; see [Secrets](../../README.md#secrets).
+
 ## Where deck differs from the runbook
 
 - **Keyboard.** Console and LUKS prompt use `KEYMAP=us`, not `sg`. niri uses `us,ch,hr`, US by

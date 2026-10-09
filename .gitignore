@@ -1,0 +1,65 @@
+# This repository is public. Secrets are kept out three ways: these patterns, the
+# .githooks/pre-commit and pre-push scans, and GitHub push protection.
+
+# Keys, certificates and credential stores
+.ssh/
+.gnupg/
+id_rsa*
+id_dsa*
+id_ecdsa*
+id_ed25519*
+!*.pub
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.kdbx
+*.gpg
+known_hosts*
+authorized_keys*
+.password-store/
+keyrings/
+
+# Network secrets
+system-connections/
+*.nmconnection
+*.psk
+*.8021x
+wpa_supplicant*.conf
+
+# Tokens and per-tool credentials
+.netrc
+.git-credentials
+gh/hosts.yml
+.aws/
+.kube/config
+.docker/config.json
+.npmrc
+.pypirc
+.cargo/credentials*
+rclone.conf
+.env
+.env.*
+.claude/.credentials.json
+.claude.json
+**/.claude/settings.local.json
+
+# Browser profiles and history
+.mozilla/
+mozilla/firefox/
+*_history
+.histfile
+.lesshst
+.viminfo
+shada/
+
+# System secrets
+shadow
+shadow-
+gshadow
+gshadow-
+*.luks-key*
+
+# Logs dropped by wget during emerge runs
+wget-log*

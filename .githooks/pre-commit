@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Block commits that stage secrets. Enable once per clone: git config core.hooksPath .githooks
+exec "$(git rev-parse --show-toplevel)/.githooks/scan-secrets" --staged
