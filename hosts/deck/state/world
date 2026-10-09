@@ -17,6 +17,9 @@ gui-apps/wl-clipboard
 gui-libs/greetd
 gui-wm/niri
 media-fonts/iosevka
+media-fonts/noto
+media-fonts/noto-emoji
+media-fonts/symbols-nerd-font
 media-libs/libva-intel-media-driver
 media-video/pipewire
 media-video/wireplumber

@@ -30,6 +30,7 @@ Recorded 2026-10-09.
 | Packages | Official binhost, x86-64-v3; `-march=native` for source builds |
 | Network  | NetworkManager with iwd |
 | Desktop  | niri, waybar, foot, fuzzel, mako, greetd + tuigreet; GURU overlay enabled |
+| Fonts    | Iosevka everywhere (Iosevka Term for monospace); Symbols Nerd Font for icons; Noto + Noto Color Emoji as fallback |
 | Laptop   | power-profiles-daemon, thermald, fwupd, battery charge 75–80 % |
 
 ## Files
@@ -53,6 +54,8 @@ LUKS and filesystem UUIDs. Replace them on any other machine.
 - **Display scale.** No `output "eDP-1"` scale set yet; 1.25 is deferred.
 - **greetd user** is `greetd` (the Gentoo package's account), not `greeter` as in the runbook.
 - **User** is `m`, not `marko`.
+- **Fonts.** Added `media-fonts/symbols-nerd-font`, `noto` and `noto-emoji`; without an icon font the
+  default waybar config shows squares. fontconfig maps sans-serif, serif and monospace to Iosevka.
 - **Extra keywords:** `gui-wm/niri` and `gui-apps/fuzzel` need `~amd64`.
 - **Extra packages** in world beyond the runbook: `www-client/firefox-bin`, `sys-fs/udisks`,
   `sys-boot/efibootmgr`, `dev-util/github-cli`; `app-crypt/pinentry -qt6`.
