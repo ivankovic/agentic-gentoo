@@ -1,5 +1,6 @@
 [terminal]
 vt = 7
 [default_session]
-command = "tuigreet --time --remember --cmd niri-session"
+# "yellow" is the palette's ochre: the kernel cmdline sets the console colours (vt.default_*).
+command = "tuigreet --time --remember --asterisks --theme 'border=yellow;title=yellow;prompt=yellow;button=yellow;action=gray;time=gray' --cmd niri-session"
 user = "greetd"

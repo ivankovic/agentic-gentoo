@@ -29,8 +29,8 @@ Recorded 2026-10-09.
 | Kernel   | `sys-kernel/gentoo-kernel` from the binhost ([state/kernel](state/kernel)) |
 | Packages | Official binhost, x86-64-v3; `-march=native` for source builds |
 | Network  | NetworkManager with iwd |
-| Desktop  | niri, waybar, foot, fuzzel, mako, greetd + tuigreet; GURU overlay enabled |
-| Fonts    | Iosevka everywhere (Iosevka Term for monospace); Symbols Nerd Font for icons; Noto + Noto Color Emoji as fallback |
+| Desktop  | niri, quickshell (clock overlay + Mod+D omni panel), foot, mako, swaylock, greetd + tuigreet; GURU overlay enabled |
+| Fonts    | Iosevka everywhere (Iosevka Term for monospace, Iosevka Etoile for the shell's serif); Symbols Nerd Font for icons; Noto + Noto Color Emoji as fallback |
 | Laptop   | power-profiles-daemon, thermald, fwupd, battery charge 75–80 % |
 
 ## Files
@@ -54,11 +54,45 @@ LUKS and filesystem UUIDs. Replace them on any other machine.
 - **Display scale.** No `output "eDP-1"` scale set yet; 1.25 is deferred.
 - **greetd user** is `greetd` (the Gentoo package's account), not `greeter` as in the runbook.
 - **User** is `m`, not `marko`.
-- **Fonts.** Added `media-fonts/symbols-nerd-font`, `noto` and `noto-emoji`; without an icon font the
-  default waybar config shows squares. fontconfig maps sans-serif, serif and monospace to Iosevka.
-- **Extra keywords:** `gui-wm/niri`, `gui-apps/fuzzel` and `app-misc/brightnessctl` (GURU) need `~amd64`.
+- **Fonts.** Added `media-fonts/symbols-nerd-font`, `noto` and `noto-emoji` for icons and fallback.
+  fontconfig maps sans-serif, serif and monospace to Iosevka. `media-fonts/iosevka` has USE
+  `iosevka-etoile` for the serif used by the clock, panel, mako and swaylock.
+- **Extra keywords:** `gui-wm/niri`, `gui-apps/quickshell` and `app-misc/brightnessctl` (GURU) need
+  `~amd64`. quickshell is built with `-crash-handler` (avoids keywording `dev-cpp/cpptrace`) and
+  without the Hyprland, i3 and X11 modules.
 - **Extra packages** in world beyond the runbook: `www-client/firefox-bin`, `sys-fs/udisks`,
   `sys-boot/efibootmgr`, `dev-util/github-cli`; `app-crypt/pinentry -qt6`.
+
+## Theme
+
+Dark academia: walnut and leather surfaces, parchment text, brass accent. One palette, repeated by hand
+in each config; [quickshell/Theme.qml](home/.config/quickshell/Theme.qml) is the reference.
+
+| Name | Hex | Use |
+|------|-----|-----|
+| espresso | `#1c1612` | niri background, headerbars, deepest surface |
+| walnut | `#241d18` | terminal and window background |
+| leather | `#2f2620` | raised surfaces: notifications, entries, menus |
+| umber / bark | `#3d3129` / `#54453a` | borders, selection, inactive focus ring |
+| taupe / linen | `#8a7866` / `#c9b89f` | muted and secondary text |
+| parchment | `#ebdfca` | text |
+| brass | `#c9a46a` | accent: focus ring, highlights, active toggles |
+| oxblood · sage · ochre · slate | `#b0645a` `#9ea67e` `#d6ac63` `#8b9eab` | red, green, yellow, blue |
+
+- **Shell.** waybar and fuzzel are gone. Quickshell ([home/.config/quickshell](home/.config/quickshell/))
+  draws a click-through clock in the top-right on the top layer, so fullscreen windows cover it, and
+  the Mod+D omni panel: clock, battery, Wi-Fi, Bluetooth, power profile and keep-awake toggles,
+  volume and brightness, now playing; typing searches apps, actions (lock, suspend, power, toggles,
+  profiles, screenshot) and evaluates arithmetic. The panel blurs what's behind it
+  (ext-background-effect, supported by niri 26.04).
+- **GTK.** `gtk-3.0` and `gtk-4.0` prefer dark and carry `gtk.css` overrides; libadwaita takes the
+  palette fully, GTK3 Adwaita only on its main surfaces. Also set once, outside the repo:
+  `gsettings set org.gnome.desktop.interface color-scheme prefer-dark` (and `font-name 'Iosevka 11'`,
+  `monospace-font-name 'Iosevka Term 11'`), which the portal passes to Firefox and libadwaita.
+- **niri.** Brass focus ring, shadows, 10 px rounded corners, `prefer-no-csd`, espresso background.
+- **Console.** `vt.default_red/grn/blu` on the kernel command line ([etc/kernel/cmdline](etc/kernel/cmdline)
+  and dracut's `kernel_cmdline`) give every VT the foot palette from boot on: the LUKS prompt, the
+  text consoles and tuigreet, which uses ochre ("yellow") for borders and prompts.
 
 ## Status
 
