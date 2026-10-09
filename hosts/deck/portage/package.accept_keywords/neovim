@@ -1,0 +1,3 @@
+# Neovim 0.12 for nvim-treesitter (main branch); luv follows it.
+app-editors/neovim ~amd64
+dev-lua/luv ~amd64
