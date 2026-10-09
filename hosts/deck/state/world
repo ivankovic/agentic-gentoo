@@ -7,13 +7,12 @@ app-portage/gentoolkit
 dev-util/github-cli
 dev-vcs/git
 gui-apps/foot
-gui-apps/fuzzel
 gui-apps/mako
+gui-apps/quickshell
 gui-apps/swaybg
 gui-apps/swayidle
 gui-apps/swaylock
 gui-apps/tuigreet
-gui-apps/waybar
 gui-apps/wl-clipboard
 gui-libs/greetd
 gui-wm/niri
