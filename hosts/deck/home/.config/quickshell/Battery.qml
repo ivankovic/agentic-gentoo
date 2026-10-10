@@ -5,7 +5,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Services.UPower
 
-// Laptop battery state, plus a notification when it runs low.
+// Laptop battery state, a notification when it runs low, and the power profile per plug state.
 Singleton {
     id: root
 
@@ -43,6 +43,31 @@ Singleton {
         id: limiter
         onExited: root.refresh()
     }
+
+    // Power profile follows the plug: Performance on AC, Balanced on battery. Applied at startup
+    // and on every plug change; a choice made in the panel holds until the next one.
+    function applyProfile() {
+        PowerProfiles.profile = UPower.onBattery ? PowerProfile.Balanced
+            : PowerProfiles.hasPerformanceProfile ? PowerProfile.Performance : PowerProfile.Balanced;
+    }
+
+    Connections {
+        target: UPower
+        function onOnBatteryChanged() {
+            root.applyProfile();
+        }
+    }
+
+    // At startup quickshell hasn't read power-profiles-daemon's profile list yet (and refuses
+    // Performance until it has), so apply again once it arrives.
+    Connections {
+        target: PowerProfiles
+        function onHasPerformanceProfileChanged() {
+            root.applyProfile();
+        }
+    }
+
+    Component.onCompleted: applyProfile()
 
     function duration(seconds) {
         const h = Math.floor(seconds / 3600);

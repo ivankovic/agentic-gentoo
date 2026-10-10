@@ -1,0 +1,13 @@
+# Replaces the system fwupd-refresh.service, whose DynamicUser sandbox gets "Failed to connect to
+# daemon: The connection is closed" from the system bus here. As the user it works (polkit allows
+# refresh-remote for the session's user), and a failure shows in the omni panel.
+[Unit]
+Description=Refresh fwupd metadata
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/fwupdmgr refresh
+# 2: metadata already up to date.
+SuccessExitStatus=2

@@ -284,6 +284,13 @@ spawn-sh-at-startup "swaybg -m fill -i ~/.local/share/wallpapers/academia.png"
 // The omni panel's "Keep awake" toggle pauses the timeouts.
 spawn-at-startup "swayidle" "-w" "timeout" "300" "swaylock -f" "timeout" "600" "niri msg action power-off-monitors" "before-sleep" "swaylock -f" "after-resume" "qs ipc call brightness auto"
 
+// Night light: warmer colours from sunset to sunrise, computed for the Zurich area (rounded).
+spawn-at-startup "wlsunset" "-l" "47.4" "-L" "8.5"
+
+// Clipboard history for the omni panel (Mod+Alt+V). cliphist skips entries that password
+// managers mark as sensitive.
+spawn-at-startup "wl-paste" "--watch" "cliphist" "store"
+
 // To run a shell command (with variables, pipes, etc.), use spawn-sh-at-startup:
 // spawn-sh-at-startup "qs -c ~/source/qs/MyAwesomeShell"
 
@@ -626,6 +633,7 @@ binds {
 
     // Move the focused window between the floating and the tiling layout.
     Mod+V       { toggle-window-floating; }
+    Mod+Alt+V hotkey-overlay-title="Clipboard History" { spawn "qs" "ipc" "call" "omni" "page" "clipboard"; }
     Mod+Shift+V { switch-focus-between-floating-and-tiling; }
 
     // Toggle tabbed column display mode.

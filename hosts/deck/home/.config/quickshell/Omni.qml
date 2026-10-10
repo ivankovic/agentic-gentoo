@@ -30,7 +30,7 @@ PanelWindow {
     WlrLayershell.keyboardFocus: visible ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
     BackgroundEffect.blurRegion: Region { item: card }
 
-    // "", "wifi" or "bluetooth".
+    // "", "wifi", "bluetooth" or "clipboard".
     property string page: ""
 
     function open() {
@@ -38,6 +38,7 @@ PanelWindow {
         page = "";
         Brightness.refresh();
         Battery.refresh();
+        Maintenance.refresh();
         visible = true;
         search.forceActiveFocus();
     }
@@ -60,7 +61,7 @@ PanelWindow {
             search.text = text;
         }
 
-        // Open on a page: `qs ipc call omni page wifi` or `bluetooth`.
+        // Open on a page: `qs ipc call omni page wifi`, `bluetooth` or `clipboard` (Mod+Alt+V).
         function page(name: string): void {
             root.open();
             root.page = name;
@@ -108,6 +109,20 @@ PanelWindow {
         if (bluetooth && page !== "bluetooth" && bluetooth.discovering)
             bluetooth.discovering = false;
         psk.network = null;
+        if (page === "clipboard")
+            clipList.running = true;
+    }
+
+    // Clipboard history, recorded by `wl-paste --watch cliphist store` (niri's config.kdl).
+    // cliphist skips what password managers mark as sensitive. Lines are "id<TAB>preview".
+    property var clips: []
+    Process {
+        id: clipList
+        command: ["cliphist", "list"]
+        stdout: StdioCollector {
+            onStreamFinished: root.clips = text.split("\n").filter(l => l.includes("\t"))
+                .map(l => ({ line: l, preview: l.slice(l.indexOf("\t") + 1) }))
+        }
     }
 
     // --- Search --------------------------------------------------------------
@@ -129,6 +144,9 @@ PanelWindow {
         { name: bluetooth?.enabled ? "Turn Bluetooth off" : "Turn Bluetooth on", keywords: "bluetooth bt", icon: 0xF00AF, run: () => { if (bluetooth) bluetooth.enabled = !bluetooth.enabled; } },
         { name: "Bluetooth devices", keywords: "bluetooth bt headphones pair connect", icon: 0xF00AF, stay: true, run: () => { search.text = ""; page = "bluetooth"; } },
         { name: Battery.fullCharge ? "Restore charge limit" : "Charge to 100%", keywords: "battery full charge limit threshold", icon: 0xF0084, run: () => Battery.setFullCharge(!Battery.fullCharge) },
+        { name: "Clipboard history", keywords: "clipboard paste copy cliphist", icon: 0xF0147, stay: true, run: () => { search.text = ""; page = "clipboard"; } },
+        { name: "Clear clipboard history", keywords: "clipboard wipe cliphist", icon: 0xF0147, run: () => spawn(["cliphist", "wipe"]) },
+        { name: "Maintenance details", keywords: "security advisories glsa firmware fwupd failed units updates", icon: 0xF0026, run: () => Maintenance.show() },
         { name: Session.keepAwake ? "Stop keeping awake" : "Keep awake", keywords: "caffeine idle inhibit", icon: 0xF0176, run: () => Session.keepAwake = !Session.keepAwake },
         { name: "Power saver", keywords: "profile battery", icon: 0xF032A, run: () => PowerProfiles.profile = PowerProfile.PowerSaver },
         { name: "Balanced", keywords: "profile power", icon: 0xF05D1, run: () => PowerProfiles.profile = PowerProfile.Balanced },
@@ -176,6 +194,13 @@ PanelWindow {
 
     readonly property var results: {
         const q = search.text.trim().toLowerCase();
+
+        // The clipboard page lists history, newest first; typing filters it.
+        if (page === "clipboard")
+            return clips.filter(c => c.preview.toLowerCase().includes(q)).slice(0, 8)
+                .map(c => ({ name: c.preview, detail: "", icon: 0xF0147,
+                    run: () => spawn(["sh", "-c", "printf '%s' \"$1\" | cliphist decode | wl-copy", "sh", c.line]) }));
+
         if (!q)
             return [];
 
@@ -311,7 +336,7 @@ PanelWindow {
 
                     Text {
                         visible: !search.text
-                        text: "Search windows, apps and actions…"
+                        text: root.page === "clipboard" ? "Search clipboard history…" : "Search windows, apps and actions…"
                         color: Theme.taupe
                         font: search.font
                     }
@@ -328,7 +353,7 @@ PanelWindow {
             ListView {
                 id: list
 
-                visible: search.text.trim() !== ""
+                visible: search.text.trim() !== "" || root.page === "clipboard"
                 Layout.fillWidth: true
                 implicitHeight: Math.max(contentHeight, 44)
                 interactive: false
@@ -405,7 +430,7 @@ PanelWindow {
                 Text {
                     anchors.centerIn: parent
                     visible: list.count === 0
-                    text: "Nothing in the catalogue."
+                    text: root.page === "clipboard" ? "The clipboard history is empty." : "Nothing in the catalogue."
                     color: Theme.taupe
                     font.family: Theme.serif
                     font.italic: true
@@ -490,6 +515,20 @@ PanelWindow {
                     columns: 2
                     rowSpacing: 10
                     columnSpacing: 10
+
+                    // Security advisories, firmware updates, failed units; details in a terminal.
+                    Tile {
+                        visible: Maintenance.issues.length > 0
+                        Layout.columnSpan: 2
+                        icon: 0xF0026
+                        label: Maintenance.issues[0] ?? ""
+                        detail: Maintenance.issues.slice(1).join(" · ") || "Click for details"
+                        active: true
+                        onClicked: {
+                            root.close();
+                            Maintenance.show();
+                        }
+                    }
 
                     Tile {
                         icon: Networking.wifiEnabled ? 0xF05A9 : 0xF05AA

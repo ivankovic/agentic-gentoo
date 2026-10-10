@@ -178,6 +178,38 @@ Hardening on top of the runbook (2026-10-09):
 - **Not done yet.** Secure Boot is disabled; signing the UKI with own keys (`sbctl`) plus a BIOS
   supervisor password is the next step.
 
+## Maintenance
+
+Set up on 2026-10-11. Anything that needs attention shows as a tile at the top of the Mod+D
+dashboard ([quickshell/Maintenance.qml](home/.config/quickshell/Maintenance.qml)): security
+advisories, firmware updates, failed system or user units. Clicking it opens a terminal with the
+details and the failed units' logs.
+
+- **Snapshots.** btrbk snapshots `@` and `@home` hourly into `@snapshots`, visible as
+  `/.snapshots/@.<date>` and `/.snapshots/@home.<date>` ([etc/btrbk/btrbk.conf](etc/btrbk/btrbk.conf),
+  [hourly timer](etc/systemd/system/btrbk.timer.d/hourly.conf)). Kept: everything for 2 days, then
+  48 hourly, 14 daily, 6 weekly and 3 monthly. `@var_log` and `@var_tmp` are not snapshotted.
+  btrbk works on the btrfs top level, automounted at `/mnt/btr_pool` ([etc/fstab](etc/fstab)).
+  Snapshots are on the same disk, so they are not a backup.
+- **Sync and security advisories.** [gentoo-sync.timer](etc/systemd/system/gentoo-sync.timer)
+  runs `emerge --sync` daily, then writes `glsa-check -l affected` to
+  `/var/lib/gentoo-security/affected`.
+- **Firmware.** A user timer refreshes fwupd's metadata daily
+  ([systemd/user/fwupd-refresh.timer](home/.config/systemd/user/fwupd-refresh.timer), enabled with
+  `systemctl --user enable`); the panel asks `fwupdmgr get-updates` at most hourly. The system
+  `fwupd-refresh.timer` stays disabled: its DynamicUser sandbox gets "Failed to connect to daemon:
+  The connection is closed" from the system bus.
+- **Scrub.** [btrfs-scrub.timer](etc/systemd/system/btrfs-scrub.timer) verifies every checksum on
+  `/` monthly; uncorrectable errors leave the unit failed.
+- **Power profile** follows the plug ([quickshell/Battery.qml](home/.config/quickshell/Battery.qml)):
+  Performance on AC, Balanced on battery. A choice made in the panel holds until the next plug change.
+- **Builds** run at `PORTAGE_NICENESS=10` with idle I/O ([portage/make.conf](portage/make.conf)).
+- **Night light.** wlsunset (GURU, `~amd64`), started by niri, for the Zurich area (coordinates
+  rounded to 0.1°).
+- **Clipboard history.** `wl-paste --watch cliphist store` (cliphist from GURU, `~amd64`), started by
+  niri. Mod+Alt+V opens it in the omni panel; typing filters, Enter copies. "Clear clipboard
+  history" wipes it. cliphist skips entries password managers mark as sensitive.
+
 ## Status
 
 - Phases 0–7: done.

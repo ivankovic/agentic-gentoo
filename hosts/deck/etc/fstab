@@ -25,5 +25,7 @@ UUID=9afbf261-783f-4d96-b958-ac3a73692998	/home		btrfs	noatime,compress=zstd:1,s
 UUID=9afbf261-783f-4d96-b958-ac3a73692998	/.snapshots	btrfs	noatime,compress=zstd:1,subvol=@snapshots	0 0
 UUID=9afbf261-783f-4d96-b958-ac3a73692998	/var/log	btrfs	noatime,compress=zstd:1,subvol=@var_log		0 0
 UUID=9afbf261-783f-4d96-b958-ac3a73692998	/var/tmp	btrfs	noatime,compress=zstd:1,subvol=@var_tmp		0 0
+# btrfs top level (subvolid 5) for btrbk, mounted on first access, unmounted when idle.
+UUID=9afbf261-783f-4d96-b958-ac3a73692998	/mnt/btr_pool	btrfs	noatime,compress=zstd:1,subvolid=5,noauto,x-systemd.automount,x-systemd.idle-timeout=60	0 0
 UUID=0E9D-1398					/efi		vfat	umask=0077					0 2
 

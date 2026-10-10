@@ -1,0 +1,11 @@
+# Monthly (btrfs-scrub.timer): read every block on / and verify its checksum, so silent corruption
+# shows up before it reaches snapshots and backups. Exits 3 on uncorrectable errors, which leaves
+# the unit failed and shows in the omni panel.
+[Unit]
+Description=Verify btrfs checksums on /
+
+[Service]
+Type=oneshot
+Nice=19
+IOSchedulingClass=idle
+ExecStart=/usr/bin/btrfs scrub start -B /
