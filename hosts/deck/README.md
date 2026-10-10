@@ -111,6 +111,9 @@ in each config; [quickshell/Theme.qml](home/.config/quickshell/Theme.qml) is the
   palette fully, GTK3 Adwaita only on its main surfaces. Also set once, outside the repo:
   `gsettings set org.gnome.desktop.interface color-scheme prefer-dark` (and `font-name 'Iosevka 11'`,
   `monospace-font-name 'Iosevka Term 11'`), which the portal passes to Firefox and libadwaita.
+- **Portals.** [xdg-desktop-portal/niri-portals.conf](home/.config/xdg-desktop-portal/niri-portals.conf)
+  takes the file chooser from the gtk backend: the gnome one hands it to Nautilus, which isn't
+  installed, so file dialogs (Firefox's Import, Upload, Save as) silently never opened.
 - **niri.** Brass focus ring, shadows, 10 px rounded corners, `prefer-no-csd`. New windows open
   maximized (`open-maximized`, as Mod+F); floating ones are unaffected.
 - **Wallpaper.** Walnut leather with a vignette, a faint brass astrolabe and a double-rule frame,
