@@ -37,6 +37,7 @@ PanelWindow {
         search.text = "";
         page = "";
         Brightness.refresh();
+        Battery.refresh();
         visible = true;
         search.forceActiveFocus();
     }
@@ -127,6 +128,7 @@ PanelWindow {
         { name: "Wi-Fi networks", keywords: "wifi wireless network connect ssid", icon: 0xF05A9, stay: true, run: () => { search.text = ""; page = "wifi"; } },
         { name: bluetooth?.enabled ? "Turn Bluetooth off" : "Turn Bluetooth on", keywords: "bluetooth bt", icon: 0xF00AF, run: () => { if (bluetooth) bluetooth.enabled = !bluetooth.enabled; } },
         { name: "Bluetooth devices", keywords: "bluetooth bt headphones pair connect", icon: 0xF00AF, stay: true, run: () => { search.text = ""; page = "bluetooth"; } },
+        { name: Battery.fullCharge ? "Restore charge limit" : "Charge to 100%", keywords: "battery full charge limit threshold", icon: 0xF0084, run: () => Battery.setFullCharge(!Battery.fullCharge) },
         { name: Session.keepAwake ? "Stop keeping awake" : "Keep awake", keywords: "caffeine idle inhibit", icon: 0xF0176, run: () => Session.keepAwake = !Session.keepAwake },
         { name: "Power saver", keywords: "profile battery", icon: 0xF032A, run: () => PowerProfiles.profile = PowerProfile.PowerSaver },
         { name: "Balanced", keywords: "profile power", icon: 0xF05D1, run: () => PowerProfiles.profile = PowerProfile.Balanced },
@@ -470,6 +472,15 @@ PanelWindow {
                             color: Theme.taupe
                             font.family: Theme.sans
                             font.pixelSize: 12
+                        }
+
+                        // Lift the 80 % limit until the next boot.
+                        Pill {
+                            Layout.alignment: Qt.AlignRight
+                            Layout.topMargin: 4
+                            text: Battery.fullCharge ? "Charging to 100 %" : "Full charge"
+                            active: Battery.fullCharge
+                            onClicked: Battery.setFullCharge(!Battery.fullCharge)
                         }
                     }
                 }

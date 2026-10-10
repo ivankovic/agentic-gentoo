@@ -2,6 +2,7 @@ pragma Singleton
 
 import QtQuick
 import Quickshell
+import Quickshell.Io
 import Quickshell.Services.UPower
 
 // Laptop battery state, plus a notification when it runs low.
@@ -17,6 +18,32 @@ Singleton {
     readonly property bool low: present && !charging && level < 0.15
     readonly property bool critical: present && !charging && level < 0.05
 
+    // Charge limit (etc/tmpfiles.d/battery.conf): 75/80 normally, 95/100 for one full charge.
+    // The kernel wants start < end, so the order of the two writes matters.
+    readonly property string thresholds: "/sys/class/power_supply/BAT0/charge_control_"
+    readonly property bool fullCharge: parseInt(endThreshold.text()) === 100
+
+    function refresh() {
+        endThreshold.reload();
+    }
+
+    function setFullCharge(on) {
+        limiter.command = ["sh", "-c", on
+            ? `echo 100 > ${thresholds}end_threshold && echo 95 > ${thresholds}start_threshold`
+            : `echo 75 > ${thresholds}start_threshold && echo 80 > ${thresholds}end_threshold`];
+        limiter.running = true;
+    }
+
+    FileView {
+        id: endThreshold
+        path: root.thresholds + "end_threshold"
+    }
+
+    Process {
+        id: limiter
+        onExited: root.refresh()
+    }
+
     function duration(seconds) {
         const h = Math.floor(seconds / 3600);
         const m = Math.round((seconds % 3600) / 60);
@@ -26,6 +53,9 @@ Singleton {
     readonly property string detail: {
         if (device.state === UPowerDeviceState.FullyCharged)
             return "Full";
+        // On AC but held below the charge_control thresholds (75/80).
+        if (device.state === UPowerDeviceState.PendingCharge)
+            return fullCharge ? "Plugged in" : "Plugged in, charge limit";
         if (charging)
             return device.timeToFull > 0 ? `${duration(device.timeToFull)} to full` : "Charging";
         return device.timeToEmpty > 0 ? `${duration(device.timeToEmpty)} left` : "On battery";

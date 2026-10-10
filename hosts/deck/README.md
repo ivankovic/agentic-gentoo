@@ -31,7 +31,7 @@ Recorded 2026-10-09.
 | Network  | NetworkManager with iwd |
 | Desktop  | niri, quickshell (clock overlay + Mod+D omni panel), foot, mako, swaylock, greetd + tuigreet; GURU overlay enabled |
 | Fonts    | Iosevka everywhere (Iosevka Term for monospace, Iosevka Etoile for the shell's serif); Symbols Nerd Font for icons; Noto + Noto Color Emoji as fallback |
-| Laptop   | power-profiles-daemon, thermald, fwupd, battery charge 75–80 % |
+| Laptop   | power-profiles-daemon, thermald, fwupd, battery charge 75–80 % (Mod+D "Full charge" lifts it to 100 % until reboot) |
 
 ## Files
 
