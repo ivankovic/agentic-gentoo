@@ -1,0 +1,22 @@
+# Loaded by nftables.service (flush ruleset; include this file).
+# A laptop: nothing listens for the network, so drop everything inbound that isn't a reply.
+table inet filter {
+    chain input {
+        type filter hook input priority filter; policy drop;
+
+        ct state established,related accept
+        ct state invalid drop
+        iif lo accept
+
+        # ICMP: ping, path MTU discovery, and IPv6 neighbour discovery and router adverts.
+        meta l4proto { icmp, ipv6-icmp } accept
+
+        # DHCPv6 replies come from link-local servers to a request sent to multicast, which
+        # conntrack can't pair up. (DHCPv4 uses packet sockets, which bypass this table.)
+        ip6 saddr fe80::/10 udp dport 546 accept
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+    }
+}

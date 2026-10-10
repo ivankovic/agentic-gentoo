@@ -58,6 +58,10 @@ Secrets (SSH keys, `gh` token, Wi-Fi passwords) stay on the machine; see [Secret
 - **Display scale.** No `output "eDP-1"` scale set yet; 1.25 is deferred.
 - **greetd user** is `greetd` (the Gentoo package's account), not `greeter` as in the runbook.
 - **User** is `m`, not `marko`.
+- **One binhost.** The stage3 shipped `/etc/portage/binrepos.conf/gentoo.conf` (generic `x86-64`,
+  same priority as `gentoobinhost.conf`), so Portage mixed generic and v3 packages. It was moved
+  to `/etc/portage/binrepos-gentoo-generic.conf.disabled` on 2026-10-09; only
+  [portage/binrepos.conf/gentoobinhost.conf](portage/binrepos.conf/gentoobinhost.conf) (v3) is left.
 - **Fonts.** Added `media-fonts/symbols-nerd-font`, `noto` and `noto-emoji` for icons and fallback.
   fontconfig maps sans-serif, serif and monospace to Iosevka. `media-fonts/iosevka` has USE
   `iosevka-etoile` for the serif used by the clock, panel, mako and swaylock.
@@ -112,6 +116,54 @@ in each config; [quickshell/Theme.qml](home/.config/quickshell/Theme.qml) is the
 - **Console.** `vt.default_red/grn/blu` on the kernel command line ([etc/kernel/cmdline](etc/kernel/cmdline)
   and dracut's `kernel_cmdline`) give every VT the foot palette from boot on: the LUKS prompt, the
   text consoles and tuigreet, which uses ochre ("yellow") for borders and prompts.
+
+## Stability
+
+On 2026-10-09 deck reset by itself with nothing in the journal, and the next boot came up without
+Wi-Fi. What is set because of it:
+
+- **Wi-Fi.** iwd deletes and re-creates the kernel's `wlan0` at startup; once that raced
+  iwlwifi's firmware reload (`NEW_INTERFACE failed`) and NetworkManager kept `wlan0` unavailable
+  until the next reboot. [etc/iwd/main.conf](etc/iwd/main.conf) sets `DefaultInterface=*` so iwd
+  keeps the kernel's interface. Consequence: `systemctl restart iwd` leaves no Wi-Fi, because the
+  stopping iwd deletes `wlan0` and the new one will not create it. Reload the driver instead
+  (`modprobe -r iwlmvm iwlwifi && modprobe iwlwifi`) or reboot.
+  iwd also looks for that interface only once, at startup, so
+  [etc/systemd/system/iwd.service.d/wait-wlan0.conf](etc/systemd/system/iwd.service.d/wait-wlan0.conf)
+  starts it after udev has finished with `wlan0` (it once looked 0.3 s early and found nothing).
+- **Crash capture.** `efi_pstore.pstore_disable=0` on the kernel command line (the dist kernel
+  disables it by default), so a panic leaves the kernel log in EFI variables and `systemd-pstore`
+  moves it to `/var/lib/systemd/pstore/` on the next boot.
+  [etc/sysctl.d/90-crash.conf](etc/sysctl.d/90-crash.conf) turns soft and hard lockups into panics
+  and reboots 10 s after one. journald syncs every 15 s instead of every 5 min
+  ([etc/systemd/journald.conf.d/sync.conf](etc/systemd/journald.conf.d/sync.conf)).
+
+After an unexplained reset: `ls /var/lib/systemd/pstore/` and `journalctl -b -1 -k -p warning`. An
+empty pstore after a reset with no panic screen points at firmware or hardware (power, thermal,
+EC), not the kernel.
+
+## Security
+
+Hardening on top of the runbook (2026-10-09):
+
+- **One network manager.** `systemd-networkd` and its sockets and `-wait-online` are disabled
+  (`systemctl disable`, not a file here); NetworkManager with iwd manages every interface.
+- **Signed binary packages only.** `binpkg-request-signature` in `FEATURES`
+  ([portage/make.conf](portage/make.conf)): Portage refuses binhost packages without a valid
+  Gentoo signature (keyring in `/etc/portage/gnupg`, from `getuto`).
+- **No LLMNR or mDNS.** [etc/systemd/resolved.conf.d/no-multicast.conf](etc/systemd/resolved.conf.d/no-multicast.conf);
+  resolved no longer listens on 5353/5355.
+- **Firewall.** [etc/nftables/rules/main.nft](etc/nftables/rules/main.nft), loaded by
+  `nftables.service` (enabled): inbound is dropped unless it is a reply, loopback, ICMP or a
+  DHCPv6 reply; forwarding is dropped. A server started here (a dev server on `0.0.0.0`) is not
+  reachable from the network; allow its port in `input` to change that.
+- **sysctl.** [etc/sysctl.d/80-hardening.conf](etc/sysctl.d/80-hardening.conf): no ICMP redirects
+  in or out, `kptr_restrict=1`, `kexec_load_disabled=1`, `ldisc_autoload=0`, `suid_dumpable=0`.
+  `rp_filter` is already 2 on every interface (Gentoo's `50-default.conf`).
+- **Kept as is, on purpose.** `ptrace_scope=1` (gdb and `strace -p` on own processes), user
+  namespaces (Firefox's sandbox, systemd), io_uring.
+- **Not done yet.** Secure Boot is disabled; signing the UKI with own keys (`sbctl`) plus a BIOS
+  supervisor password is the next step.
 
 ## Status
 
