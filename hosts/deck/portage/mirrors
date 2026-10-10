@@ -1,0 +1,4 @@
+# Go modules (EGO_SUM ebuilds) from proxy.golang.org only. goproxy.io, the other default in
+# profiles/thirdpartymirrors, answers go-module.eclass's double-slash URLs with 200 and an HTML
+# page, which then passes as the distfile.
+goproxy https://proxy.golang.org/

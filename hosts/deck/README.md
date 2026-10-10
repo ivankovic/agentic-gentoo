@@ -197,6 +197,14 @@ friends-and-family-ca's release workflows use it), Nix.
 `~/.cargo/config.toml` links with mold but leaves out `target-cpu=native` (the runbook had it):
 these repos build binaries that ship.
 
+Go is `dev-lang/go` from Portage, in world. `GOTOOLCHAIN=local`
+([home/.config/go/env](home/.config/go/env)) stops `go` from downloading newer toolchains that a
+`go.mod` asks for. `GOPATH` stays `~/go`; `~/go/bin` is on `PATH` (in `~/.bashrc`, not tracked).
+
+Source checkouts: `~/src/<repo>` holds only my own repositories; anything authored by others is
+cloned to `~/3p/<host>/<owner>/<repo>` (e.g. `~/3p/github.com/gitleaks/gitleaks`, used to
+generate the gitleaks ebuild below).
+
 ## Local overlay
 
 [overlay/](overlay/) is the source of the `local` repository. It is deployed root-owned with
@@ -207,6 +215,7 @@ these repos build binaries that ship.
 |---|---|---|
 | `dev-util/omnidiff` | `9999` (installed, in world) | Live: clones `main`, crates from Cargo.lock at unpack; `**` keyword. Rebuild with `emerge @live-rebuild` |
 | | `0.2.0` | Upstream's release ebuild from omnidiff's `packaging/gentoo`, unchanged (still says `RUST_MIN_VER=1.88.0`; Cargo.toml needs 1.92) |
+| `dev-util/gitleaks` | `8.30.1` (in world) | Secret scanner; `.githooks/scan-secrets` runs it when installed. Go modules via `EGO_SUM` from upstream's `go.sum` (deprecated in ::gentoo, but needs no hosted dependency tarball; QA notice at unpack). `~amd64` keyword. [portage/mirrors](portage/mirrors) pins Go downloads to proxy.golang.org: goproxy.io served HTML pages for 76 of the 426 modules, which went into the first Manifest. Regenerating the Manifest: check every distfile against upstream's `go.sum` h1 hashes first |
 
 Built with Portage's Rust (rust-bin), not rustup. Installs the binary, man page and
 bash/zsh/fish completions. git uses it as `diff.tool` and `diff.external`, as on core

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+	<maintainer type="person">
+		<email>marko@ivankovic.me</email>
+		<name>Marko Ivankovic</name>
+	</maintainer>
+	<longdescription lang="en">
+		Gitleaks scans git repositories, files and stdin for hardcoded secrets such as
+		passwords, API keys and tokens. Used by this repository's pre-commit and pre-push
+		hooks (.githooks/scan-secrets) alongside its own patterns.
+	</longdescription>
+	<upstream>
+		<bugs-to>https://github.com/gitleaks/gitleaks/issues</bugs-to>
+		<remote-id type="github">gitleaks/gitleaks</remote-id>
+	</upstream>
+</pkgmetadata>
