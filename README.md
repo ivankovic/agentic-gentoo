@@ -35,3 +35,15 @@ them out:
   For a hit you have checked is a false positive: `SECRET_SCAN_BYPASS=1 git commit ...`.
   `git commit --no-verify` skips pre-commit, but pre-push still scans the commit.
 - **GitHub** secret scanning and push protection are on for the repository.
+
+## License
+
+Copyright 2026 Marko Ivankovic. Licensed under
+[Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International](LICENSE)
+(CC BY-NC-ND 4.0), except:
+
+- **Ebuilds** keep the license in their header: [gitleaks](hosts/deck/overlay/dev-util/gitleaks/)
+  GPL-2, as Gentoo ebuilds are; [omnidiff](hosts/deck/overlay/dev-util/omnidiff/) AGPL-3.0-or-later,
+  as upstream ships them.
+- **[niri's config.kdl](hosts/deck/home/.config/niri/config.kdl)** is based on niri's default
+  configuration and stays under niri's license, GPL-3.0-or-later.
