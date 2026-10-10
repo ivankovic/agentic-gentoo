@@ -71,6 +71,12 @@ Secrets (SSH keys, `gh` token, Wi-Fi passwords) stay on the machine; see [Secret
   `app-editors/neovim` (and `dev-lua/luv`) are `~amd64` for 0.12, which nvim-treesitter requires.
 - **Extra packages** in world beyond the runbook: `www-client/firefox-bin`, `sys-fs/udisks`,
   `sys-boot/efibootmgr`, `dev-util/github-cli`; `app-crypt/pinentry -qt6`.
+- **Bambu Studio** (`media-gfx/bambustudio-bin`, GURU, `~amd64`) for the Bambu Lab X1C: Bambu's
+  AppImage unpacked to `/opt`. On first login it downloads Bambu's proprietary network plugin into
+  `~/.config/BambuStudio`. Its bundled wxWidgets has no EGL, so the GL canvas needs X11: it runs
+  through `gui-apps/xwayland-satellite` (GURU, `~amd64`; niri starts it on demand) with
+  `GDK_BACKEND=x11`, set by [a desktop entry override](home/.local/share/applications/bambu-studio.desktop).
+  Without that it exits with status 255 right after startup.
 
 ## Theme
 

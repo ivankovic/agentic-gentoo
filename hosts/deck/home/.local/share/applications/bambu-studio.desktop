@@ -1,0 +1,9 @@
+# Overrides /usr/share/applications/bambu-studio.desktop: Bambu's bundled wxWidgets has no EGL,
+# so its GL canvas needs X11 (xwayland-satellite) and exits 255 on Wayland.
+[Desktop Entry]
+Name=BambuStudio
+Exec=env GDK_BACKEND=x11 bambu-studio %U
+Icon=BambuStudio
+Type=Application
+Categories=Utility;
+MimeType=x-scheme-handler/bambustudio;model/stl;application/vnd.ms-3mfdocument;application/prs.wavefront-obj;application/x-amf;
