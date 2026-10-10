@@ -81,6 +81,15 @@ PanelWindow {
     readonly property var wifi: Networking.devices.values.find(d => d.type === DeviceType.Wifi) ?? null
     readonly property var wifiNetwork: wifi ? wifi.networks.values.find(n => n.connected) ?? null : null
 
+    // A connected Ethernet device (e.g. a USB dongle); its tile shows only while there is one.
+    readonly property var wired: Networking.devices.values.find(d => d.type === DeviceType.Wired && d.connected) ?? null
+    // Link speed in Mb/s, -1 when the kernel doesn't know it.
+    readonly property int wiredSpeed: parseInt(wiredSpeedFile.text()) || -1
+    FileView {
+        id: wiredSpeedFile
+        path: root.wired ? `/sys/class/net/${root.wired.name}/speed` : ""
+    }
+
     readonly property var bluetooth: Bluetooth.defaultAdapter
     readonly property var bluetoothConnected: bluetooth ? bluetooth.devices.values.filter(d => d.connected) : []
 
@@ -494,6 +503,17 @@ PanelWindow {
                         expandable: root.bluetooth !== null
                         onClicked: if (root.bluetooth) root.bluetooth.enabled = !root.bluetooth.enabled
                         onExpanded: root.page = "bluetooth"
+                    }
+
+                    Tile {
+                        visible: root.wired !== null
+                        Layout.columnSpan: 2
+                        icon: 0xF0200
+                        label: "Ethernet"
+                        detail: !root.wired ? ""
+                            : root.wiredSpeed <= 0 ? root.wired.name
+                            : `${root.wired.name} · ${root.wiredSpeed >= 1000 ? root.wiredSpeed / 1000 + " Gb/s" : root.wiredSpeed + " Mb/s"}`
+                        active: true
                     }
 
                     Tile {

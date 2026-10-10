@@ -279,9 +279,10 @@ spawn-sh-at-startup "swaybg -m fill -i ~/.local/share/wallpapers/academia.png"
 // Quickshell (clock, Mod+D omni panel, OSD) runs as systemd/user/quickshell.service,
 // so it restarts if it crashes.
 
-// Lock after 5 min idle, monitors off after 10, lock before suspend.
-// The omni panel's "Keep awake" toggle pauses this.
-spawn-at-startup "swayidle" "-w" "timeout" "300" "swaylock -f" "timeout" "600" "niri msg action power-off-monitors" "before-sleep" "swaylock -f"
+// Lock after 5 min idle, monitors off after 10, lock before suspend, and on resume
+// set the brightness for the time of day (schedule in quickshell/Brightness.qml).
+// The omni panel's "Keep awake" toggle pauses the timeouts.
+spawn-at-startup "swayidle" "-w" "timeout" "300" "swaylock -f" "timeout" "600" "niri msg action power-off-monitors" "before-sleep" "swaylock -f" "after-resume" "qs ipc call brightness auto"
 
 // To run a shell command (with variables, pipes, etc.), use spawn-sh-at-startup:
 // spawn-sh-at-startup "qs -c ~/source/qs/MyAwesomeShell"
@@ -369,6 +370,12 @@ window-rule {
 window-rule {
     geometry-corner-radius 10
     clip-to-geometry true
+}
+
+// Open every window maximized, as Mod+F does (full width, gaps and border kept).
+// Mod+F again restores the default column width. Floating windows are unaffected.
+window-rule {
+    open-maximized true
 }
 
 binds {

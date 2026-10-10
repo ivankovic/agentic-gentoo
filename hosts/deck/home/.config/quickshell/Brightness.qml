@@ -13,6 +13,16 @@ Singleton {
 
     signal adjusted
 
+    // Brightness by time of day, applied on resume (swayidle's after-resume, see niri's
+    // config.kdl): [hour it starts, level]. Before the first entry the last one holds.
+    readonly property var schedule: [[7, 0.45], [9, 0.7], [18, 0.45], [21, 0.25]]
+
+    function auto() {
+        const hour = new Date().getHours();
+        const entry = schedule.filter(e => e[0] <= hour).pop() ?? schedule[schedule.length - 1];
+        set(entry[1]);
+    }
+
     function refresh() {
         reader.running = true;
     }
@@ -32,6 +42,10 @@ Singleton {
 
         function down(): void {
             root.set(root.value - 0.1);
+        }
+
+        function auto(): void {
+            root.auto();
         }
     }
 
