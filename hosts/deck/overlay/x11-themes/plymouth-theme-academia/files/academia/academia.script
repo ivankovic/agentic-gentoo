@@ -1,0 +1,79 @@
+# Academia: espresso background; the brass astrolabe's rete turns slowly over its fixed dial.
+# The disk passphrase prompt shows "deck", a dot per typed character and a rule beneath.
+
+Window.SetBackgroundTopColor(0.110, 0.086, 0.071);    # espresso #1c1612
+Window.SetBackgroundBottomColor(0.110, 0.086, 0.071);
+
+cx = Window.GetX() + Window.GetWidth() / 2;
+cy = Window.GetY() + Window.GetHeight() / 2 - 60;
+
+dial.image = Image("dial.png");
+dial.sprite = Sprite(dial.image);
+dial.sprite.SetPosition(cx - dial.image.GetWidth() / 2, cy - dial.image.GetHeight() / 2, 1);
+
+rete.image = Image("rete.png");
+rete.sprite = Sprite(rete.image);
+rete.sprite.SetPosition(cx - rete.image.GetWidth() / 2, cy - rete.image.GetHeight() / 2, 2);
+rete.angle = 0;
+
+# Fade in over the first half second.
+opacity = 0;
+
+fun refresh_callback() {
+    # About one turn a minute at 50 frames per second.
+    global.rete.angle += 0.0021;
+    rete.sprite.SetImage(rete.image.Rotate(global.rete.angle));
+    if (global.opacity < 1) {
+        global.opacity += 0.04;
+        dial.sprite.SetOpacity(global.opacity);
+        rete.sprite.SetOpacity(global.opacity);
+    }
+}
+Plymouth.SetRefreshFunction(refresh_callback);
+
+# Password prompt, below the dial.
+py = cy + dial.image.GetHeight() / 2 + 50;
+
+label.image = Image("label.png");
+label.sprite = Sprite(label.image);
+label.sprite.SetPosition(cx - label.image.GetWidth() / 2, py, 3);
+label.sprite.SetOpacity(0);
+
+bullet.image = Image("bullet.png");
+bullet.step = 18;
+bullet.max = 24;
+bullet.y = py + label.image.GetHeight() + 12;
+
+field.image = Image("field.png");
+field.sprite = Sprite(field.image);
+field.sprite.SetPosition(cx - field.image.GetWidth() / 2, bullet.y + bullet.image.GetHeight() + 10, 3);
+field.sprite.SetOpacity(0);
+
+for (i = 0; i < bullet.max; i++) {
+    bullets[i] = Sprite(bullet.image);
+    bullets[i].SetOpacity(0);
+}
+
+fun show_bullets(count) {
+    if (count > bullet.max) count = bullet.max;
+    x = cx - (count * bullet.step) / 2 + (bullet.step - bullet.image.GetWidth()) / 2;
+    for (i = 0; i < bullet.max; i++) {
+        bullets[i].SetPosition(x + i * bullet.step, bullet.y, 3);
+        if (i < count) bullets[i].SetOpacity(1);
+        else bullets[i].SetOpacity(0);
+    }
+}
+
+fun display_password_callback(prompt, count) {
+    label.sprite.SetOpacity(1);
+    field.sprite.SetOpacity(1);
+    show_bullets(count);
+}
+Plymouth.SetDisplayPasswordFunction(display_password_callback);
+
+fun display_normal_callback() {
+    label.sprite.SetOpacity(0);
+    field.sprite.SetOpacity(0);
+    show_bullets(0);
+}
+Plymouth.SetDisplayNormalFunction(display_normal_callback);

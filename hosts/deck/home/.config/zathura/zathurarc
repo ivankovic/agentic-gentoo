@@ -1,0 +1,42 @@
+# Dark academia palette; same values as quickshell/Theme.qml.
+# Pages are recoloured to parchment ink on walnut, keeping the hue of figures; Ctrl+R toggles
+# back to the original colours.
+set font "Iosevka Aile 11"
+set selection-clipboard clipboard
+set adjust-open "best-fit"
+set pages-per-row 1
+set scroll-page-aware true
+set window-title-basename true
+set statusbar-h-padding 12
+set statusbar-v-padding 6
+set page-padding 4
+
+set recolor true
+set recolor-keephue true
+set recolor-lightcolor "#241d18"
+set recolor-darkcolor "#ebdfca"
+
+set default-bg "#1c1612"
+set default-fg "#ebdfca"
+set statusbar-bg "#1c1612"
+set statusbar-fg "#c9b89f"
+set inputbar-bg "#241d18"
+set inputbar-fg "#ebdfca"
+set notification-bg "#2f2620"
+set notification-fg "#ebdfca"
+set notification-error-bg "#2f2620"
+set notification-error-fg "#c98073"
+set notification-warning-bg "#2f2620"
+set notification-warning-fg "#d6ac63"
+set completion-bg "#241d18"
+set completion-fg "#c9b89f"
+set completion-group-bg "#1c1612"
+set completion-group-fg "#c9a46a"
+set completion-highlight-bg "#c9a46a"
+set completion-highlight-fg "#1c1612"
+set index-bg "#241d18"
+set index-fg "#ebdfca"
+set index-active-bg "#54453a"
+set index-active-fg "#ebdfca"
+set highlight-color "rgba(201, 164, 106, 0.35)"
+set highlight-active-color "rgba(192, 138, 126, 0.45)"

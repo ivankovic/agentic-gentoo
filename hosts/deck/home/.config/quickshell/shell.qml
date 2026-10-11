@@ -8,6 +8,12 @@ ShellRoot {
         Clock {}
     }
 
+    Variants {
+        model: Quickshell.screens
+
+        Wallpaper {}
+    }
+
     Omni {}
 
     Osd {}

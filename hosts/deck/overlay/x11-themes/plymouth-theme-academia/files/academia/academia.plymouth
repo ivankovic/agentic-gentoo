@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=Academia
+Description=Espresso, with the wallpaper's brass astrolabe turning while deck boots
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/academia
+ScriptFile=/usr/share/plymouth/themes/academia/academia.script

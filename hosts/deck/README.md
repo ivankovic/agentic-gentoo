@@ -25,12 +25,12 @@ Recorded 2026-10-09.
 | Disk     | GPT: 1 GiB EFI on `/efi` + LUKS2 (argon2id) → btrfs, `noatime,compress=zstd:1` |
 | Subvols  | `@` `/`, `@home`, `@snapshots` `/.snapshots`, `@var_log`, `@var_tmp` |
 | Swap     | zram, ram/2, zstd |
-| Boot     | systemd-boot + UKI (installkernel → dracut) |
+| Boot     | systemd-boot + UKI (installkernel → dracut), Plymouth splash and passphrase prompt |
 | Kernel   | `sys-kernel/gentoo-kernel` from the binhost ([state/kernel](state/kernel)) |
 | Packages | Official binhost, x86-64-v3; `-march=native` for source builds |
 | Network  | NetworkManager with iwd |
 | Desktop  | niri, quickshell (clock overlay + Mod+D omni panel), foot, mako, swaylock, greetd + tuigreet; GURU overlay enabled |
-| Fonts    | Iosevka everywhere (Iosevka Term for monospace, Iosevka Etoile for the shell's serif); Symbols Nerd Font for icons; Noto + Noto Color Emoji as fallback |
+| Fonts    | Iosevka everywhere (Iosevka Term for monospace, Iosevka Etoile for the shell's serif, Iosevka Aile for GTK UI); Symbols Nerd Font for icons; Noto + Noto Color Emoji as fallback |
 | Laptop   | power-profiles-daemon, thermald, fwupd, battery charge 75–80 % (Mod+D "Full charge" lifts it to 100 % until reboot) |
 
 ## Files
@@ -64,13 +64,18 @@ Secrets (SSH keys, `gh` token, Wi-Fi passwords) stay on the machine; see [Secret
   [portage/binrepos.conf/gentoobinhost.conf](portage/binrepos.conf/gentoobinhost.conf) (v3) is left.
 - **Fonts.** Added `media-fonts/symbols-nerd-font`, `noto` and `noto-emoji` for icons and fallback.
   fontconfig maps sans-serif, serif and monospace to Iosevka. `media-fonts/iosevka` has USE
-  `iosevka-etoile` for the serif used by the clock, panel, mako and swaylock.
+  `iosevka-etoile` for the serif used by the clock, panel, mako and swaylock, and `iosevka-aile`
+  (proportional) for GTK menus and dialogs and Zathura.
 - **Extra keywords:** `gui-wm/niri`, `gui-apps/quickshell` and `app-misc/brightnessctl` (GURU) need
   `~amd64`. quickshell is built with `-crash-handler` (avoids keywording `dev-cpp/cpptrace`) and
   without the Hyprland, i3 and X11 modules.
   `app-editors/neovim` (and `dev-lua/luv`) are `~amd64` for 0.12, which nvim-treesitter requires.
 - **Extra packages** in world beyond the runbook: `www-client/firefox-bin`, `sys-fs/udisks`,
-  `sys-boot/efibootmgr`, `dev-util/github-cli`; `app-crypt/pinentry -qt6`.
+  `sys-boot/efibootmgr`, `dev-util/github-cli`; `app-crypt/pinentry -qt6`. For looks:
+  `sys-boot/plymouth` (`-gtk -pango`; 22.02, since 24.004 is package-masked as breaking some
+  systems) with the overlay's `x11-themes/plymouth-theme-academia`, `x11-themes/papirus-icon-theme`,
+  `x11-themes/bibata-xcursors` (GURU, `~amd64`), `app-text/zathura` with `zathura-pdf-mupdf`.
+  `gui-apps/swaybg` is gone; quickshell draws the wallpaper.
 - **Bambu Studio** (`media-gfx/bambustudio-bin`, GURU, `~amd64`) for the Bambu Lab X1C: Bambu's
   AppImage unpacked to `/opt`. On first login it downloads Bambu's proprietary network plugin into
   `~/.config/BambuStudio`. Its bundled wxWidgets has no EGL, so the GL canvas needs X11: it runs
@@ -114,21 +119,55 @@ in each config; [quickshell/Theme.qml](home/.config/quickshell/Theme.qml) is the
     were launched here), actions, and evaluates arithmetic. The panel blurs what's behind it
     (ext-background-effect, supported by niri 26.04).
 - **GTK.** `gtk-3.0` and `gtk-4.0` prefer dark and carry `gtk.css` overrides; libadwaita takes the
-  palette fully, GTK3 Adwaita only on its main surfaces. Also set once, outside the repo:
-  `gsettings set org.gnome.desktop.interface color-scheme prefer-dark` (and `font-name 'Iosevka 11'`,
-  `monospace-font-name 'Iosevka Term 11'`), which the portal passes to Firefox and libadwaita.
+  palette fully, GTK3 Adwaita only on its main surfaces. Icons are Papirus-Academia: Papirus-Dark with
+  pale brown folders, built in `~/.local/share/icons` by
+  [papirus-academia.sh](home/.local/share/icons/papirus-academia.sh) (symlinks only, the system theme
+  is untouched; rerun after Papirus updates). The cursor is Bibata Modern Amber (niri's `cursor`
+  block and settings.ini). Also set once, outside the repo:
+  `gsettings set org.gnome.desktop.interface color-scheme prefer-dark` (and `font-name 'Iosevka Aile 11'`,
+  `document-font-name 'Iosevka Etoile 11'`, `monospace-font-name 'Iosevka Term 11'`,
+  `icon-theme 'Papirus-Academia'`, `cursor-theme 'Bibata-Modern-Amber'`), which the portal passes to
+  Firefox and libadwaita.
 - **Portals.** [xdg-desktop-portal/niri-portals.conf](home/.config/xdg-desktop-portal/niri-portals.conf)
   takes the file chooser from the gtk backend: the gnome one hands it to Nautilus, which isn't
   installed, so file dialogs (Firefox's Import, Upload, Save as) silently never opened.
 - **niri.** Brass focus ring, shadows, 10 px rounded corners, `prefer-no-csd`. New windows open
-  maximized (`open-maximized`, as Mod+F); floating ones are unaffected.
+  maximized (`open-maximized`, as Mod+F); floating ones are unaffected. Unfocused windows are at 93 %
+  opacity. Windows open like ink soaking into paper (a custom shader: a ragged, brass-tinted front
+  spreads from the centre) and close the same way in reverse; movement and resize springs are a
+  little softer than the defaults.
 - **Wallpaper.** Walnut leather with a vignette, a faint brass astrolabe and a double-rule frame,
   generated by [academia.py](home/.local/share/wallpapers/academia.py) (Pillow only, fixed seeds;
-  `python3 academia.py academia.png 1920x1200`). `swaybg` draws it; a niri layer rule places it in
-  the overview backdrop, and workspaces are transparent so it shows in the gaps too.
+  `python3 academia.py academia.png 1920x1200`, and `... academia-night.png 1920x1200 night` for the
+  candlelit variant: dimmer, with a warm glow from the lower left). Quickshell draws it
+  ([Wallpaper.qml](home/.config/quickshell/Wallpaper.qml)) and fades to the night variant as the sun
+  goes from 3° above the horizon to 6° below, at the coordinates wlsunset uses. A niri layer rule
+  places it in the overview backdrop, and workspaces are transparent so it shows in the gaps too.
 - **Console.** `vt.default_red/grn/blu` on the kernel command line ([etc/kernel/cmdline](etc/kernel/cmdline)
   and dracut's `kernel_cmdline`) give every VT the foot palette from boot on: the LUKS prompt, the
   text consoles and tuigreet, which uses ochre ("yellow") for borders and prompts.
+- **Boot splash.** Plymouth (`splash` on the command line, dracut's `plymouth` module) with the
+  overlay's [academia theme](overlay/x11-themes/plymouth-theme-academia/files/academia/): the
+  wallpaper's astrolabe on espresso, its rete turning about once a minute, and "deck" with a dot per
+  typed character for the LUKS passphrase. The images are pre-rendered by `make-images.py` there.
+  [etc/plymouth/plymouthd.conf](etc/plymouth/plymouthd.conf) selects it; after changing either,
+  rebuild the UKI (`emerge --config sys-kernel/gentoo-kernel`). If the prompt ever fails to show,
+  press e in systemd-boot and add `plymouth.enable=0` (Secure Boot is off, so the UKI accepts it).
+  [plymouth-quit.service.d/retain-splash.conf](etc/systemd/system/plymouth-quit.service.d/retain-splash.conf)
+  keeps the last frame up when Plymouth quits; otherwise, with fbcon's deferred takeover, the
+  firmware's Lenovo logo reappeared between the unlock and tuigreet.
+- **Prompt.** Pure bash in [.bashrc](home/.bashrc), two lines. The first has the directory in linen,
+  the git branch in sage (with dirty, staged, untracked and stash marks, rebase/merge state, and
+  ↑/↓ against upstream), and, only when they apply, the duration of a command over 5 s, the exit
+  status and signal, background jobs, the venv and user@host over SSH. The second is a brass ❯,
+  oxblood after a failure. On the text console it drops the glyphs and the escape codes. For foot it
+  emits OSC 7 (Ctrl+Shift+N opens in the same directory) and OSC 133 (Ctrl+Shift+Z/X jump between
+  prompts, Ctrl+Shift+G copies the last command's output, bound in [foot.ini](home/.config/foot/foot.ini)),
+  and a command that ran 30 s or more raises a notification when the window isn't focused (except
+  editors, pagers, ssh and the like).
+- **PDFs.** Zathura ([zathurarc](home/.config/zathura/zathurarc)) recolours pages to parchment on
+  walnut, keeping figure hues; Ctrl+R shows the original colours. It is the default for
+  `application/pdf`.
 
 ## Stability
 
@@ -175,6 +214,14 @@ Hardening on top of the runbook (2026-10-09):
   `rp_filter` is already 2 on every interface (Gentoo's `50-default.conf`).
 - **Kept as is, on purpose.** `ptrace_scope=1` (gdb and `strace -p` on own processes), user
   namespaces (Firefox's sandbox, systemd), io_uring.
+- **Not done yet: firmware logo.** The firmware still shows the Lenovo logo at power-on. The
+  replacement is ready: `LOGO.GIF` (440×440, 50 KB, the astrolabe on black) from the Plymouth
+  theme's `make-images.py`. It can only be written during a BIOS flash, and 1.24 (N3PET33W) is
+  current and can't be reflashed over itself. So with the next release (1.25), update from Lenovo's
+  Bootable CD ISO instead of fwupd: `geteltorito -o bios.img <iso>`, write it to a USB stick, copy
+  `LOGO.GIF` into its `FLASH` folder (check the limits in `FLASH/readme.txt`; 768×480 and 60 KB
+  on the Gen 3), boot it on AC power and answer yes to the custom logo. It survives later
+  updates; answering no on a later flash restores Lenovo's.
 - **Not done yet.** Secure Boot is disabled; signing the UKI with own keys (`sbctl`) plus a BIOS
   supervisor password is the next step.
 
@@ -231,6 +278,7 @@ in the home directory.
 | JS | nodejs 24 LTS (masked `>=25`; 22 isn't on the binhost) | bun (official installer, `~/.bun`), `node_modules` |
 | Python | uv | Python versions and venvs, managed by uv |
 | Other | hugo, typst, stylua, tio, go, podman (rootless) + podman-compose | — |
+| LaTeX | TeX Live collections for omnidiff's paper (acmart): `texlive-publishers`, `-latexextra`, `-pictures`, `-fontsextra`; latexmk. Not the `app-text/texlive` meta-package. `ibm-plex` fonts for the Typst slides | — |
 
 Skipped: Android SDK/JDK (eInk-markdown-editor, possibly dead), zig (only omnidiff's and
 friends-and-family-ca's release workflows use it), Nix.

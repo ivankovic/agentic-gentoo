@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Dark academia wallpaper: mottled walnut leather, a vignette, and a faint brass astrolabe.
 
-Deterministic (fixed seeds), needs only Pillow:  python3 academia.py [out.png] [WIDTHxHEIGHT]
+Deterministic (fixed seeds), needs only Pillow:  python3 academia.py [out.png] [WIDTHxHEIGHT] [night]
+"night" makes the after-dark variant: dimmer, lit by a warm candle glow from the lower left.
 Palette matches ~/.config/quickshell/Theme.qml (espresso #1c1612 .. leather #2f2620, brass #c9a46a).
 """
 import math
@@ -12,6 +13,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 OUT = sys.argv[1] if len(sys.argv) > 1 else "academia.png"
 W, H = map(int, (sys.argv[2] if len(sys.argv) > 2 else "1920x1200").split("x"))
+NIGHT = len(sys.argv) > 3 and sys.argv[3] == "night"
 
 ESPRESSO = (0x1C, 0x16, 0x12)
 WALNUT = (0x24, 0x1D, 0x18)
@@ -103,5 +105,16 @@ v = Image.new("L", (W, H), 0)
 ImageDraw.Draw(v).ellipse((-W * 0.15, -H * 0.2, W * 1.15, H * 1.2), fill=255)
 v = v.filter(ImageFilter.GaussianBlur(min(W, H) * 0.18))
 img = Image.composite(img, Image.blend(img, Image.new("RGB", (W, H), (8, 6, 5)), 0.6), v)
+
+if NIGHT:
+    # Candlelight: the room falls to about half, except a warm pool spreading from the lower left.
+    dark = Image.blend(img, Image.new("RGB", (W, H), (8, 6, 5)), 0.5)
+    r, g, b = img.split()
+    warm = Image.merge("RGB", (r.point(lambda v: v * 1.45), g.point(lambda v: v * 1.15), b.point(lambda v: v * 0.8)))
+    glow = Image.new("L", (W, H), 0)
+    gx, gy, gr = W * 0.12, H * 1.02, H * 0.95
+    ImageDraw.Draw(glow).ellipse((gx - gr, gy - gr, gx + gr, gy + gr), fill=255)
+    glow = glow.filter(ImageFilter.GaussianBlur(H * 0.3))
+    img = Image.composite(warm, dark, glow)
 
 img.save(OUT, optimize=True)
