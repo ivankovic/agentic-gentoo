@@ -199,7 +199,7 @@ PanelWindow {
         if (page === "clipboard")
             return clips.filter(c => c.preview.toLowerCase().includes(q)).slice(0, 8)
                 .map(c => ({ name: c.preview, detail: "", icon: 0xF0147,
-                    run: () => spawn(["sh", "-c", "printf '%s' \"$1\" | cliphist decode | wl-copy", "sh", c.line]) }));
+                    run: () => Session.launch(["sh", "-c", "printf '%s' \"$1\" | cliphist decode | wl-copy", "sh", c.line], "wl-copy") }));
 
         if (!q)
             return [];
@@ -207,7 +207,7 @@ PanelWindow {
         const out = [];
         const r = calculate(q);
         if (r !== null)
-            out.push({ name: `= ${r}`, detail: "Copy to clipboard", icon: 0xF00EC, score: 1000, run: () => spawn(["wl-copy", String(r)]) });
+            out.push({ name: `= ${r}`, detail: "Copy to clipboard", icon: 0xF00EC, score: 1000, run: () => Session.launch(["wl-copy", String(r)], "wl-copy") });
 
         // Open windows rank just above launching the same app again.
         for (const w of Niri.windows) {
@@ -229,7 +229,7 @@ PanelWindow {
                 continue;
             const s = Math.max(score(app.name, q, true), score(app.genericName, q) * 0.8, score(app.keywords.join(" "), q) * 0.6);
             if (s > 0)
-                out.push({ name: app.name, detail: app.genericName || app.comment, image: app.icon, score: s + Launches.boost(app.id), run: () => { Launches.record(app.id); app.execute(); } });
+                out.push({ name: app.name, detail: app.genericName || app.comment, image: app.icon, score: s + Launches.boost(app.id), run: () => { Launches.record(app.id); Session.launchApp(app); } });
         }
 
         return out.sort((a, b) => b.score - a.score).slice(0, 8);

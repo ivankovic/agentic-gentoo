@@ -32,14 +32,14 @@ Singleton {
 
     // Details in a terminal: the advisories, firmware and failed units with their logs.
     function show() {
-        Quickshell.execDetached(["foot", "-T", "maintenance", "sh", "-c", `
+        Session.launch(["foot", "-T", "maintenance", "sh", "-c", `
             echo '# Security advisories'; glsa-check -l affected -n 2>/dev/null
             echo; echo '# Firmware'; fwupdmgr get-updates --no-unreported-check 2>&1
             echo; echo '# Failed units'; systemctl --failed --no-pager; systemctl --user --failed --no-pager
             for u in $(systemctl --failed --no-legend --plain | cut -d' ' -f1); do
                 echo; journalctl -u "$u" -n 15 --no-pager
             done
-            echo; read -r -p 'Press Enter to close.' _`]);
+            echo; read -r -p 'Press Enter to close.' _`], "maintenance");
     }
 
     FileView {

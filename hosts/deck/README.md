@@ -55,7 +55,7 @@ Secrets (SSH keys, `gh` token, Wi-Fi passwords) stay on the machine; see [Secret
 
 - **Keyboard.** Console and LUKS prompt use `KEYMAP=us`, not `sg`. niri uses `us,ch,hr`, US by
   default; Mod+Space / Mod+Shift+Space cycle layouts.
-- **Display scale.** No `output "eDP-1"` scale set yet; 1.25 is deferred.
+- **Display scale.** 1.25 (1536×960 logical), set in niri's `output "eDP-1"` block.
 - **greetd user** is `greetd` (the Gentoo package's account), not `greeter` as in the runbook.
 - **User** is `m`, not `marko`.
 - **One binhost.** The stage3 shipped `/etc/portage/binrepos.conf/gentoo.conf` (generic `x86-64`,
@@ -116,7 +116,10 @@ in each config; [quickshell/Theme.qml](home/.config/quickshell/Theme.qml) is the
     Ethernet with its link speed (only while connected), volume and brightness, now playing. The › on the Wi-Fi and Bluetooth tiles opens a network
     picker (with a password field for new networks) and a device list (search, pair, connect).
     Typing searches open windows (from `niri msg -j event-stream`), apps (ranked by how often they
-    were launched here), actions, and evaluates arithmetic. The panel blurs what's behind it
+    were launched here), actions, and evaluates arithmetic. Apps start in their own systemd scope
+    (`app-quickshell-<id>-<n>.scope` under app.slice, `Session.launch`), not in quickshell.service:
+    otherwise their memory counted as the shell's (Firefox made it look like 4 GB) and restarting
+    the shell killed them. The panel blurs what's behind it
     (ext-background-effect, supported by niri 26.04).
 - **GTK.** `gtk-3.0` and `gtk-4.0` prefer dark and carry `gtk.css` overrides; libadwaita takes the
   palette fully, GTK3 Adwaita only on its main surfaces. Icons are Papirus-Academia: Papirus-Dark with
