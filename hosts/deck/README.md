@@ -156,9 +156,14 @@ in each config; [quickshell/Theme.qml](home/.config/quickshell/Theme.qml) is the
   [etc/plymouth/plymouthd.conf](etc/plymouth/plymouthd.conf) selects it; after changing either,
   rebuild the UKI (`emerge --config sys-kernel/gentoo-kernel`). If the prompt ever fails to show,
   press e in systemd-boot and add `plymouth.enable=0` (Secure Boot is off, so the UKI accepts it).
-  [plymouth-quit.service.d/retain-splash.conf](etc/systemd/system/plymouth-quit.service.d/retain-splash.conf)
-  keeps the last frame up when Plymouth quits; otherwise, with fbcon's deferred takeover, the
-  firmware's Lenovo logo reappeared between the unlock and tuigreet.
+  Between the unlock and tuigreet the firmware's Lenovo logo shows for a moment: fbcon takes the
+  console over lazily, so the framebuffer falls back to what the firmware drew. Accepted; it goes
+  with the firmware logo below. Don't use `plymouth quit --retain-splash` (a plymouth-quit drop-in)
+  against it: that leaves the console in graphics mode, tuigreet never becomes visible, and the
+  machine looks hung after the unlock (2026-10-11, repaired from a live USB).
+  For anything Plymouth breaks after the unlock, the escape is `plymouth.enable=0` at the
+  systemd-boot menu (e). The "-noplymouth" UKI only avoids Plymouth in the initramfs; the root
+  filesystem still starts it.
 - **Prompt.** Pure bash in [.bashrc](home/.bashrc), two lines. The first has the directory in linen,
   the git branch in sage (with dirty, staged, untracked and stash marks, rebase/merge state, and
   ↑/↓ against upstream), and, only when they apply, the duration of a command over 5 s, the exit
