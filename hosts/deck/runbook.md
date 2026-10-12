@@ -1,7 +1,7 @@
-# Runbook summary — ThinkPad T14s Gen 4
+# Install runbook — ThinkPad T14s Gen 4
 
-Condensed from the doc "Gentoo install runbook — ThinkPad T14s Gen 4"
-as written before the install. What deck actually runs, and where it differs, is in [README.md](README.md).
+How deck was installed, condensed. `<your username>` stands for the account you create; the
+configuration this leads to, and everything set up since, is in [README.md](README.md).
 
 ## Decisions
 
@@ -14,7 +14,7 @@ as written before the install. What deck actually runs, and where it differs, is
 | Boot     | systemd-boot + UKI built by dracut via installkernel |
 | Kernel   | `sys-kernel/gentoo-kernel` (dist-kernel), from binhost |
 | Packages | Official binhost x86-64-v3 + source; profile `default/linux/amd64/23.0/desktop/systemd` |
-| Desktop  | niri (Wayland), waybar, foot, fuzzel, mako, greetd + tuigreet |
+| Desktop  | niri (Wayland), quickshell, foot, mako, greetd + tuigreet |
 
 ## Phases
 
@@ -24,10 +24,10 @@ as written before the install. What deck actually runs, and where it differs, is
 - **3 Stage 3** — desktop-systemd stage3, gpg verify, extract with xattrs, `arch-chroot`.
 - **4 Portage** — `-march=native -O2`, `MAKEOPTS="-j20 -l18"`, `FEATURES="getbinpkg"`, binhost x86-64-v3 + `getuto`, cpuid2cpuflags, firmware licences, locales (en_US, de_CH, hr_HR), `emerge -avuDN @world`.
 - **5 Kernel/boot** — linux-firmware, sof-firmware, intel-microcode; `/etc/dracut.conf.d/10-luks.conf` with `kernel_cmdline="rd.luks.name=<LUKS-UUID>=root root=/dev/mapper/root rootflags=subvol=@ rw quiet"`; `/etc/kernel/cmdline`; `bootctl install`; `emerge --config sys-kernel/gentoo-kernel` rebuilds the UKI.
-- **6 System config** — fstab with btrfs/EFI UUIDs, Europe/Zurich, hostname t14s, `KEYMAP=sg` (console + LUKS prompt), NetworkManager + iwd, zram-generator, sudo for wheel, user in wheel/video/audio/input/dialout/plugdev.
+- **6 System config** — fstab with btrfs/EFI UUIDs, Europe/Zurich, hostname deck, `KEYMAP=us` (console + LUKS prompt), NetworkManager + iwd, zram-generator, sudo for wheel, `useradd -m -G wheel,video,audio,input,dialout,plugdev <your username>`.
 - **7 First boot** — verify cmdline, btrfs mounts, zram, discards, `journalctl -b -p err`, `bootctl status`.
-- **8 Laptop + desktop** — power-profiles-daemon, thermald, fwupd, bluez, pipewire/wireplumber, brightnessctl, intel media driver; battery thresholds 75/80 via `/etc/tmpfiles.d/battery.conf`; GURU overlay; niri + companions; greetd/tuigreet.
-- **9 Dev tools** — rustup, mold, cmake, ninja, pkgconf, tio; `~/.cargo/config.toml` uses mold + target-cpu=native; cargo-nextest; OmniDiff build benchmark vs domaci.
+- **8 Laptop + desktop** — power-profiles-daemon, thermald, fwupd, bluez, pipewire/wireplumber, brightnessctl, intel media driver; battery thresholds 75/80 via `/etc/tmpfiles.d/battery.conf`; GURU overlay; niri + companions; greetd/tuigreet (greetd runs as the package's `greetd` account).
+- **9 Dev tools** — rustup, mold, cmake, ninja, pkgconf, tio; `~/.cargo/config.toml` uses mold; cargo-nextest; OmniDiff build benchmark vs domaci.
 
 ## Recovery (from live USB)
 

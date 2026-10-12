@@ -1,8 +1,7 @@
 # deck — ThinkPad T14s Gen 4
 
-First real-hardware install for agentic-gentoo, done by hand from the runbook
-"Gentoo install runbook — ThinkPad T14s Gen 4" (Phases 0–9), summarised in [runbook.md](runbook.md).
-This directory records what was actually configured, so the installer can be checked against it.
+First real-hardware install for agentic-gentoo, done from the install runbook in
+[runbook.md](runbook.md) (Phases 0–9). This directory is deck's configuration.
 
 Recorded 2026-10-09.
 
@@ -41,7 +40,7 @@ Paths mirror the `~/system` layout proposed in research overview §2.5.
 |------|-------------|
 | `portage/` | `/etc/portage/` |
 | `etc/` | `/etc/` |
-| `home/` | `~` (user `m`) |
+| `home/` | `~` (your user's home) |
 | `state/world` | `/var/lib/portage/world` (observed, not deployed) |
 | `recovery/` | the recovery system on `nvme0n1p3`, built and installed by its own scripts (not by deploy.sh); see [recovery/README.md](recovery/README.md) |
 
@@ -52,13 +51,12 @@ Deploy with `./deploy.sh deck` (diff) and `./deploy.sh deck apply` from the repo
 tracked files under `home/`, `etc/` and `portage/` are installed; nothing on the system is deleted.
 Secrets (SSH keys, `gh` token, Wi-Fi passwords) stay on the machine; see [Secrets](../../README.md#secrets).
 
-## Where deck differs from the runbook
+## Configuration notes
 
-- **Keyboard.** Console and LUKS prompt use `KEYMAP=us`, not `sg`. niri uses `us,ch,hr`, US by
+- **Keyboard.** Console and LUKS prompt use `KEYMAP=us`. niri uses `us,ch,hr`, US by
   default; Mod+Space / Mod+Shift+Space cycle layouts.
 - **Display scale.** 1.25 (1536×960 logical), set in niri's `output "eDP-1"` block.
-- **greetd user** is `greetd` (the Gentoo package's account), not `greeter` as in the runbook.
-- **User** is `m`, not `marko`.
+- **greetd user** is `greetd`, the Gentoo package's account.
 - **One binhost.** The stage3 shipped `/etc/portage/binrepos.conf/gentoo.conf` (generic `x86-64`,
   same priority as `gentoobinhost.conf`), so Portage mixed generic and v3 packages. It was moved
   to `/etc/portage/binrepos-gentoo-generic.conf.disabled` on 2026-10-09; only
@@ -71,12 +69,11 @@ Secrets (SSH keys, `gh` token, Wi-Fi passwords) stay on the machine; see [Secret
   `~amd64`. quickshell is built with `-crash-handler` (avoids keywording `dev-cpp/cpptrace`) and
   without the Hyprland, i3 and X11 modules.
   `app-editors/neovim` (and `dev-lua/luv`) are `~amd64` for 0.12, which nvim-treesitter requires.
-- **Extra packages** in world beyond the runbook: `www-client/firefox-bin`, `sys-fs/udisks`,
+- **Extra packages** in world: `www-client/firefox-bin`, `sys-fs/udisks`,
   `sys-boot/efibootmgr`, `dev-util/github-cli`; `app-crypt/pinentry -qt6`. For looks:
   `sys-boot/plymouth` (`-gtk -pango`; 22.02, since 24.004 is package-masked as breaking some
   systems) with the overlay's `x11-themes/plymouth-theme-academia`, `x11-themes/papirus-icon-theme`,
   `x11-themes/bibata-xcursors` (GURU, `~amd64`), `app-text/zathura` with `zathura-pdf-mupdf`.
-  `gui-apps/swaybg` is gone; quickshell draws the wallpaper.
 - **Bambu Studio** (`media-gfx/bambustudio-bin`, GURU, `~amd64`) for the Bambu Lab X1C: Bambu's
   AppImage unpacked to `/opt`. On first login it downloads Bambu's proprietary network plugin into
   `~/.config/BambuStudio`. Its bundled wxWidgets has no EGL, so the GL canvas needs X11: it runs
@@ -101,7 +98,7 @@ in each config; [quickshell/Theme.qml](home/.config/quickshell/Theme.qml) is the
 | antique | `#a67c45` | deeper brass for the floating clock, legible on light and dark windows |
 | oxblood · sage · ochre · slate | `#b0645a` `#9ea67e` `#d6ac63` `#8b9eab` | red, green, yellow, blue |
 
-- **Shell.** waybar and fuzzel are gone. Quickshell ([home/.config/quickshell](home/.config/quickshell/))
+- **Shell.** Quickshell ([home/.config/quickshell](home/.config/quickshell/))
   runs as a systemd user service that restarts on failure
   ([quickshell.service](home/.config/systemd/user/quickshell.service); enable once with
   `systemctl --user enable --now quickshell.service`). It draws:
@@ -218,7 +215,7 @@ EC), not the kernel.
 
 ## Security
 
-Hardening on top of the runbook (2026-10-09):
+Hardening (2026-10-09):
 
 - **One network manager.** `systemd-networkd` and its sockets and `-wait-online` are disabled
   (`systemctl disable`, not a file here); NetworkManager with iwd manages every interface.
@@ -305,7 +302,7 @@ in the home directory.
 Skipped: Android SDK/JDK (eInk-markdown-editor, possibly dead), zig (only omnidiff's and
 friends-and-family-ca's release workflows use it), Nix.
 
-`~/.cargo/config.toml` links with mold but leaves out `target-cpu=native` (the runbook had it):
+`~/.cargo/config.toml` links with mold but leaves out `target-cpu=native`:
 these repos build binaries that ship.
 
 Go is `dev-lang/go` from Portage, in world. `GOTOOLCHAIN=local`
@@ -339,7 +336,7 @@ podman's `containers-common` needs `net-firewall/iptables[nftables]`
 
 Keys and SSH config stay on the machine; this repo is public. Layout, for reference:
 
-- One ed25519 key per destination, generated on deck (`m@deck`): `id_core_ed25519`,
+- One ed25519 key per destination, generated on deck (`<your username>@deck`): `id_core_ed25519`,
   `id_hetzner_ed25519`, `id_scaleway_ed25519`, `id_github_ed25519`.
 - The MikroTik key is shared with core (`id_ed25519_mikrotik`).
 - Host keys were taken from core's `known_hosts`, not accepted on first use.
