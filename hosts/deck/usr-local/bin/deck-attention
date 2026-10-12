@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 """deck-attention: things on deck that want a look, as one line each for the omni panel's
 maintenance tile (home/.config/quickshell/Maintenance.qml runs it when the panel opens).
-`deck-attention --details` explains each line, for the tile's details terminal.
+`deck-attention --details` explains each line, for the tile's details terminal, and marks the
+events (crashes, an unclean shutdown) as seen: the tile drops them until a newer one happens.
 
   repos     work that exists only on deck: a repository in ~/src with changes not committed, or
             commits on no remote, for more than a day
   drift     config files that differ between deck and the agentic-gentoo repo (`./deploy.sh`):
             edited on deck and not in the repo, or changed in the repo and not deployed
   crashes   programs that crashed (dumped core) in the last 3 days, from coredumpctl
+  unclean   the previous boot ended in a crash, reset or power loss, in the last 7 days
+            (/var/lib/deck-health/unclean, written by etc/deck-health/check.py)
   portage   no @world update for 14 days, unread Gentoo news, preserved libraries waiting for
             `emerge @preserved-rebuild`, depclean blocked; from /var/lib/deck-health/portage.json
             (etc/deck-health/portage.py, run as root after syncs and emerges)
   disk      / or /efi more than 85% full (btrfs slows down and can fail to write when nearly full;
             a full ESP fails the next kernel install)
 
-Runs as the desktop user and takes well under a second. Nothing is changed.
+Runs as the desktop user and takes well under a second. The only thing it writes is when the
+events were last seen, in ~/.local/state/deck-attention/seen.
 """
 import collections
 import datetime
@@ -29,10 +33,13 @@ HOME = pathlib.Path.home()
 SRC = HOME / "src"
 REPO = SRC / "agentic-gentoo"
 PORTAGE = pathlib.Path("/var/lib/deck-health/portage.json")
+UNCLEAN = pathlib.Path("/var/lib/deck-health/unclean")
+SEEN = pathlib.Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "deck-attention/seen"
 NEWS = pathlib.Path("/var/lib/gentoo/news")
 DAY = 86400
 REPO_GRACE = 1 * DAY
 CRASH_DAYS = 3
+UNCLEAN_DAYS = 7
 WORLD_DAYS = 14
 FULL = 85
 
@@ -101,6 +108,30 @@ def crashes():
     return found
 
 
+def seen():
+    """When the events were last looked at (epoch seconds; 0 for never)."""
+    try:
+        return float(SEEN.read_text())
+    except (OSError, ValueError):
+        return 0
+
+
+def mark_seen():
+    SEEN.parent.mkdir(parents=True, exist_ok=True)
+    tmp = SEEN.with_name("seen.new")
+    tmp.write_text(f"{time.time():.0f}\n")
+    tmp.rename(SEEN)
+
+
+def unclean():
+    """When deck-health noticed an unclean shutdown (epoch seconds), if in the last UNCLEAN_DAYS."""
+    try:
+        t = datetime.datetime.fromisoformat(UNCLEAN.read_text().strip()).timestamp()
+    except (OSError, ValueError):
+        return None
+    return t if time.time() - t < UNCLEAN_DAYS * DAY else None
+
+
 def portage():
     """[(tile line, detail)]."""
     found = []
@@ -156,18 +187,34 @@ def main():
         text += ["Config differs from the agentic-gentoo repo (cd ~/src/agentic-gentoo; ./deploy.sh deck):"]
         text += [f"  {s:9} {p}" for s, p in d]
 
+    last_seen = seen()
     c = crashes()
+    new = {p: [t for t in times if t > last_seen] for p, times in c.items()}
+    new = {p: times for p, times in new.items() if times}
+    if new:
+        lines.append("Crashed: " + ", ".join(f"{p} {len(t)}×" if len(t) > 1 else p for p, t in new.items()))
     if c:
-        lines.append("Crashed: " + ", ".join(f"{p} {len(t)}×" if len(t) > 1 else p for p, t in c.items()))
         text.append(f"Crashes in the last {CRASH_DAYS} days (coredumpctl info <program> for the stack):")
         for p, times in c.items():
-            when = ", ".join(time.strftime("%a %d %b %H:%M", time.localtime(t)) for t in times[-5:])
+            when = ", ".join(time.strftime("%a %d %b %H:%M", time.localtime(t))
+                             + (" (new)" if t > last_seen else "") for t in times[-5:])
             text.append(f"  {p}: {when}")
+
+    u = unclean()
+    if u:
+        stamp = time.strftime("%a %d %b, %H:%M", time.localtime(u))
+        if u > last_seen:
+            lines.append(f"Unclean shutdown before {stamp}")
+        text.append(f"Unclean shutdown before {stamp} (see Disk health below)")
 
     for line, detail in portage() + disks():
         lines.append(line)
         text += [line + ":", detail]
 
+    if details:
+        if c or u:
+            text.append("(Crashes and the unclean shutdown above are now marked as seen.)")
+        mark_seen()
     print("\n".join(text if details else lines) or ("nothing" if details else ""))
     return 0
 

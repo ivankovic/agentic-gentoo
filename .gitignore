@@ -63,3 +63,6 @@ gshadow-
 
 # Logs dropped by wget during emerge runs
 wget-log*
+
+# Local notes, not part of the repository
+/OVERVIEW.md

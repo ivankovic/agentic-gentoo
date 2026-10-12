@@ -296,8 +296,8 @@ it opens a terminal with the details and the failed units' logs.
   every 6 h; [check.py](etc/deck-health/check.py)): btrfs's on-disk error counters, disk errors in
   the kernel log, and the SSD's health log (`sys-apps/nvme-cli`): critical warning, spare, wear,
   media errors. The SSD also counts shutdowns it wasn't warned of; when that goes up, the previous
-  boot ended in a crash, reset or power loss: the panel says so for a week and a scrub starts.
-  btrfs needs no repair pass after a crash (it mounts at its last commit); the offline
+  boot ended in a crash, reset or power loss: the panel says so for a week (until seen) and a
+  scrub starts. btrfs needs no repair pass after a crash (it mounts at its last commit); the offline
   `btrfs check --readonly` is `deck-mount check` in the recovery system. Report:
   `/var/lib/deck-health/report`.
 - **ESP copy.** The EFI system partition is FAT (no checksums) and holds every kernel and the
@@ -310,7 +310,9 @@ it opens a terminal with the details and the failed units' logs.
     for more than a day;
   - config drift: files that differ between deck and this repo (`./deploy.sh deck`);
   - programs that dumped core in the last 3 days (`coredumpctl`; dumps capped at 2 GiB by
-    [coredump.conf.d/deck.conf](etc/systemd/coredump.conf.d/deck.conf));
+    [coredump.conf.d/deck.conf](etc/systemd/coredump.conf.d/deck.conf)), and an unclean shutdown
+    in the last week. These are events: opening the details marks them as seen and the tile drops
+    them until a newer one (`~/.local/state/deck-attention/seen`);
   - the Portage lines above;
   - `/` or `/efi` over 85% full.
 - **Recovery system.** [deck-recovery-update.timer](etc/systemd/system/deck-recovery-update.timer)
