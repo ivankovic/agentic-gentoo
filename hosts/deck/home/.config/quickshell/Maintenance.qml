@@ -7,7 +7,9 @@ import Quickshell.Io
 // Things that need a human: security advisories for installed packages (written daily by
 // etc/systemd/system/gentoo-sync.service), firmware updates (fwupd) and failed systemd units
 // (btrbk, gentoo-sync, btrfs-scrub, ...), and a recovery system (p3) more than 6 weeks out of date
-// (etc/deck-recovery/refresh.sh). The omni panel shows a tile while any is pending.
+// (etc/deck-recovery/refresh.sh), and for a week after an unclean shutdown (a crash, reset or
+// power loss, noticed by etc/deck-health/check.py, which also starts a scrub). The omni panel
+// shows a tile while any is pending.
 Singleton {
     id: root
 
@@ -22,11 +24,16 @@ Singleton {
         return isNaN(t) ? -1 : Math.floor((now - t) / 86400000);
     }
 
+    // When deck-health noticed that the previous boot ended uncleanly; shown for 7 days.
+    readonly property real uncleanAt: Date.parse(unclean.text().trim())
+    readonly property bool recentUnclean: !isNaN(uncleanAt) && now - uncleanAt < 7 * 86400000
+
     readonly property var issues: [].concat(
         advisories.length ? [advisories.length === 1 ? "1 security advisory" : `${advisories.length} security advisories`] : [],
         firmware.length ? [`Firmware update: ${firmware.join(", ")}`] : [],
         failedUnits.length ? [`Failed: ${failedUnits.join(", ")}`] : [],
-        recoveryAge < 0 ? ["Recovery updates not set up"] : recoveryAge > 42 ? [`Recovery system ${recoveryAge} days old`] : [])
+        recoveryAge < 0 ? ["Recovery updates not set up"] : recoveryAge > 42 ? [`Recovery system ${recoveryAge} days old`] : [],
+        recentUnclean ? [`Unclean shutdown before ${Qt.formatDateTime(new Date(uncleanAt), "ddd d MMM, HH:mm")}`] : [])
 
     // Called when the panel opens. fwupd is asked at most hourly; the rest is cheap.
     property real firmwareCheckedAt: 0
@@ -39,7 +46,8 @@ Singleton {
         }
     }
 
-    // Details in a terminal: the advisories, firmware, failed units with their logs, and the recovery.
+    // Details in a terminal: the advisories, firmware, failed units with their logs, disk health,
+    // and the recovery.
     function show() {
         Session.launch(["foot", "-T", "maintenance", "sh", "-c", `
             echo '# Security advisories'; glsa-check -l affected -n 2>/dev/null
@@ -48,6 +56,12 @@ Singleton {
             for u in $(systemctl --failed --no-legend --plain | cut -d' ' -f1); do
                 echo; journalctl -u "$u" -n 15 --no-pager
             done
+            echo; echo '# Disk health'; cat /var/lib/deck-health/report 2>/dev/null || echo 'not checked yet'
+            if [ -s /var/lib/deck-health/unclean ]; then
+                echo "unclean shutdown noticed $(cat /var/lib/deck-health/unclean); last minutes before it:"
+                echo '  journalctl --namespace=vitals -b -1 -n 50'
+                systemctl status btrfs-scrub.service --no-pager -n 3 | sed -n '1,3p'
+            fi
             echo; echo '# Recovery system'
             echo "last updated: $(cat /var/lib/deck-recovery/updated 2>/dev/null || echo 'never (set up: sudo bash /etc/deck-recovery/refresh.sh --enroll)')"
             echo 'update now:   sudo systemctl start deck-recovery-update.service'
@@ -58,6 +72,13 @@ Singleton {
     FileView {
         id: glsa
         path: "/var/lib/gentoo-security/affected"
+        watchChanges: true
+        onFileChanged: reload()
+    }
+
+    FileView {
+        id: unclean
+        path: "/var/lib/deck-health/unclean"
         watchChanges: true
         onFileChanged: reload()
     }

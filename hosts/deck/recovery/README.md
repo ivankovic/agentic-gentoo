@@ -18,6 +18,8 @@ again).
 | `deck-mount rw` | the same, writable (after `deck-mount off` if it was open read-only) |
 | `deck-chroot` | a shell inside the main system (systemd-nspawn), for `emerge`, `dracut`, `systemctl` |
 | `deck-mount off` | unmount and close |
+| `deck-rollback` | puts the main system's root back to one of its snapshots (hourly, or from before an emerge); the broken one is kept as `@.broken.<time>` |
+| `deck-mount check` | opens it read-only without mounting and runs `btrfs check --readonly` (offline, changes nothing) |
 | `install-claude` | installs Claude Code (it isn't kept here: it would go stale and needs a login anyway) |
 
 Where to look first:
@@ -67,4 +69,4 @@ shows a failed update, and warns when the last one is over 6 weeks old or was ne
 - [install.sh](install.sh): shrinks the main partition by 32 GiB online (btrfs, then the dm-crypt
   mapping, then the partition, each checked) and puts the built root on the new p3.
 - [root/](root/): the recovery's own files: portage config, dracut, fstab, os-release, iwd,
-  autologin, and the `deck-mount`, `deck-chroot` and `install-claude` helpers.
+  autologin, and the `deck-mount`, `deck-chroot`, `deck-rollback` and `install-claude` helpers.

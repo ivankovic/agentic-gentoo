@@ -1,0 +1,10 @@
+# Two minutes after boot (out of the boot path, after the desktop is up), then every 6 hours.
+[Unit]
+Description=Check disk and filesystem health after boot and every 6 hours
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=6h
+
+[Install]
+WantedBy=timers.target

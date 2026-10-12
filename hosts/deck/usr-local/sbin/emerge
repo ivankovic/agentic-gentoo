@@ -1,9 +1,38 @@
 #!/usr/bin/env bash
-# emerge, run as root in its own scope in build.slice (memory-capped: etc/systemd/system/build.slice).
-# Found before /usr/bin/emerge on root's PATH (and sudo's). As a user, or when already in a
-# scope of build.slice, it's plain emerge. Bypass with /usr/bin/emerge.
+# emerge, run as root: first a read-only snapshot of the root, then /usr/bin/emerge in its own scope
+# in build.slice (memory-capped: etc/systemd/system/build.slice). Found before /usr/bin/emerge on
+# root's PATH (and sudo's). As a user, or when already in build.slice, it's plain emerge. Bypass
+# with /usr/bin/emerge.
+#
+# The snapshot, @snapshots/@.pre-emerge.<time>, is the exact state before the change; the last
+# 5 are kept (btrbk's hourly ones are separate and ignore these). Skipped for commands that change
+# nothing (--pretend, --search, --info, --sync, ...). Roll back from the recovery system with
+# deck-rollback. A failed snapshot is reported and the emerge goes ahead.
 if [[ $EUID != 0 ]] || grep -q '/build\.slice/' /proc/self/cgroup || ! [[ -d /run/systemd/system ]]; then
   exec /usr/bin/emerge "$@"
 fi
+
+changes=1
+for arg in "$@"; do
+  case $arg in
+    --pretend | --search | --searchdesc | --info | --help | --version | --sync | --check-news | \
+      --list-sets | --metadata | --regen | --resume-list) changes=0 ;;
+    --*) ;;
+    -*[psShV]*) changes=0 ;; # short options, also bundled: -p -pv -s -S -h -V
+  esac
+done
+
+if ((changes)); then
+  pool=/mnt/btr_pool # btrfs top level, automounted (etc/fstab)
+  snap=$pool/@snapshots/@.pre-emerge.$(date +%Y%m%dT%H%M%S)
+  if btrfs subvolume snapshot -r "$pool/@" "$snap" >/dev/null; then
+    echo "emerge: snapshot ${snap#"$pool"/}" >&2
+    ls -d "$pool"/@snapshots/@.pre-emerge.* | sort | head -n -5 |
+      while read -r old; do btrfs subvolume delete "$old" >/dev/null; done
+  else
+    echo "emerge: WARNING: no pre-emerge snapshot; going ahead" >&2
+  fi
+fi
+
 exec systemd-run --scope --quiet --collect --slice=build.slice --unit="emerge-$$.scope" \
   --description="emerge $*" -- /usr/bin/emerge "$@"

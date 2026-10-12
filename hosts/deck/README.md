@@ -258,6 +258,17 @@ details and the failed units' logs.
   48 hourly, 14 daily, 6 weekly and 3 monthly. `@var_log` and `@var_tmp` are not snapshotted.
   btrbk works on the btrfs top level, automounted at `/mnt/btr_pool` ([etc/fstab](etc/fstab)).
   Snapshots are on the same disk, so they are not a backup.
+- **Updates and rollback.** `sudo emerge` ([usr-local/sbin/emerge](usr-local/sbin/emerge)) first
+  takes a read-only snapshot of `@`, `/.snapshots/@.pre-emerge.<time>` (the last 5 kept; btrbk
+  ignores them), unless the command changes nothing (`-p`, `--search`, `--sync`, ...). To go back,
+  boot the recovery system and run `deck-rollback`: it lists the snapshots of `@`, renames `@` to
+  `@.broken.<time>` and makes the chosen snapshot the new `@`, then checks that the kernels on the
+  ESP still have their modules in it.
+- **Previous kernel kept.** Each kernel that boots far enough for the health check is recorded as
+  good, and the last two good ones are in the Portage set `@deck-kernels`
+  (`/etc/portage/sets/deck-kernels`, written by [check.py](etc/deck-health/check.py), listed in
+  `/var/lib/portage/world_sets`), so `emerge --depclean` leaves the previous kernel and its boot
+  menu entry. If a new kernel won't boot: Space at power-on, pick the older `gentoo-*` entry.
 - **Sync and security advisories.** [gentoo-sync.timer](etc/systemd/system/gentoo-sync.timer)
   runs `emerge --sync` daily, then writes `glsa-check -l affected` to
   `/var/lib/gentoo-security/affected`.
@@ -268,9 +279,19 @@ details and the failed units' logs.
   The connection is closed" from the system bus.
 - **Scrub.** [btrfs-scrub.timer](etc/systemd/system/btrfs-scrub.timer) verifies every checksum on
   `/` monthly; uncorrectable errors leave the unit failed.
+- **Disk health** ([deck-health.timer](etc/systemd/system/deck-health.timer), 2 min after boot and
+  every 6 h; [check.py](etc/deck-health/check.py)): btrfs's on-disk error counters, disk errors in
+  the kernel log, and the SSD's health log (`sys-apps/nvme-cli`): critical warning, spare, wear,
+  media errors. The SSD also counts shutdowns it wasn't warned of; when that goes up, the previous
+  boot ended in a crash, reset or power loss: the panel says so for a week and a scrub starts.
+  btrfs needs no repair pass after a crash (it mounts at its last commit); the offline
+  `btrfs check --readonly` is `deck-mount check` in the recovery system. Report:
+  `/var/lib/deck-health/report`.
 - **Recovery system.** [deck-recovery-update.timer](etc/systemd/system/deck-recovery-update.timer)
   updates the recovery on p3 about monthly, on AC; see
   [recovery/README.md](recovery/README.md#keeping-it-up-to-date).
+- **Empty battery.** UPower's critical action (2%) is `HybridSleep`, which deck can't do (no
+  hibernation), so UPower falls back to a clean power-off (`GetCriticalAction` says `PowerOff`).
 - **Power profile** follows the plug ([quickshell/Battery.qml](home/.config/quickshell/Battery.qml)):
   Performance on AC, Balanced on battery. A choice made in the panel holds until the next plug change.
 - **Builds** run at `PORTAGE_NICENESS=10` with idle I/O ([portage/make.conf](portage/make.conf)).

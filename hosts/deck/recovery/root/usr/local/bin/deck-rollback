@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# deck-rollback: put deck's root (@) back to one of its snapshots. Run with deck unmounted.
+#
+# Lists the snapshots of @ (btrbk's hourly @.<time> and the emerge wrapper's @.pre-emerge.<time>),
+# asks which, then on the btrfs top level: renames @ to @.broken.<now> and makes a writable
+# snapshot of the chosen one the new @. Nothing is deleted: to undo, do the same with @.broken.*.
+# /home, /var/log, /var/tmp and the snapshots are separate subvolumes and stay as they are.
+#
+# The kernels on the ESP aren't part of @. If the restored root lacks the modules of the kernel
+# that boots by default, it says so: pick a matching kernel in the boot menu (Space at power-on), or
+# reinstall it from inside: deck-mount rw; deck-chroot; emerge --config sys-kernel/gentoo-kernel.
+set -euo pipefail
+LUKS=/dev/disk/by-uuid/9e6393f4-5800-4971-aa10-aa2ea004c044
+TOP=/mnt/deck-top
+
+findmnt -rn /mnt/deck >/dev/null && { echo "deck-rollback: deck is mounted; run 'deck-mount off' first" >&2; exit 1; }
+if [[ -e /dev/mapper/deck ]] && cryptsetup status deck | grep -q readonly; then
+  echo "deck-rollback: deck is open read-only; run 'deck-mount off' first" >&2; exit 1
+fi
+[[ -e /dev/mapper/deck ]] || cryptsetup open "$LUKS" deck
+mkdir -p "$TOP"
+mount -o subvolid=5 /dev/mapper/deck "$TOP"
+trap 'umount "$TOP"' EXIT
+
+mapfile -t snaps < <(cd "$TOP/@snapshots" && ls -d @.* 2>/dev/null | awk -F. '{print $NF "\t" $0}' | sort | cut -f2)  # by time
+((${#snaps[@]})) || { echo "deck-rollback: no snapshots of @ in @snapshots" >&2; exit 1; }
+echo "Snapshots of the root, oldest first:"
+for i in "${!snaps[@]}"; do printf '  %3d  %s\n' "$((i + 1))" "${snaps[i]}"; done
+echo
+read -r -p "Roll back to number (Enter to cancel): " n
+[[ $n =~ ^[0-9]+$ ]] && ((n >= 1 && n <= ${#snaps[@]})) || { echo "deck-rollback: cancelled"; exit 0; }
+pick=${snaps[n - 1]}
+now=$(date +%Y%m%dT%H%M%S)
+echo
+echo "@ becomes @.broken.$now, and a writable copy of @snapshots/$pick becomes @."
+read -r -p "Type ROLLBACK to go ahead: " answer
+[[ $answer == ROLLBACK ]] || { echo "deck-rollback: cancelled; nothing changed"; exit 0; }
+
+mv "$TOP/@" "$TOP/@.broken.$now"
+btrfs subvolume snapshot "$TOP/@snapshots/$pick" "$TOP/@" >/dev/null
+echo "deck-rollback: @ is now $pick; the previous root is @.broken.$now (delete it once happy:"
+echo "  mount -o subvolid=5 /dev/mapper/deck /mnt/deck-top; btrfs subvolume delete /mnt/deck-top/@.broken.$now)"
+
+# Does the restored root have modules for the kernels on the ESP?
+echo
+ls /efi >/dev/null 2>&1 || true  # the ESP is automounted
+modules=$(ls "$TOP/@/usr/lib/modules" 2>/dev/null)
+echo "Kernel modules in the restored root: $(echo $modules)"
+for uki in /efi/EFI/Linux/gentoo-*.efi; do
+  [[ -e $uki ]] || continue
+  name=${uki##*/gentoo-}; ver=${name%.efi}; ver=${ver%%+*}
+  if grep -qx "$ver" <<<"$modules"; then echo "  ok       $ver"; else echo "  MISSING  $ver: boot another kernel, or reinstall it (see the top of this script)"; fi
+done

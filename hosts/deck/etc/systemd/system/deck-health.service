@@ -1,0 +1,14 @@
+# Disk and filesystem health (etc/deck-health/check.py), run by deck-health.timer: btrfs error
+# counters, disk errors in the kernel log, the SSD's health log, and an unclean previous shutdown,
+# which starts a scrub. A problem leaves the unit failed, which shows in the omni panel.
+[Unit]
+Description=Check disk and filesystem health
+Documentation=file:///etc/deck-health/check.py
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -I /etc/deck-health/check.py
+StateDirectory=deck-health
+Nice=19
+IOSchedulingClass=idle

@@ -2,6 +2,9 @@
 # deck-mount [rw]: open deck's main LUKS partition and mount its subvolumes under /mnt/deck.
 # Read-only by default, so looking can't change anything; `deck-mount rw` remounts writable for
 # repairs (and `deck-chroot` needs it). `deck-mount off` unmounts and closes.
+# `deck-mount check` opens it read-only without mounting and runs `btrfs check --readonly`: the
+# offline check of btrfs's metadata, which can't run on the live system. It changes nothing.
+# (Never `btrfs check --repair` without a backup and advice: it can make damage worse.)
 set -euo pipefail
 LUKS=/dev/disk/by-uuid/9e6393f4-5800-4971-aa10-aa2ea004c044
 MNT=/mnt/deck
@@ -11,6 +14,15 @@ if [[ $mode == off ]]; then
   for m in $(findmnt -rn -o TARGET | grep "^$MNT" | sort -r); do umount "$m"; done
   cryptsetup close deck 2>/dev/null || true
   echo "deck-mount: closed"; exit 0
+fi
+
+if [[ $mode == check ]]; then
+  findmnt -rn "$MNT" >/dev/null && { echo "deck-mount: mounted; run 'deck-mount off' first" >&2; exit 1; }
+  [[ -e /dev/mapper/deck ]] || cryptsetup open --readonly "$LUKS" deck
+  rc=0
+  btrfs check --readonly --progress /dev/mapper/deck || rc=$?
+  echo "deck-mount: btrfs check exited $rc ($([[ $rc == 0 ]] && echo 'no errors' || echo 'errors: see above')); 'deck-mount off' closes it"
+  exit $rc
 fi
 
 if [[ ! -e /dev/mapper/deck ]]; then
