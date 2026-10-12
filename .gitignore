@@ -66,3 +66,6 @@ wget-log*
 
 # Local notes, not part of the repository
 /OVERVIEW.md
+
+# Python bytecode
+__pycache__/
