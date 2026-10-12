@@ -130,7 +130,7 @@ cp -a /root/luks-header-deck-*.img "$mnt/root/"
 cryptsetup luksHeaderBackup "$P3" --header-backup-file "/root/luks-header-recovery-$(date +%Y%m%d).img" 2>/dev/null || true
 
 echo "7. UKI"
-"$here/update.sh" "$mnt" /efi
+"$here/../etc/deck-recovery/update.sh" "$mnt" /efi
 ls -la /efi/EFI/Linux/
 echo
 echo "Done. In the systemd-boot menu: \"Deck recovery\". The main system stays the default."

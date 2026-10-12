@@ -1,0 +1,18 @@
+# Weekly (deck-recovery-update.timer): update the recovery system on p3 and rebuild its UKI, once
+# its last update is 25 days old (see /etc/deck-recovery/refresh.sh). Needs AC and a one-time
+#   sudo bash /etc/deck-recovery/refresh.sh --enroll
+# A failure leaves the unit failed, which shows in the omni panel; so does an update over 6 weeks old.
+[Unit]
+Description=Update the recovery system on p3
+Wants=network-online.target
+After=network-online.target gentoo-sync.service
+RequiresMountsFor=/efi /var/db/repos/gentoo
+ConditionACPower=true
+
+[Service]
+Type=oneshot
+Nice=19
+IOSchedulingClass=idle
+CPUWeight=idle
+TimeoutStartSec=2h
+ExecStart=/bin/bash /etc/deck-recovery/refresh.sh

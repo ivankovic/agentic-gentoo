@@ -41,13 +41,29 @@ password and is logged in automatically on tty1: the LUKS passphrase is the gate
 The initramfs is generic, built inside systemd-nspawn, with only dm-crypt and the keyboard drivers
 (`etc/dracut.conf.d/10-recovery.conf`); the console stays on the firmware's framebuffer.
 
+## Keeping it up to date
+
+[deck-recovery-update.timer](../etc/systemd/system/deck-recovery-update.timer) runs weekly on AC
+and updates the installed recovery in place once its last update is 25 days old
+([refresh.sh](../etc/deck-recovery/refresh.sh): opens p3, update.sh, rebuilds the UKI). It opens
+p3 with a key file, `/etc/deck-recovery/p3.key`, on the main system's encrypted root; anyone who
+can read that already has the main system. Enroll it once:
+
+    sudo bash /etc/deck-recovery/refresh.sh --enroll    # asks for the recovery passphrase
+    sudo systemctl enable --now deck-recovery-update.timer
+
+`sudo bash /etc/deck-recovery/refresh.sh --force` updates now. The omni panel's maintenance tile
+shows a failed update, and warns when the last one is over 6 weeks old or was never recorded.
+
 ## Files here
 
 - [build.sh](build.sh): builds the root on the main system (default `/var/tmp/deck-recovery/root`):
   the latest stage3, checked against Gentoo's release key, then [root/](root/) on top, then update.sh.
-- [update.sh](update.sh) `<root> [esp]`: updates its packages with systemd-nspawn (binhost, the main
-  system's Gentoo repository bound read-only) and, given the ESP, builds its UKI as
-  `EFI/Linux/deck-recovery.efi`. The main system's `gentoo-*.efi` are never touched.
+  Files under root/ changed later have to be copied onto p3 by hand.
+- [../etc/deck-recovery/update.sh](../etc/deck-recovery/update.sh) `<root> [esp]`: updates its
+  packages with systemd-nspawn (binhost, the main system's Gentoo repository bound read-only) and,
+  given the ESP, builds its UKI as `EFI/Linux/deck-recovery.efi`. The main system's `gentoo-*.efi`
+  are never touched. It lives under `etc/` so deploy.sh installs it for the timer below.
 - [install.sh](install.sh): shrinks the main partition by 32 GiB online (btrfs, then the dm-crypt
   mapping, then the partition, each checked) and puts the built root on the new p3.
 - [root/](root/): the recovery's own files: portage config, dracut, fstab, os-release, iwd,

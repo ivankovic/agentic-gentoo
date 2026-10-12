@@ -248,7 +248,7 @@ Hardening (2026-10-09):
 
 Set up on 2026-10-11. Anything that needs attention shows as a tile at the top of the Mod+D
 dashboard ([quickshell/Maintenance.qml](home/.config/quickshell/Maintenance.qml)): security
-advisories, firmware updates, failed system or user units. Clicking it opens a terminal with the
+advisories, firmware updates, failed system or user units, a recovery system over 6 weeks old. Clicking it opens a terminal with the
 details and the failed units' logs.
 
 - **Snapshots.** btrbk snapshots `@` and `@home` hourly into `@snapshots`, visible as
@@ -267,6 +267,9 @@ details and the failed units' logs.
   The connection is closed" from the system bus.
 - **Scrub.** [btrfs-scrub.timer](etc/systemd/system/btrfs-scrub.timer) verifies every checksum on
   `/` monthly; uncorrectable errors leave the unit failed.
+- **Recovery system.** [deck-recovery-update.timer](etc/systemd/system/deck-recovery-update.timer)
+  updates the recovery on p3 about monthly, on AC; see
+  [recovery/README.md](recovery/README.md#keeping-it-up-to-date).
 - **Power profile** follows the plug ([quickshell/Battery.qml](home/.config/quickshell/Battery.qml)):
   Performance on AC, Balanced on battery. A choice made in the panel holds until the next plug change.
 - **Builds** run at `PORTAGE_NICENESS=10` with idle I/O ([portage/make.conf](portage/make.conf)).

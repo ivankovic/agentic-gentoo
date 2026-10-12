@@ -40,5 +40,5 @@ install -m 644 "$here/README.md" "$ROOT/usr/local/share/RECOVERY.md"
 # the LUKS passphrase is the gate. No sshd.
 chroot "$ROOT" passwd -d root >/dev/null
 
-"$here/update.sh" "$ROOT"
+"$here/../etc/deck-recovery/update.sh" "$ROOT"
 echo "build.sh: recovery root ready in $ROOT ($(du -sh "$ROOT" | cut -f1))"

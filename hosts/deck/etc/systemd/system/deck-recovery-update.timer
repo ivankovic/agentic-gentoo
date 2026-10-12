@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly check whether the recovery system needs an update
+
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=1d
+Persistent=true
+
+[Install]
+WantedBy=timers.target
