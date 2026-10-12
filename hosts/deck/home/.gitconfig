@@ -3,6 +3,8 @@
 	name = Marko Ivankovic
 [push]
 	default = simple
+	# First push of a new branch creates origin/<branch> and tracks it.
+	autoSetupRemote = true
 [merge]
 	conflictStyle = zdiff3
 [init]

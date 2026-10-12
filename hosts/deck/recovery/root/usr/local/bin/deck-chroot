@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# deck-chroot: a shell inside the main system (mounted writable by `deck-mount rw`), with /dev,
+# /proc, /sys, /run and the ESP, for emerge, dracut, systemctl --root and the like.
+set -euo pipefail
+MNT=/mnt/deck
+findmnt -rn -O rw "$MNT" >/dev/null || { echo "deck-chroot: run 'deck-mount rw' first" >&2; exit 1; }
+exec systemd-nspawn --quiet --directory="$MNT" --bind=/efi --bind-ro=/etc/resolv.conf --as-pid2 -- /bin/bash -l

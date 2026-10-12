@@ -1,0 +1,10 @@
+# Deck recovery's identity: PRETTY_NAME is the systemd-boot menu title of deck-recovery.efi. The
+# rest is Gentoo's (systemd's build reads BUG_REPORT_URL from here for its boot stub's SBAT data).
+NAME="Deck recovery"
+PRETTY_NAME="Deck recovery"
+ID=gentoo
+VERSION_ID=2.18
+ANSI_COLOR="1;33"
+HOME_URL="https://github.com/ivankovic/agentic-gentoo/tree/main/hosts/deck/recovery"
+SUPPORT_URL="https://www.gentoo.org/support/"
+BUG_REPORT_URL="https://bugs.gentoo.org/"

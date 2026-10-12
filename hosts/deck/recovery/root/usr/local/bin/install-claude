@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Claude Code isn't kept here (it would go stale and needs a login anyway): install it when needed.
+set -euo pipefail
+curl -fsSL https://claude.ai/install.sh | bash
+echo "Then: export PATH=\$HOME/.local/bin:\$PATH; claude"

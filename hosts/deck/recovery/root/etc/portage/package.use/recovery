@@ -1,0 +1,6 @@
+# systemd-cryptsetup for the LUKS prompt in the initramfs; the UEFI stub to build the UKI.
+sys-apps/systemd boot cryptsetup
+# deck-recovery.efi is built by recovery/update.sh, not by the kernel's install hooks, so the
+# main system's gentoo-*.efi in the same ESP is never touched.
+sys-kernel/gentoo-kernel-bin -initramfs
+sys-kernel/installkernel -dracut -uki -systemd-boot

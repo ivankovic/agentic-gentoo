@@ -1,0 +1,5 @@
+# Deck recovery. / is the ext4 inside LUKS partition 3 (opened by the initramfs as "recovery");
+# the ESP is shared with the main system. The main system itself is mounted only on request
+# (deck-mount).
+/dev/mapper/recovery	/	ext4	noatime,errors=remount-ro	0 1
+UUID=0E9D-1398		/efi	vfat	umask=0077,noauto,x-systemd.automount	0 2

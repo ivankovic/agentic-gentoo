@@ -43,6 +43,7 @@ Paths mirror the `~/system` layout proposed in research overview §2.5.
 | `etc/` | `/etc/` |
 | `home/` | `~` (user `m`) |
 | `state/world` | `/var/lib/portage/world` (observed, not deployed) |
+| `recovery/` | the recovery system on `nvme0n1p3`, built and installed by its own scripts (not by deploy.sh); see [recovery/README.md](recovery/README.md) |
 
 `etc/kernel/cmdline`, `etc/dracut.conf.d/10-luks.conf` and `etc/fstab` contain this machine's
 LUKS and filesystem UUIDs. Replace them on any other machine.
@@ -198,7 +199,20 @@ Wi-Fi. What is set because of it:
   and reboots 10 s after one. journald syncs every 15 s instead of every 5 min
   ([etc/systemd/journald.conf.d/sync.conf](etc/systemd/journald.conf.d/sync.conf)).
 
-After an unexplained reset: `ls /var/lib/systemd/pstore/` and `journalctl -b -1 -k -p warning`. An
+- **Vitals.** [deck-vitals.service](etc/systemd/system/deck-vitals.service) runs
+  [vitals.py](etc/deck-vitals/vitals.py) (one Python process, no subprocesses) and logs a line of
+  hardware state every 2 s on AC, 10 s on battery: temperatures, fan, RAPL power (whole platform,
+  package, cores, uncore), power limits, CPU and GPU frequencies, load, memory, pressure, throttle
+  and PCIe error counts, battery and platform profile. It goes to its own journal namespace,
+  synced every 2 s and kept four days ([journald@vitals.conf](etc/systemd/journald@vitals.conf)).
+  About 4 ms of CPU per 10 s; the EC sensors and battery (about 1 ms each, through ACPI) are read
+  every 10 s, the SSD temperature (which wakes the drive) every 30 s.
+  Both unexplained resets (2026-10-09 during light work, 2026-10-11 under a full-core build) left
+  nothing: no kernel message, empty pstore, no firmware error record. So the kernel never saw them
+  coming, which points below it (power, firmware, a PCIe device, RAM).
+
+After an unexplained reset: `ls /var/lib/systemd/pstore/`, `journalctl -b -1 -k -p warning`, and
+`journalctl --namespace=vitals -b -1 -n 50` for the last 100 s of temperatures and power. An
 empty pstore after a reset with no panic screen points at firmware or hardware (power, thermal,
 EC), not the kernel.
 
