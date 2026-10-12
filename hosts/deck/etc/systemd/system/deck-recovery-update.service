@@ -11,6 +11,7 @@ ConditionACPower=true
 
 [Service]
 Type=oneshot
+Slice=build.slice
 Nice=19
 IOSchedulingClass=idle
 CPUWeight=idle

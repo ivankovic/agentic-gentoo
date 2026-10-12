@@ -16,7 +16,7 @@ packages=(
   sys-process/htop
 )
 
-nspawn=(systemd-nspawn --quiet --directory="$ROOT" --resolv-conf=copy-host
+nspawn=(systemd-nspawn --quiet --directory="$ROOT" --resolv-conf=copy-host --slice=build.slice
   --bind-ro=/var/db/repos/gentoo --bind=/var/cache/distfiles)
 
 "${nspawn[@]}" emerge --quiet-build --update --deep --newuse --noreplace "${packages[@]}" @world

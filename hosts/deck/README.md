@@ -39,6 +39,7 @@ Paths mirror the `~/system` layout proposed in research overview §2.5.
 | Here | Deployed to |
 |------|-------------|
 | `portage/` | `/etc/portage/` |
+| `usr-local/` | `/usr/local/` |
 | `etc/` | `/etc/` |
 | `home/` | `~` (your user's home) |
 | `state/world` | `/var/lib/portage/world` (observed, not deployed) |
@@ -48,7 +49,7 @@ Paths mirror the `~/system` layout proposed in research overview §2.5.
 LUKS and filesystem UUIDs. Replace them on any other machine.
 
 Deploy with `./deploy.sh deck` (diff) and `./deploy.sh deck apply` from the repository root. Only
-tracked files under `home/`, `etc/` and `portage/` are installed; nothing on the system is deleted.
+tracked files under `home/`, `etc/`, `portage/` and `usr-local/` are installed; nothing on the system is deleted.
 Secrets (SSH keys, `gh` token, Wi-Fi passwords) stay on the machine; see [Secrets](../../README.md#secrets).
 
 ## Configuration notes
@@ -273,6 +274,23 @@ details and the failed units' logs.
 - **Power profile** follows the plug ([quickshell/Battery.qml](home/.config/quickshell/Battery.qml)):
   Performance on AC, Balanced on battery. A choice made in the panel holds until the next plug change.
 - **Builds** run at `PORTAGE_NICENESS=10` with idle I/O ([portage/make.conf](portage/make.conf)).
+- **Memory guard** (2026-10-12), so a runaway program fails on its own instead of freezing the
+  machine into a hard reset:
+  - systemd-oomd ([oomd.conf.d/deck.conf](etc/systemd/oomd.conf.d/deck.conf)) kills the cgroup
+    reclaiming the most when the desktop session is stalled on memory over 50% of the time for
+    20 s ([user@.service.d](etc/systemd/system/user@.service.d/oomd.conf)), or the one using the
+    most swap when RAM and zram are both over 90% full ([-.slice.d](etc/systemd/system/-.slice.d/oomd.conf)).
+    niri, quickshell, PipeWire and WirePlumber ask to be spared
+    (`home/.config/systemd/user/*.service.d/oomd.conf`). Kills: `journalctl -u systemd-oomd`.
+  - That only works if work is in its own cgroup. niri's plain `spawn "foot"` left everything run in
+    a terminal inside niri.service (niri moves foot into a scope only after its shell has forked),
+    so Mod+T starts foot through `systemd-run --scope`; quickshell's launcher already does.
+  - `sudo emerge` is [usr-local/sbin/emerge](usr-local/sbin/emerge), which runs `/usr/bin/emerge`
+    in a scope in [build.slice](etc/systemd/system/build.slice): reclaimed hard above 18 GiB,
+    killed (the build, nothing else) above 24 GiB, at most 4 GiB in zram. The recovery update runs
+    there too. `/usr/bin/emerge` bypasses it.
+  - Rootless podman containers share a 10 GiB high / 14 GiB max cap
+    ([systemd/user/user.slice.d](home/.config/systemd/user/user.slice.d/limits.conf)).
 - **Night light.** wlsunset (GURU, `~amd64`), started by niri, for the Zurich area (coordinates
   rounded to 0.1°).
 - **Clipboard history.** `wl-paste --watch cliphist store` (cliphist from GURU, `~amd64`), started by

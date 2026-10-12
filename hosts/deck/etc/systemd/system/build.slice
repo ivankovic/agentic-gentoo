@@ -1,0 +1,13 @@
+# Portage builds (via /usr/local/sbin/emerge) and the recovery update run here, capped so a build
+# that balloons (parallel link steps, LTO) slows down and then fails on its own instead of taking
+# the desktop with it. Deck has 30 GiB of RAM and 15.5 GiB of zram swap, which also lives in RAM.
+#   MemoryHigh  above this the kernel reclaims hard from the build: it slows, nothing else does
+#   MemoryMax   the kernel's OOM killer acts inside this slice only: the build fails
+#   MemorySwapMax  so it can't push the rest out through zram instead
+[Unit]
+Description=Package builds
+
+[Slice]
+MemoryHigh=18G
+MemoryMax=24G
+MemorySwapMax=4G

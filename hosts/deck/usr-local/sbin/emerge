@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# emerge, run as root in its own scope in build.slice (memory-capped: etc/systemd/system/build.slice).
+# Found before /usr/bin/emerge on root's PATH (and sudo's). As a user, or when already in a
+# scope of build.slice, it's plain emerge. Bypass with /usr/bin/emerge.
+if [[ $EUID != 0 ]] || grep -q '/build\.slice/' /proc/self/cgroup || ! [[ -d /run/systemd/system ]]; then
+  exec /usr/bin/emerge "$@"
+fi
+exec systemd-run --scope --quiet --collect --slice=build.slice --unit="emerge-$$.scope" \
+  --description="emerge $*" -- /usr/bin/emerge "$@"

@@ -481,7 +481,9 @@ binds {
     Mod+Shift+Slash { show-hotkey-overlay; }
 
     // Suggested binds for running programs: terminal, app launcher, screen locker.
-    Mod+T hotkey-overlay-title="Open a Terminal: foot" { spawn "foot"; }
+    // In its own scope from the start: plain `spawn` leaves what the terminal runs in niri.service, where
+    // systemd-oomd would kill niri with it (niri moves only foot into a scope, after bash has forked).
+    Mod+T hotkey-overlay-title="Open a Terminal: foot" { spawn-sh "exec systemd-run --user --scope --slice=app.slice --collect --quiet --unit=app-foot-$$.scope -- foot"; }
     Mod+D hotkey-overlay-title="Omni Panel: Search and Status" { spawn "qs" "ipc" "call" "omni" "toggle"; }
     Super+Alt+L hotkey-overlay-title="Lock the Screen: swaylock" { spawn "swaylock"; }
 

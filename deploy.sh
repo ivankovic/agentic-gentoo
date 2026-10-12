@@ -8,6 +8,7 @@
 #   hosts/<host>/home/     -> ~
 #   hosts/<host>/etc/      -> /etc       (sudo)
 #   hosts/<host>/portage/  -> /etc/portage (sudo)
+#   hosts/<host>/usr-local/ -> /usr/local  (sudo)
 # Everything else (state/, README.md, ...) is a record, not deployed.
 #
 # Only files tracked by git are deployed, in their working-tree version. Deploying only ever goes
@@ -23,7 +24,7 @@ mode=diff
 for arg in "$@"; do
   case $arg in
     diff | apply) mode=$arg ;;
-    -h | --help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) host=$arg ;;
   esac
 done
@@ -33,12 +34,13 @@ dir=hosts/$host
 
 # Prints "<repo path>\t<target path>\t<sudo|user>" for every tracked, deployable file.
 targets() {
-  git ls-files -z -- "$dir/home" "$dir/etc" "$dir/portage" | while IFS= read -r -d '' src; do
+  git ls-files -z -- "$dir/home" "$dir/etc" "$dir/portage" "$dir/usr-local" | while IFS= read -r -d '' src; do
     rel=${src#"$dir"/}
     case $rel in
       home/*) printf '%s\t%s\tuser\n' "$src" "$HOME/${rel#home/}" ;;
       etc/*) printf '%s\t%s\tsudo\n' "$src" "/etc/${rel#etc/}" ;;
       portage/*) printf '%s\t%s\tsudo\n' "$src" "/etc/portage/${rel#portage/}" ;;
+      usr-local/*) printf '%s\t%s\tsudo\n' "$src" "/usr/local/${rel#usr-local/}" ;;
     esac
   done
 }
