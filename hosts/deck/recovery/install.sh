@@ -10,7 +10,7 @@
 #   1. btrfs shrinks to 1 GiB below its new room (only unallocated space goes; 400 GiB is free)
 #   2. the dm-crypt mapping shrinks to exactly the new partition minus the LUKS header
 #   3. the partition table: p2 ends earlier (same start, type, GUID and name), p3 takes the rest
-#   4. btrfs grows back to fill the mapping
+#   4. the mapping, then btrfs, grow back to fill the new p2
 # Then p3: LUKS2 (you type the passphrase: use the main one), ext4, the built root, the kernel
 # command line with p3's UUID, the Wi-Fi networks, and its UKI on the ESP as deck-recovery.efi.
 # LUKS header backups go both ways: p2's into the recovery, p3's into the main system's /root.
@@ -40,11 +40,13 @@ dm=$(basename "$(readlink -f /dev/mapper/$MAPPER)")
 [[ $(ls /sys/class/block/$dm/slaves) == "$(basename "$P2")" ]] || die "/dev/mapper/$MAPPER isn't on $P2"
 
 p2_start=$(start "$P2")
-offset=$(( $(sectors "$P2") - $(sectors "/dev/$dm") ))  # LUKS2 header; mapping = partition - header
+offset=$(cryptsetup status "$MAPPER" | awk '/offset:/ {print $2}')  # LUKS2 header, in sectors
+[[ $offset =~ ^[0-9]+$ ]] || die "couldn't read the LUKS data offset"
 type2=$(sgdisk -i 2 "$DISK" | awk -F': ' '/Partition GUID code/ {print $2}' | cut -d' ' -f1)
 guid2=$(sgdisk -i 2 "$DISK" | awk -F': ' '/Partition unique GUID/ {print $2}')
 name2=$(sgdisk -i 2 "$DISK" | awk -F"'" '/Partition name/ {print $2}')
-last=$(sgdisk -E "$DISK" | tail -1)                       # last usable sector
+last=$(sgdisk -p "$DISK" | sed -n 's/.*last usable sector is \([0-9]*\).*/\1/p')  # (-E is the largest gap's end)
+[[ $last =~ ^[0-9]+$ ]] || die "couldn't read the last usable sector"
 
 if [[ ! -e $P3 ]] && ! sgdisk -i 3 "$DISK" | grep -q 'Partition GUID code'; then
   # The new p2: shrunk by the recovery size, rounded down to 1 MiB, so p3 starts aligned.
@@ -64,6 +66,7 @@ Plan:
 TXT
   (( fs_bytes > used + 20 * 1024 * 1024 * 1024 )) || die "btrfs would end up with under 20 GiB headroom"
   (( p3_start % ALIGN == 0 )) || die "p3 start not aligned"
+  (( last - p3_start + 1 >= RECOVERY_SECTORS - ALIGN )) || die "p3 would be $((last - p3_start + 1)) sectors, too small"
   read -r -p "Type SHRINK to go ahead: " answer
   [[ $answer == SHRINK ]] || die "stopped; nothing changed"
 
@@ -85,7 +88,10 @@ TXT
   sgdisk --backup="/root/gpt-deck-$(date +%Y%m%d%H%M).bin" "$DISK" >/dev/null
   sgdisk -d 2 -n "2:$p2_start:$((p2_start + new2 - 1))" -t "2:$type2" -u "2:$guid2" -c "2:$name2" \
     -n "3:$p3_start:$last" -t 3:8309 -c 3:deck-recovery "$DISK"
-  if partx -u -n 2 "$DISK" && partx -a -n 3 "$DISK" && [[ -e $P3 ]] && (( $(sectors "$P2") == new2 )); then
+  partx -u -n 2 "$DISK" || true
+  partx -a -n 3 "$DISK" || true  # may already be there; what counts is the kernel's view below
+  udevadm settle
+  if [[ -e $P3 ]] && (( $(sectors "$P2") == new2 )); then
     echo "   the kernel took the new table"
   else
     echo
@@ -95,8 +101,9 @@ TXT
   fi
 fi
 
-echo "4. btrfs → fill the mapping"
-(( $(sectors "/dev/$dm") <= $(sectors "$P2") - offset )) || die "mapping larger than p2"
+echo "4. dm-crypt mapping, then btrfs → fill p2"
+cryptsetup resize "$MAPPER"  # no size: the partition minus the header
+(( $(sectors "/dev/$dm") == $(sectors "$P2") - offset )) || die "mapping is $(sectors "/dev/$dm") sectors, not p2 - header"
 btrfs filesystem resize max /
 
 echo "5. p3: LUKS2 (use the main passphrase), ext4"
