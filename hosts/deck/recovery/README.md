@@ -8,7 +8,8 @@ can take it down with it. It doesn't survive a dead SSD: that's what GitHub and 
 ## Using it
 
 In the systemd-boot menu pick **Deck recovery** (the main system stays the default), type the
-passphrase, and you're in a root shell on tty1.
+passphrase, and you're in a root shell on tty1, with the steps below on screen (`help` shows them
+again).
 
 | Command | What it does |
 |---|---|
