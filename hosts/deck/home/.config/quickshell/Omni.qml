@@ -146,7 +146,7 @@ PanelWindow {
         { name: Battery.fullCharge ? "Restore charge limit" : "Charge to 100%", keywords: "battery full charge limit threshold", icon: 0xF0084, run: () => Battery.setFullCharge(!Battery.fullCharge) },
         { name: "Clipboard history", keywords: "clipboard paste copy cliphist", icon: 0xF0147, stay: true, run: () => { search.text = ""; page = "clipboard"; } },
         { name: "Clear clipboard history", keywords: "clipboard wipe cliphist", icon: 0xF0147, run: () => spawn(["cliphist", "wipe"]) },
-        { name: "Maintenance details", keywords: "security advisories glsa firmware fwupd failed units updates", icon: 0xF0026, run: () => Maintenance.show() },
+        { name: "Maintenance details", keywords: "security advisories glsa firmware fwupd failed units updates crashes repos drift portage world news disk", icon: 0xF0026, run: () => Maintenance.show() },
         { name: Session.keepAwake ? "Stop keeping awake" : "Keep awake", keywords: "caffeine idle inhibit", icon: 0xF0176, run: () => Session.keepAwake = !Session.keepAwake },
         { name: "Power saver", keywords: "profile battery", icon: 0xF032A, run: () => PowerProfiles.profile = PowerProfile.PowerSaver },
         { name: "Balanced", keywords: "profile power", icon: 0xF05D1, run: () => PowerProfiles.profile = PowerProfile.Balanced },

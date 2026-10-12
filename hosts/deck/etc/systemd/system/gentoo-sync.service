@@ -1,5 +1,6 @@
 # Daily: sync the repositories, then record which installed packages have a security advisory
 # (GLSA). The omni panel (quickshell/Maintenance.qml) reads /var/lib/gentoo-security/affected.
+# Then deck-portage.service looks at world updates, preserved libraries and depclean.
 [Unit]
 Description=Sync Portage repositories and check for security advisories
 Wants=network-online.target
@@ -13,3 +14,4 @@ StateDirectory=gentoo-security
 ExecStart=/usr/bin/emerge --sync --quiet
 # glsa-check prints its legend on stderr and one line per affected advisory on stdout.
 ExecStart=/bin/sh -c 'glsa-check -l affected -n 2>/dev/null > /var/lib/gentoo-security/affected.new; mv /var/lib/gentoo-security/affected.new /var/lib/gentoo-security/affected'
+ExecStart=/usr/bin/systemctl start --no-block deck-portage.service

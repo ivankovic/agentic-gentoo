@@ -2,7 +2,7 @@
 # emerge, run as root: first a read-only snapshot of the root, then /usr/bin/emerge in its own scope
 # in build.slice (memory-capped: etc/systemd/system/build.slice). Found before /usr/bin/emerge on
 # root's PATH (and sudo's). As a user, or when already in build.slice, it's plain emerge. Bypass
-# with /usr/bin/emerge.
+# with /usr/bin/emerge. Afterwards it refreshes the panel's Portage status (deck-portage.service).
 #
 # The snapshot, @snapshots/@.pre-emerge.<time>, is the exact state before the change; the last
 # 5 are kept (btrbk's hourly ones are separate and ignore these). Skipped for commands that change
@@ -34,5 +34,9 @@ if ((changes)); then
   fi
 fi
 
-exec systemd-run --scope --quiet --collect --slice=build.slice --unit="emerge-$$.scope" \
+systemd-run --scope --quiet --collect --slice=build.slice --unit="emerge-$$.scope" \
   --description="emerge $*" -- /usr/bin/emerge "$@"
+status=$?
+# The panel's world-update, preserved-libs and depclean lines (etc/systemd/system/deck-portage.service).
+((changes)) && systemctl start --no-block deck-portage.service
+exit "$status"

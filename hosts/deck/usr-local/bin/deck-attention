@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""deck-attention: things on deck that want a look, as one line each for the omni panel's
+maintenance tile (home/.config/quickshell/Maintenance.qml runs it when the panel opens).
+`deck-attention --details` explains each line, for the tile's details terminal.
+
+  repos     work that exists only on deck: a repository in ~/src with changes not committed, or
+            commits on no remote, for more than a day
+  drift     config files that differ between deck and the agentic-gentoo repo (`./deploy.sh`):
+            edited on deck and not in the repo, or changed in the repo and not deployed
+  crashes   programs that crashed (dumped core) in the last 3 days, from coredumpctl
+  portage   no @world update for 14 days, unread Gentoo news, preserved libraries waiting for
+            `emerge @preserved-rebuild`, depclean blocked; from /var/lib/deck-health/portage.json
+            (etc/deck-health/portage.py, run as root after syncs and emerges)
+  disk      / or /efi more than 85% full (btrfs slows down and can fail to write when nearly full;
+            a full ESP fails the next kernel install)
+
+Runs as the desktop user and takes well under a second. Nothing is changed.
+"""
+import collections
+import datetime
+import json
+import os
+import pathlib
+import subprocess
+import sys
+import time
+
+HOME = pathlib.Path.home()
+SRC = HOME / "src"
+REPO = SRC / "agentic-gentoo"
+PORTAGE = pathlib.Path("/var/lib/deck-health/portage.json")
+NEWS = pathlib.Path("/var/lib/gentoo/news")
+DAY = 86400
+REPO_GRACE = 1 * DAY
+CRASH_DAYS = 3
+WORLD_DAYS = 14
+FULL = 85
+
+
+def run(*cmd, cwd=None):
+    return subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
+
+
+def plural(n, word, words=None):
+    return f"{n} {word}" if n == 1 else f"{n} {words or word + 's'}"
+
+
+def repos():
+    """[(name, summary, detail lines)] for repositories with work older than REPO_GRACE."""
+    found = []
+    now = time.time()
+    for git in sorted(SRC.glob("*/.git")):
+        repo = git.parent
+        status = run("git", "status", "--porcelain=v1", "-z", cwd=repo).stdout
+        changed, entries = [], iter(status.split("\0"))
+        for e in entries:
+            if len(e) > 3:
+                changed.append(e[3:])
+                if e[0] in "RC":  # a rename or copy is followed by its old path
+                    next(entries, None)
+        # How long uncommitted: the oldest change still on disk (deleted files don't count).
+        ages = [now - (repo / f).lstat().st_mtime for f in changed if (repo / f).exists()]
+        old_changes = changed and (max(ages, default=0) > REPO_GRACE or not ages)
+        # Commits on local branches that no remote has, with their commit times.
+        log = run("git", "log", "--branches", "--not", "--remotes", "--format=%ct %h %s", cwd=repo).stdout
+        unpushed = [l.split(" ", 1) for l in log.splitlines() if l]
+        old_unpushed = any(now - int(t) > REPO_GRACE for t, _ in unpushed)
+        if not (old_changes or old_unpushed):
+            continue
+        parts = []
+        if changed:
+            parts.append(plural(len(changed), "change"))
+        if unpushed:
+            parts.append(plural(len(unpushed), "unpushed commit"))
+        detail = [f"  {s}" for _, s in unpushed[:5]] + [f"  changed: {f}" for f in changed[:10]]
+        if len(changed) > 10:
+            detail.append(f"  ... and {len(changed) - 10} more")
+        found.append((repo.name, ", ".join(parts), detail))
+    return found
+
+
+def drift():
+    """[(status, path)] where deck and the repo disagree; None when the repo isn't there."""
+    deploy = REPO / "deploy.sh"
+    if not deploy.exists():
+        return None
+    out = run(str(deploy), "deck", cwd=REPO).stdout
+    return [tuple(l.split(None, 1)) for l in out.splitlines() if l.startswith(("new:", "changed:"))]
+
+
+def crashes():
+    """{program: [times]} for core dumps in the last CRASH_DAYS days."""
+    r = run("coredumpctl", "--json=short", "--no-pager", f"--since=-{CRASH_DAYS}d", "list")
+    try:
+        entries = json.loads(r.stdout) if r.stdout.strip() else []
+    except ValueError:
+        return {}
+    found = collections.defaultdict(list)
+    for e in entries:
+        found[os.path.basename(e.get("exe") or "?")].append(e.get("time", 0) / 1e6)
+    return found
+
+
+def portage():
+    """[(tile line, detail)]."""
+    found = []
+    try:
+        status = json.loads(PORTAGE.read_text())
+    except (OSError, ValueError):
+        return [("Portage status not checked yet", "  sudo systemctl start deck-portage.service")]
+    world = status.get("world_updated")
+    if world is None:
+        found.append(("No @world update on record", "  emerge --ask --update --deep --newuse @world"))
+    else:
+        age = (datetime.datetime.now().astimezone() - datetime.datetime.fromisoformat(world)).days
+        if age > WORLD_DAYS:
+            found.append((f"@world last updated {age} days ago",
+                          f"  last update {world}\n  emerge --ask --update --deep --newuse @world"))
+    if status.get("preserved"):
+        found.append((plural(status["preserved"], "preserved library", "preserved libraries"),
+                      "  emerge @preserved-rebuild"))
+    if status.get("depclean_blocked"):
+        found.append(("Depclean is blocked", f"  {status.get('depclean_reason') or 'see emerge -p --depclean'}\n"
+                      "  usually fixed by an @world update"))
+    unread = sum(len(p.read_text().split()) for p in NEWS.glob("*.unread"))
+    if unread:
+        found.append((plural(unread, "unread Gentoo news item"), "  eselect news read"))
+    return found
+
+
+def disks():
+    found = []
+    for mount in ("/", "/efi"):
+        try:
+            st = os.statvfs(mount)
+        except OSError:
+            continue
+        used = 100 - st.f_bavail * 100 // st.f_blocks
+        if used > FULL:
+            found.append((f"{mount} is {used}% full",
+                          "  ncdu -x " + mount + "; podman system prune; old snapshots in /.snapshots"))
+    return found
+
+
+def main():
+    details = "--details" in sys.argv[1:]
+    lines, text = [], []
+
+    for name, summary, detail in repos():
+        lines.append(f"Only on deck: {name} ({summary})")
+        text += [f"~/src/{name}: {summary}"] + detail
+
+    d = drift()
+    if d:
+        lines.append(f"Config differs from repo: {plural(len(d), 'file')}")
+        text += ["Config differs from the agentic-gentoo repo (cd ~/src/agentic-gentoo; ./deploy.sh deck):"]
+        text += [f"  {s:9} {p}" for s, p in d]
+
+    c = crashes()
+    if c:
+        lines.append("Crashed: " + ", ".join(f"{p} {len(t)}×" if len(t) > 1 else p for p, t in c.items()))
+        text.append(f"Crashes in the last {CRASH_DAYS} days (coredumpctl info <program> for the stack):")
+        for p, times in c.items():
+            when = ", ".join(time.strftime("%a %d %b %H:%M", time.localtime(t)) for t in times[-5:])
+            text.append(f"  {p}: {when}")
+
+    for line, detail in portage() + disks():
+        lines.append(line)
+        text += [line + ":", detail]
+
+    print("\n".join(text if details else lines) or ("nothing" if details else ""))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

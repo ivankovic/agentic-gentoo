@@ -16,6 +16,10 @@ which the omni panel's maintenance tile shows; the last report is in /var/lib/de
   kernels   a kernel that got this far into a boot is good: the last two good ones are kept in
             the Portage set @deck-kernels (/etc/portage/sets/deck-kernels, in world_sets), so
             `emerge --depclean` leaves the previous kernel and its boot menu entry in place.
+  esp       the EFI system partition (/efi: FAT, no checksums) holds every kernel and the recovery
+            system's UKI. Its files are copied to /var/lib/deck-health/esp, inside @, so btrbk's
+            hourly snapshots keep its history; esp.blkid records the partition's identity, which
+            /etc/fstab refers to. Restoring it needs a live USB: runbook.md, "The ESP is damaged".
 
 btrfs needs no repair pass after a crash (copy-on-write: it mounts at its last commit); this is
 about noticing damage early. The offline `btrfs check --readonly` is in the recovery system:
@@ -34,6 +38,7 @@ STATE = pathlib.Path("/var/lib/deck-health")
 KERNEL_SET = pathlib.Path("/etc/portage/sets/deck-kernels")
 WORLD_SETS = pathlib.Path("/var/lib/portage/world_sets")
 NVME = "/dev/nvme0"
+ESP = "/efi"
 WEAR_LIMIT = 80
 
 
@@ -77,6 +82,22 @@ def keep_kernels():
     if "@deck-kernels" not in sets:
         store_text(WORLD_SETS, "\n".join(sets + ["@deck-kernels"]) + "\n")
     return "kernels kept: " + ", ".join(good)
+
+
+def backup_esp():
+    """Mirror the ESP's files into @; returns (report line, problem or None)."""
+    dest = STATE / "esp"
+    if not os.path.ismount(ESP):
+        return "esp: /efi isn't mounted; not copied", "ESP (/efi) isn't mounted"
+    # FAT keeps times to 2 seconds: --modify-window stops rsync recopying unchanged files. Root-only,
+    # like the ESP itself (systemd-boot's random seed is on it).
+    r = run("rsync", "-rt", "--delete", "--modify-window=1", "--chmod=go=", ESP + "/", str(dest) + "/")
+    if r.returncode != 0:
+        return f"esp: copy failed: {r.stderr.strip()[:160]}", "ESP copy failed"
+    source = run("findmnt", "-no", "SOURCE", ESP).stdout.strip()
+    store_text(STATE / "esp.blkid", run("blkid", "-o", "export", source).stdout)
+    size = run("du", "-sh", str(dest)).stdout.split("\t")[0]
+    return f"esp: copied to {dest} ({size})", None
 
 
 def store_text(path, text):
@@ -141,6 +162,10 @@ def main():
         store("unsafe_shutdowns", unsafe)
 
     lines.append(keep_kernels())
+    line, problem = backup_esp()
+    lines.append(line)
+    if problem:
+        problems.append(problem)
 
     lines += [f"PROBLEM: {p}" for p in problems] or ["no problems"]
     report = "\n".join(lines) + "\n"

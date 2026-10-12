@@ -1,0 +1,15 @@
+# Is the system keeping up with Gentoo (etc/deck-health/portage.py): when @world was last updated,
+# preserved libraries waiting for a rebuild, and whether depclean is blocked. Started after the
+# daily sync (gentoo-sync.service) and after every emerge that changes something (the emerge
+# wrapper, /usr/local/sbin/emerge); the omni panel reads /var/lib/deck-health/portage.json.
+[Unit]
+Description=Check whether Portage is keeping up (world update, preserved libs, depclean)
+Documentation=file:///etc/deck-health/portage.py
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -I /etc/deck-health/portage.py
+StateDirectory=deck-health
+Slice=build.slice
+Nice=19
+IOSchedulingClass=idle

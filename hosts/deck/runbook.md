@@ -43,5 +43,24 @@ arch-chroot /mnt/gentoo
 # fix, then: emerge --config sys-kernel/gentoo-kernel
 ```
 
+### The ESP is damaged
+
+Nothing boots, the recovery included (its UKI is on the ESP too); `/efi` fails to mount. The
+health check keeps a copy of the ESP's files in `@` (`/var/lib/deck-health/esp`) and its identity
+in `esp.blkid`. From a live USB, with `root` opened as above:
+
+```
+mount -o subvol=@ /dev/mapper/root /mnt/gentoo
+cat /mnt/gentoo/var/lib/deck-health/esp.blkid      # UUID=0E9D-1398 (what /etc/fstab mounts)
+mkfs.vfat -F 32 -n EFI -i 0E9D1398 /dev/nvme0n1p1  # same UUID, without the dash
+mkdir -p /mnt/efi; mount /dev/nvme0n1p1 /mnt/efi
+cp -r /mnt/gentoo/var/lib/deck-health/esp/. /mnt/efi/
+# The firmware's boot entries point at the partition (GPT), which mkfs keeps; only if they're gone:
+efibootmgr -c -d /dev/nvme0n1 -p 1 -L "Linux Boot Manager" -l '\EFI\systemd\systemd-bootx64.efi'
+```
+
+A copy damaged before it was taken: older ones are in `/.snapshots/@.<date>/var/lib/deck-health/esp`
+(on the btrfs top level: `@snapshots/@.<date>/...`).
+
 Common failures: no boot entry → UKI not written; dracut "no root device" → wrong LUKS UUID in cmdline;
 passphrase rejected → keymap mismatch; missing /home → fstab typo; black screen → missing firmware in UKI.

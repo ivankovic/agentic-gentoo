@@ -8,8 +8,10 @@ import Quickshell.Io
 // etc/systemd/system/gentoo-sync.service), firmware updates (fwupd) and failed systemd units
 // (btrbk, gentoo-sync, btrfs-scrub, ...), and a recovery system (p3) more than 6 weeks out of date
 // (etc/deck-recovery/refresh.sh), and for a week after an unclean shutdown (a crash, reset or
-// power loss, noticed by etc/deck-health/check.py, which also starts a scrub). The omni panel
-// shows a tile while any is pending.
+// power loss, noticed by etc/deck-health/check.py, which also starts a scrub). Plus what
+// /usr/local/bin/deck-attention finds: work only on deck, config drift from the repo, recent
+// crashes, Portage falling behind, a nearly full disk. The omni panel shows a tile while any is
+// pending.
 Singleton {
     id: root
 
@@ -17,6 +19,7 @@ Singleton {
     readonly property var advisories: glsa.text().split("\n").filter(l => /^\d{6}-\d+ /.test(l))
     property var firmware: []
     property var failedUnits: []
+    property var attention: []
     // Days since the recovery system's last update; -1 when it has never been recorded.
     property real now: Date.now()
     readonly property real recoveryAge: {
@@ -33,21 +36,23 @@ Singleton {
         firmware.length ? [`Firmware update: ${firmware.join(", ")}`] : [],
         failedUnits.length ? [`Failed: ${failedUnits.join(", ")}`] : [],
         recoveryAge < 0 ? ["Recovery updates not set up"] : recoveryAge > 42 ? [`Recovery system ${recoveryAge} days old`] : [],
-        recentUnclean ? [`Unclean shutdown before ${Qt.formatDateTime(new Date(uncleanAt), "ddd d MMM, HH:mm")}`] : [])
+        recentUnclean ? [`Unclean shutdown before ${Qt.formatDateTime(new Date(uncleanAt), "ddd d MMM, HH:mm")}`] : [],
+        attention)
 
     // Called when the panel opens. fwupd is asked at most hourly; the rest is cheap.
     property real firmwareCheckedAt: 0
     function refresh() {
         now = Date.now();
         failed.running = true;
+        attentionCheck.running = true;
         if (Date.now() - firmwareCheckedAt > 3600 * 1000) {
             firmwareCheckedAt = Date.now();
             fwupd.running = true;
         }
     }
 
-    // Details in a terminal: the advisories, firmware, failed units with their logs, disk health,
-    // and the recovery.
+    // Details in a terminal: the advisories, firmware, failed units with their logs, what
+    // deck-attention found, disk health, and the recovery.
     function show() {
         Session.launch(["foot", "-T", "maintenance", "sh", "-c", `
             echo '# Security advisories'; glsa-check -l affected -n 2>/dev/null
@@ -56,6 +61,7 @@ Singleton {
             for u in $(systemctl --failed --no-legend --plain | cut -d' ' -f1); do
                 echo; journalctl -u "$u" -n 15 --no-pager
             done
+            echo; echo '# Needs a look'; deck-attention --details
             echo; echo '# Disk health'; cat /var/lib/deck-health/report 2>/dev/null || echo 'not checked yet'
             if [ -s /var/lib/deck-health/unclean ]; then
                 echo "unclean shutdown noticed $(cat /var/lib/deck-health/unclean); last minutes before it:"
@@ -95,6 +101,14 @@ Singleton {
         command: ["sh", "-c", "systemctl --failed --no-legend --plain; systemctl --user --failed --no-legend --plain"]
         stdout: StdioCollector {
             onStreamFinished: root.failedUnits = text.split("\n").map(l => l.trim().split(/\s+/)[0]).filter(u => u)
+        }
+    }
+
+    Process {
+        id: attentionCheck
+        command: ["deck-attention"]
+        stdout: StdioCollector {
+            onStreamFinished: root.attention = text.split("\n").filter(l => l.trim())
         }
     }
 

@@ -70,6 +70,11 @@ Secrets (SSH keys, `gh` token, Wi-Fi passwords) stay on the machine; see [Secret
   `~amd64`. quickshell is built with `-crash-handler` (avoids keywording `dev-cpp/cpptrace`) and
   without the Hyprland, i3 and X11 modules.
   `app-editors/neovim` (and `dev-lua/luv`) are `~amd64` for 0.12, which nvim-treesitter requires.
+- **Editor:** `EDITOR` and `VISUAL` are `/usr/bin/nvim` ([env.d/99editor](etc/env.d/99editor),
+  from `eselect editor`/`eselect visual`); nano is not installed. Edit root's files with `sudoedit`,
+  which runs nvim as you with your config.
+- **Build tools:** `--with-bdeps=y` ([portage/make.conf](portage/make.conf)) keeps the build
+  dependencies of binary packages installed and updated, so any package can be patched and rebuilt.
 - **Extra packages** in world: `www-client/firefox-bin`, `sys-fs/udisks`,
   `sys-boot/efibootmgr`, `dev-util/github-cli`; `app-crypt/pinentry -qt6`. For looks:
   `sys-boot/plymouth` (`-gtk -pango`; 22.02, since 24.004 is package-masked as breaking some
@@ -242,15 +247,17 @@ Hardening (2026-10-09):
   `LOGO.GIF` into its `FLASH` folder (check the limits in `FLASH/readme.txt`; 768×480 and 60 KB
   on the Gen 3), boot it on AC power and answer yes to the custom logo. It survives later
   updates; answering no on a later flash restores Lenovo's.
-- **Not done yet.** Secure Boot is disabled; signing the UKI with own keys (`sbctl`) plus a BIOS
-  supervisor password is the next step.
+- **Shelved.** Secure Boot is disabled. Signing the UKIs with own keys (`sbctl`) was considered
+  and set aside (2026-10-12): a missed signature or a BIOS update resetting the keys would leave
+  every entry, the recovery included, unbootable.
 
 ## Maintenance
 
 Set up on 2026-10-11. Anything that needs attention shows as a tile at the top of the Mod+D
 dashboard ([quickshell/Maintenance.qml](home/.config/quickshell/Maintenance.qml)): security
-advisories, firmware updates, failed system or user units, a recovery system over 6 weeks old. Clicking it opens a terminal with the
-details and the failed units' logs.
+advisories, firmware updates, failed system or user units, a recovery system over 6 weeks old, an
+unclean shutdown, and what [deck-attention](usr-local/bin/deck-attention) finds (below). Clicking
+it opens a terminal with the details and the failed units' logs.
 
 - **Snapshots.** btrbk snapshots `@` and `@home` hourly into `@snapshots`, visible as
   `/.snapshots/@.<date>` and `/.snapshots/@home.<date>` ([etc/btrbk/btrbk.conf](etc/btrbk/btrbk.conf),
@@ -272,6 +279,12 @@ details and the failed units' logs.
 - **Sync and security advisories.** [gentoo-sync.timer](etc/systemd/system/gentoo-sync.timer)
   runs `emerge --sync` daily, then writes `glsa-check -l affected` to
   `/var/lib/gentoo-security/affected`.
+- **Keeping up with Gentoo.** After the sync and after every `sudo emerge` that changes something,
+  [deck-portage.service](etc/systemd/system/deck-portage.service) ([portage.py](etc/deck-health/portage.py))
+  records when `emerge --update @world` last finished, preserved libraries and whether
+  `emerge -p --depclean` is blocked, in `/var/lib/deck-health/portage.json`. The panel says so
+  when @world is more than 14 days behind, a `@preserved-rebuild` is due, depclean is blocked or
+  Gentoo news is unread.
 - **Firmware.** A user timer refreshes fwupd's metadata daily
   ([systemd/user/fwupd-refresh.timer](home/.config/systemd/user/fwupd-refresh.timer), enabled with
   `systemctl --user enable`); the panel asks `fwupdmgr get-updates` at most hourly. The system
@@ -287,6 +300,19 @@ details and the failed units' logs.
   btrfs needs no repair pass after a crash (it mounts at its last commit); the offline
   `btrfs check --readonly` is `deck-mount check` in the recovery system. Report:
   `/var/lib/deck-health/report`.
+- **ESP copy.** The EFI system partition is FAT (no checksums) and holds every kernel and the
+  recovery's UKI. The health check mirrors its files to `/var/lib/deck-health/esp` (root only),
+  inside `@`, so the hourly snapshots keep its history, with its identity in `esp.blkid`. To
+  restore it: [runbook.md](runbook.md#the-esp-is-damaged).
+- **Needs a look** ([usr-local/bin/deck-attention](usr-local/bin/deck-attention), run by the panel
+  when it opens; `deck-attention --details` explains):
+  - work only on deck: a repository in `~/src` with uncommitted changes or commits on no remote,
+    for more than a day;
+  - config drift: files that differ between deck and this repo (`./deploy.sh deck`);
+  - programs that dumped core in the last 3 days (`coredumpctl`; dumps capped at 2 GiB by
+    [coredump.conf.d/deck.conf](etc/systemd/coredump.conf.d/deck.conf));
+  - the Portage lines above;
+  - `/` or `/efi` over 85% full.
 - **Recovery system.** [deck-recovery-update.timer](etc/systemd/system/deck-recovery-update.timer)
   updates the recovery on p3 about monthly, on AC; see
   [recovery/README.md](recovery/README.md#keeping-it-up-to-date).
