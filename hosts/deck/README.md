@@ -89,6 +89,10 @@ Secrets (SSH keys, `gh` token, Wi-Fi passwords) stay on the machine; see [Secret
   `sys-boot/plymouth` (`-gtk -pango`; 22.02, since 24.004 is package-masked as breaking some
   systems) with the overlay's `x11-themes/plymouth-theme-academia`, `x11-themes/papirus-icon-theme`,
   `x11-themes/bibata-xcursors` (GURU, `~amd64`), `app-text/zathura` with `zathura-pdf-mupdf`.
+- **Admin tools** in world: nmap (with ncat and nping), tcpdump, mtr (`-gui`), `net-dns/bind`
+  for `dig` (`bind-tools` is gone from ::gentoo; the server stays disabled), iperf3, socat, whois,
+  btop, lsof, strace, iotop-c, tmux, usbutils, dmidecode, lm-sensors. USE in
+  [portage/package.use/admin-tools](portage/package.use/admin-tools).
 - **Bambu Studio** (`media-gfx/bambustudio-bin`, GURU, `~amd64`) for the Bambu Lab X1C: Bambu's
   AppImage unpacked to `/opt`. On first login it downloads Bambu's proprietary network plugin into
   `~/.config/BambuStudio`. Its bundled wxWidgets has no EGL, so the GL canvas needs X11: it runs
@@ -219,7 +223,8 @@ Wi-Fi. What is set because of it:
   synced every 2 s and kept four days ([journald@vitals.conf](etc/systemd/journald@vitals.conf)).
   About 4 ms of CPU per 10 s; the EC sensors and battery (about 1 ms each, through ACPI) are read
   every 10 s, the SSD temperature (which wakes the drive) every 30 s.
-  Both unexplained resets (2026-10-09 during light work, 2026-10-11 under a full-core build) left
+  All three unexplained resets (2026-10-09 during light work, 2026-10-11 under a full-core build,
+  2026-10-13 22:07 idle on AC at 52 °C and 12 W with throttle and AER counts at 0) left
   nothing: no kernel message, empty pstore, no firmware error record. So the kernel never saw them
   coming, which points below it (power, firmware, a PCIe device, RAM).
 
