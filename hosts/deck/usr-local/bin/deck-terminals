@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+"""deck-terminals: after a crash, reopen the foot terminals where they were.
+
+Runs as a user service (home/.config/systemd/user/deck-terminals.service) for the whole niri
+session. Every 10 s it records each foot window: its workspace, column and place in the column,
+width, the shell's directory and what is running in it (the terminal's foreground program). It
+writes ~/.local/state/deck-terminals/session.json only when that changes, and syncs it to disk,
+so a reset loses at most the last 10 s. Stopping the service (logout, shutdown, reboot) marks
+the file clean.
+
+At the start of a session, a file that isn't marked clean means the previous one ended in a
+crash, reset or power loss. If no foot window is open yet, each terminal is opened again in its
+directory, in the same order and widths on the same workspaces, and the focused one is focused.
+What was running comes back through ~/.bashrc (DECK_RESTORE_CMD):
+
+  ssh, nvim, vim   run again as they were (nvim offers its swap file for recovery)
+  claude           resumed: `claude --resume <session>`, the session found by the window title
+                   (Claude Code's title for it) in ~/.claude/projects/<directory>/; when no title
+                   matches, `claude --continue`
+  anything else    not run, but on ↑ in that shell's history
+
+Not restored: scrollback, shell variables, programs mid-run, windows other than foot, and foot
+windows that run a command instead of an interactive shell (foot -e, bash -c).
+"""
+import json
+import os
+import pathlib
+import re
+import shlex
+import signal
+import subprocess
+import sys
+import time
+
+STATE = pathlib.Path.home() / ".local/state/deck-terminals/session.json"
+PROJECTS = pathlib.Path.home() / ".claude/projects"
+INTERVAL = 10
+RERUN = {"ssh", "nvim", "vim"}
+SHELLS = {"bash", "sh", "zsh", "fish"}
+
+
+def niri(*args):
+    out = subprocess.run(["niri", "msg", "--json", *args], capture_output=True, text=True,
+                         timeout=5, check=True).stdout
+    return json.loads(out) if out.strip() else None
+
+
+def action(*args):
+    subprocess.run(["niri", "msg", "action", *args], capture_output=True, timeout=5, check=True)
+
+
+def children(pid):
+    out = []
+    for task in pathlib.Path(f"/proc/{pid}/task").glob("*"):
+        try:
+            out += [int(p) for p in (task / "children").read_text().split()]
+        except OSError:
+            pass
+    return out
+
+
+def argv(pid):
+    try:
+        return [a for a in pathlib.Path(f"/proc/{pid}/cmdline").read_bytes().decode(
+            errors="replace").split("\0") if a]
+    except OSError:
+        return []
+
+
+def foreground(shell):
+    """The pid of the shell terminal's foreground process group, or None at the prompt."""
+    try:
+        stat = pathlib.Path(f"/proc/{shell}/stat").read_text()
+    except OSError:
+        return None
+    tpgid = int(stat.rsplit(")", 1)[1].split()[5])
+    return tpgid if tpgid > 0 and tpgid != shell else None
+
+
+_sessions = {}
+
+
+def claude_session(cwd, title):
+    """The Claude Code session whose title the window shows, newest first; None if none does."""
+    title = re.sub(r"^[^\w(\[]+", "", title).strip()
+    key = (cwd, title)
+    if key not in _sessions:
+        needle = ('"aiTitle":' + json.dumps(title, ensure_ascii=False)).encode()
+        found = None
+        project = PROJECTS / re.sub(r"[^A-Za-z0-9]", "-", cwd)
+        files = sorted(project.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+        for f in files if title else []:
+            try:
+                if needle in f.read_bytes():
+                    found = f.stem
+                    break
+            except OSError:
+                pass
+        _sessions[key] = found
+    return _sessions[key]
+
+
+def terminal(window):
+    """What to restore for one foot window, or None if it doesn't run an interactive shell."""
+    shells = [(p, argv(p)) for p in children(window["pid"])]
+    shells = [(p, a) for p, a in shells if a and pathlib.Path(a[0]).name.lstrip("-") in SHELLS]
+    if not shells or "-c" in shells[0][1]:
+        return None
+    shell = shells[0][0]
+    try:
+        cwd = os.readlink(f"/proc/{shell}/cwd")
+    except OSError:
+        return None
+    cmd, run = None, False
+    fg = foreground(shell)
+    if fg:
+        cmd = argv(fg)
+        name = pathlib.Path(cmd[0]).name if cmd else ""
+        if name == "claude":
+            try:
+                where = os.readlink(f"/proc/{fg}/cwd")
+            except OSError:
+                where = cwd
+            sid = claude_session(where, window.get("title") or "")
+            cmd = ["claude", "--resume", sid] if sid else ["claude", "--continue"]
+            run = True
+        elif name in RERUN:
+            run = True
+        cmd = shlex.join(cmd) if cmd else None
+    layout = window.get("layout") or {}
+    col, row = layout.get("pos_in_scrolling_layout") or (999, 1)
+    return {"cwd": cwd, "cmd": cmd, "run": run, "col": col, "row": row,
+            "width": (layout.get("window_size") or [0])[0], "focused": window["is_focused"]}
+
+
+def snapshot():
+    idx = {w["id"]: w["idx"] for w in niri("workspaces")}
+    out = []
+    for w in niri("windows"):
+        if w.get("app_id") != "foot" or w.get("workspace_id") not in idx:
+            continue
+        t = terminal(w)
+        if t:
+            t["workspace"] = idx[w["workspace_id"]]
+            out.append(t)
+    out.sort(key=lambda t: (t["workspace"], t["col"], t["row"]))
+    return out
+
+
+def write(state):
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = STATE.with_suffix(".tmp")
+    with open(tmp, "w") as f:
+        json.dump(state, f, indent=1)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, STATE)
+    fd = os.open(STATE.parent, os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def descends(pid, ancestor):
+    while pid > 1:
+        if pid == ancestor:
+            return True
+        try:
+            status = pathlib.Path(f"/proc/{pid}/status").read_text()
+        except OSError:
+            return False
+        pid = int(re.search(r"^PPid:\s*(\d+)", status, re.M).group(1))
+    return False
+
+
+def wait_for_window(pid, timeout=10):
+    """The window of the foot started as pid or below it (systemd-run may run it as a child)."""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        for w in niri("windows"):
+            if w.get("pid") and descends(w["pid"], pid):
+                return w["id"]
+        time.sleep(0.1)
+    return None
+
+
+def restore(terminals):
+    focus = None
+    for n, t in enumerate(terminals):
+        if n == 0 or t["workspace"] != terminals[n - 1]["workspace"]:
+            action("focus-workspace", str(t["workspace"]))
+        env = dict(os.environ)
+        env.pop("DECK_RESTORE_CMD", None)
+        env.pop("DECK_RESTORE_RUN", None)
+        if t["cmd"]:
+            env["DECK_RESTORE_CMD"] = t["cmd"]
+            if t["run"]:
+                env["DECK_RESTORE_RUN"] = "1"
+        cwd = t["cwd"] if os.path.isdir(t["cwd"]) else str(pathlib.Path.home())
+        # As Mod+T opens foot: in its own scope.
+        p = subprocess.Popen(["systemd-run", "--user", "--scope", "--slice=app.slice", "--collect",
+                              "--quiet", f"--unit=app-foot-restore-{os.getpid()}-{n}.scope", "--",
+                              "foot", f"--working-directory={cwd}"],
+                             env=env, cwd=cwd, start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        wid = wait_for_window(p.pid)
+        if wid is None:
+            continue
+        action("focus-window", "--id", str(wid))
+        if t["row"] > 1 and n > 0 and terminals[n - 1]["workspace"] == t["workspace"]:
+            action("consume-or-expel-window-left")
+        elif t["width"]:
+            action("set-column-width", str(t["width"]))
+        if t["focused"]:
+            focus = wid
+    if focus is not None:
+        action("focus-window", "--id", str(focus))
+
+
+def notify(body):
+    subprocess.run(["notify-send", "--app-name=deck-terminals", "Terminals restored", body],
+                   capture_output=True)
+
+
+def main():
+    if sys.argv[1:] == ["--show"]:  # what would be saved now
+        print(json.dumps(snapshot(), indent=1, ensure_ascii=False))
+        return 0
+    stopping = False
+
+    def stop(*_):
+        nonlocal stopping
+        stopping = True
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+
+    for _ in range(60):  # niri may still be starting
+        try:
+            niri("windows")
+            break
+        except (subprocess.SubprocessError, OSError, ValueError):
+            time.sleep(0.5)
+
+    try:
+        previous = json.loads(STATE.read_text())
+    except (OSError, ValueError):
+        previous = {"clean": True, "terminals": []}
+    if not previous.get("clean") and previous.get("terminals"):
+        if not any(w.get("app_id") == "foot" for w in niri("windows")):
+            restore(previous["terminals"])
+            n = len(previous["terminals"])
+            notify(f"{n} terminal{'s' if n != 1 else ''} reopened after a crash, as they were at "
+                   f"{previous.get('saved', '?')}.")
+
+    last = None
+    while not stopping:
+        try:
+            terminals = snapshot()
+        except (subprocess.SubprocessError, OSError, ValueError, TypeError):
+            terminals = None
+        if terminals is not None and terminals != last:
+            write({"clean": False, "saved": time.strftime("%Y-%m-%d %H:%M:%S"),
+                   "terminals": terminals})
+            last = terminals
+        for _ in range(INTERVAL * 10):
+            if stopping:
+                break
+            time.sleep(0.1)
+
+    try:
+        state = json.loads(STATE.read_text())
+        state["clean"] = True
+        write(state)
+    except (OSError, ValueError):
+        pass
+
+
+if __name__ == "__main__":
+    sys.exit(main())

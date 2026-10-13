@@ -1,0 +1,16 @@
+# Records the foot terminals every 10 s and reopens them after a crash (/usr/local/bin/deck-terminals).
+# Enable once: systemctl --user enable --now deck-terminals.service
+[Unit]
+Description=Reopen terminals after a crash
+PartOf=graphical-session.target
+After=graphical-session.target
+Requisite=graphical-session.target
+
+[Service]
+ExecStart=/usr/local/bin/deck-terminals
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=5
+
+[Install]
+WantedBy=graphical-session.target

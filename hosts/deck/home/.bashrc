@@ -145,3 +145,24 @@ __prompt() {
 	((console)) && PS0= || PS0='\e]133;C\e\\'
 }
 PROMPT_COMMAND=__prompt
+
+# A terminal reopened after a crash (deck-terminals): its last command goes on ↑, and runs again
+# at the first prompt when DECK_RESTORE_RUN is set (ssh, nvim, vim, claude --resume). At the first
+# prompt, since bash reads the history file only after .bashrc.
+if [[ -n ${DECK_RESTORE_CMD-} ]]; then
+	__restore() {
+		local cmd=$DECK_RESTORE_CMD run=${DECK_RESTORE_RUN-}
+		unset DECK_RESTORE_CMD DECK_RESTORE_RUN
+		PROMPT_COMMAND=__prompt
+		history -s -- "$cmd"
+		if [[ -n $run ]]; then
+			printf '\e[90mreopened after a crash: %s\e[0m\n' "$cmd"
+			eval "$cmd"
+		else
+			printf '\e[90mreopened after a crash; on ↑: %s\e[0m\n' "$cmd"
+		fi
+		unset __prompt_t0 __prompt_cmd
+		__prompt
+	}
+	PROMPT_COMMAND=__restore
+fi

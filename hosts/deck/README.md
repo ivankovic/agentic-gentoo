@@ -246,6 +246,16 @@ does not write `/efi`), pointing at a copy in `/efi/EFI/memtest86+/memtest.efi`.
 it on AC overnight (one pass takes about an hour). After a memtest86+ upgrade, copy
 `/usr/share/memtest86+/memtest.efi64` over the ESP copy again.
 
+**Terminals come back after a crash.** [deck-terminals](usr-local/bin/deck-terminals), run by the
+user service [deck-terminals.service](home/.config/systemd/user/deck-terminals.service), records
+every 10 s each foot window's workspace, column, width, directory and foreground program in
+`~/.local/state/deck-terminals/session.json` (written and synced only on a change). Logout and
+shutdown mark it clean; if it isn't clean at the next login and no terminal is open yet, the
+terminals reopen as they were and a notification says so. ssh, nvim and vim run again, Claude Code
+resumes its session (`claude --resume`, found by the window title); any other command waits on ↑
+([home/.bashrc](home/.bashrc), `DECK_RESTORE_CMD`). `deck-terminals --show` prints what would be
+saved now. Scrollback and anything mid-run (a build, an emerge) don't come back.
+
 ## Security
 
 Hardening (2026-10-09):
