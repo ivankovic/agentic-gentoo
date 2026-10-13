@@ -221,8 +221,8 @@ Wi-Fi. What is set because of it:
   package, cores, uncore), power limits, CPU and GPU frequencies, load, memory, pressure, throttle
   and PCIe error counts, battery and platform profile. It goes to its own journal namespace,
   synced every 2 s and kept four days ([journald@vitals.conf](etc/systemd/journald@vitals.conf)).
-  About 4 ms of CPU per 10 s; the EC sensors and battery (about 1 ms each, through ACPI) are read
-  every 10 s, the SSD temperature (which wakes the drive) every 30 s.
+  About 4 ms of CPU per 10 s; the fan is read every line (the EC spinning it up may be the only
+  warning of a reset), the other EC sensors and battery (about 1 ms each, through ACPI) every 10 s, the SSD temperature (which wakes the drive) every 30 s.
   All four unexplained resets (2026-10-09 during light work, 2026-10-11 under a full-core build,
   2026-10-13 22:07 and 22:34 idle on AC at 50–55 °C and about 10 W, battery held at 79% by the
   75/80 charge limit, throttle and AER counts at 0, no USB-C/UCSI messages) left

@@ -24,8 +24,9 @@ Fields, all optional (a missing sensor is left out):
   aer                         PCIe errors (correctable+nonfatal+fatal) since the previous line
   ac bat bat_w profile        on AC (1/0), battery %, battery discharge W, platform profile
 
-The EC's sensors (gpu, ec, fan) and the battery go through ACPI at about 1 ms a read, so on AC
-they're in every fifth line; the SSD temperature wakes the drive, so every fifteenth.
+The EC's sensors (gpu, ec) and the battery go through ACPI at about 1 ms a read, so on AC
+they're in every fifth line; the SSD temperature wakes the drive, so every fifteenth. The fan is in
+every line: the EC spinning it up is the one warning a reset below the kernel may give.
 """
 import glob
 import os
@@ -234,7 +235,7 @@ def main():
         f.update(temps(slow))
         if NVME and n % 15 == 0:  # reading it wakes the SSD: every ~30 s on AC
             f["nvme"] = labelled(NVME, "Composite")
-        if FAN and slow:
+        if FAN:
             f["fan"] = num(FAN + "/fan1_input")
         f.update(energy.sample(now))
         f.update(limits())
