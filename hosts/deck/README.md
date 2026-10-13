@@ -75,6 +75,15 @@ Secrets (SSH keys, `gh` token, Wi-Fi passwords) stay on the machine; see [Secret
   which runs nvim as you with your config.
 - **Build tools:** `--with-bdeps=y` ([portage/make.conf](portage/make.conf)) keeps the build
   dependencies of binary packages installed and updated, so any package can be patched and rebuilt.
+- **Python** is built with profile-guided and link-time optimisation
+  ([package.use/python](portage/package.use/python), [env/lto.conf](portage/env/lto.conf)),
+  upstream's release build: ~10 min per Python update. Measured 2026-10-13 against the previous
+  build (from the pre-emerge snapshot, alternating runs, on battery): plain Python code 36% faster,
+  `emerge -pvuDN @world` 9% (18.0 to 16.4 s).
+- **Sustained load is limited by cooling**, not settings: at full fan the chassis sheds about 26 W
+  at 96–100 °C, below the firmware's 30 W limit in performance. A higher limit, the `scx_lavd`
+  scheduler and always-on huge pages were measured and left nothing faster:
+  [bench/2026-10-13-power-and-scheduler.md](bench/2026-10-13-power-and-scheduler.md).
 - **Extra packages** in world: `www-client/firefox-bin`, `sys-fs/udisks`,
   `sys-boot/efibootmgr`, `dev-util/github-cli`; `app-crypt/pinentry -qt6`. For looks:
   `sys-boot/plymouth` (`-gtk -pango`; 22.02, since 24.004 is package-masked as breaking some

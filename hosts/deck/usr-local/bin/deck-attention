@@ -8,7 +8,8 @@ events (crashes, an unclean shutdown) as seen: the tile drops them until a newer
             commits on no remote, for more than a day
   drift     config files that differ between deck and the agentic-gentoo repo (`./deploy.sh`):
             edited on deck and not in the repo, or changed in the repo and not deployed
-  crashes   programs that crashed (dumped core) in the last 3 days, from coredumpctl
+  crashes   programs that crashed (dumped core) in the last 3 days, from coredumpctl; not
+            programs in Portage's build directory (package tests during an emerge)
   unclean   the previous boot ended in a crash, reset or power loss, in the last 7 days
             (/var/lib/deck-health/unclean, written by etc/deck-health/check.py)
   portage   no @world update for 14 days, unread Gentoo news, preserved libraries waiting for
@@ -29,6 +30,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import threading
 import time
 
 HOME = pathlib.Path.home()
@@ -54,47 +56,82 @@ def plural(n, word, words=None):
     return f"{n} {word}" if n == 1 else f"{n} {words or word + 's'}"
 
 
+def parallel(*calls):
+    """Run the calls side by side (they mostly wait on git and other programs); their results in
+    order. Threads, not concurrent.futures, which takes 35 ms to import."""
+    results = [None] * len(calls)
+    def call(i, f):
+        results[i] = f()
+    threads = [threading.Thread(target=call, args=(i, f)) for i, f in enumerate(calls)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return results
+
+
 def repos():
     """[(name, summary, detail lines)] for repositories with work older than REPO_GRACE."""
-    found = []
+    found = sorted(git.parent for git in SRC.glob("*/.git"))
+    return [s for s in parallel(*[lambda r=r: repo_state(r) for r in found]) if s]
+
+
+def repo_state(repo):
+    """(name, summary, detail lines), or None when there's nothing old to report."""
     now = time.time()
-    for git in sorted(SRC.glob("*/.git")):
-        repo = git.parent
-        status = run("git", "status", "--porcelain=v1", "-z", cwd=repo).stdout
-        changed, entries = [], iter(status.split("\0"))
-        for e in entries:
-            if len(e) > 3:
-                changed.append(e[3:])
-                if e[0] in "RC":  # a rename or copy is followed by its old path
-                    next(entries, None)
-        # How long uncommitted: the oldest change still on disk (deleted files don't count).
-        ages = [now - (repo / f).lstat().st_mtime for f in changed if (repo / f).exists()]
-        old_changes = changed and (max(ages, default=0) > REPO_GRACE or not ages)
-        # Commits on local branches that no remote has, with their commit times.
-        log = run("git", "log", "--branches", "--not", "--remotes", "--format=%ct %h %s", cwd=repo).stdout
-        unpushed = [l.split(" ", 1) for l in log.splitlines() if l]
-        old_unpushed = any(now - int(t) > REPO_GRACE for t, _ in unpushed)
-        if not (old_changes or old_unpushed):
-            continue
-        parts = []
-        if changed:
-            parts.append(plural(len(changed), "change"))
-        if unpushed:
-            parts.append(plural(len(unpushed), "unpushed commit"))
-        detail = [f"  {s}" for _, s in unpushed[:5]] + [f"  changed: {f}" for f in changed[:10]]
-        if len(changed) > 10:
-            detail.append(f"  ... and {len(changed) - 10} more")
-        found.append((repo.name, ", ".join(parts), detail))
-    return found
+    # --no-optional-locks: don't refresh the index, so this never collides with git you run.
+    status = run("git", "--no-optional-locks", "status", "--porcelain=v1", "-z", cwd=repo).stdout
+    changed, entries = [], iter(status.split("\0"))
+    for e in entries:
+        if len(e) > 3:
+            changed.append(e[3:])
+            if e[0] in "RC":  # a rename or copy is followed by its old path
+                next(entries, None)
+    # How long uncommitted: the oldest change still on disk (deleted files don't count).
+    ages = [now - (repo / f).lstat().st_mtime for f in changed if (repo / f).exists()]
+    old_changes = changed and (max(ages, default=0) > REPO_GRACE or not ages)
+    # Commits on local branches that no remote has, with their commit times.
+    log = run("git", "log", "--branches", "--not", "--remotes", "--format=%ct %h %s", cwd=repo).stdout
+    unpushed = [l.split(" ", 1) for l in log.splitlines() if l]
+    old_unpushed = any(now - int(t) > REPO_GRACE for t, _ in unpushed)
+    if not (old_changes or old_unpushed):
+        return None
+    parts = []
+    if changed:
+        parts.append(plural(len(changed), "change"))
+    if unpushed:
+        parts.append(plural(len(unpushed), "unpushed commit"))
+    detail = [f"  {s}" for _, s in unpushed[:5]] + [f"  changed: {f}" for f in changed[:10]]
+    if len(changed) > 10:
+        detail.append(f"  ... and {len(changed) - 10} more")
+    return repo.name, ", ".join(parts), detail
+
+
+# Where deploy.sh installs each part of hosts/deck (its targets(); keep the two in step).
+DEPLOY_MAP = {"home": HOME, "etc": pathlib.Path("/etc"), "portage": pathlib.Path("/etc/portage"),
+              "usr-local": pathlib.Path("/usr/local")}
 
 
 def drift():
-    """[(status, path)] where deck and the repo disagree; None when the repo isn't there."""
-    deploy = REPO / "deploy.sh"
-    if not deploy.exists():
+    """[(status, path)] where deck and the repo disagree, as `./deploy.sh deck` would list them
+    (files it can't read are left out); None when the repo isn't there. Compared here instead of
+    running deploy.sh, which starts a cmp per file: ~20 ms instead of ~230."""
+    if not (REPO / "deploy.sh").exists():
         return None
-    out = run(str(deploy), "deck", cwd=REPO).stdout
-    return [tuple(l.split(None, 1)) for l in out.splitlines() if l.startswith(("new:", "changed:"))]
+    out = run("git", "ls-files", "-z", "--", *[f"hosts/deck/{d}" for d in DEPLOY_MAP], cwd=REPO).stdout
+    found = []
+    for src in filter(None, out.split("\0")):
+        top, _, rest = src.removeprefix("hosts/deck/").partition("/")
+        dst = DEPLOY_MAP[top] / rest
+        try:
+            if dst.read_bytes() != (REPO / src).read_bytes():
+                found.append(("changed:", str(dst)))
+        except FileNotFoundError:
+            if not dst.exists():
+                found.append(("new:", str(dst)))
+        except OSError:
+            pass  # unreadable without root
+    return found
 
 
 def crashes():
@@ -106,6 +143,8 @@ def crashes():
         return {}
     found = collections.defaultdict(list)
     for e in entries:
+        if (e.get("exe") or "").startswith("/var/tmp/portage/"):
+            continue  # a package's own tests during a build (Python's PGO run crashes on purpose)
         found[os.path.basename(e.get("exe") or "?")].append(e.get("time", 0) / 1e6)
     return found
 
@@ -185,18 +224,18 @@ def main():
     details = "--details" in sys.argv[1:]
     lines, text = [], []
 
-    for name, summary, detail in repos():
+    # The slow checks (git in every repo, the drift compare, coredumpctl) run side by side.
+    repo_states, d, c = parallel(repos, drift, crashes)
+    for name, summary, detail in repo_states:
         lines.append(f"Only on deck: {name} ({summary})")
         text += [f"~/src/{name}: {summary}"] + detail
 
-    d = drift()
     if d:
         lines.append(f"Config differs from repo: {plural(len(d), 'file')}")
         text += ["Config differs from the agentic-gentoo repo (cd ~/src/agentic-gentoo; ./deploy.sh deck):"]
         text += [f"  {s:9} {p}" for s, p in d]
 
     last_seen = seen()
-    c = crashes()
     new = {p: [t for t in times if t > last_seen] for p, times in c.items()}
     new = {p: times for p, times in new.items() if times}
     if new:

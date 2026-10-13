@@ -1,0 +1,5 @@
+# Profile-guided optimisation: the build runs Python's test suite to profile it, then recompiles
+# (~20-30 min). Link-time optimisation comes from env/lto.conf (package.env/python), since the
+# ebuild turns Python's own --with-lto off. Together they're upstream's recommended release build
+# (Fedora and Ubuntu ship it), measured on deck in README.md.
+dev-lang/python pgo

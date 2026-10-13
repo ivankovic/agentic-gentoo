@@ -5,6 +5,10 @@
 	default = simple
 	# First push of a new branch creates origin/<branch> and tracks it.
 	autoSetupRemote = true
+[core]
+	# Remember which directories have no untracked files: `git status` in big repos (omnidiff,
+	# 10k files) skips rescanning them. Part of git's feature.manyFiles.
+	untrackedCache = true
 [merge]
 	conflictStyle = zdiff3
 [init]
