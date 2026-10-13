@@ -23,14 +23,14 @@ Recorded 2026-10-09.
 | Profile  | `default/linux/amd64/23.0/desktop/systemd` ([state/profile](state/profile)) |
 | Disk     | GPT: 1 GiB EFI on `/efi` + LUKS2 (argon2id) → btrfs, `noatime,compress=zstd:1` |
 | Subvols  | `@` `/`, `@home`, `@snapshots` `/.snapshots`, `@var_log`, `@var_tmp` |
-| Swap     | zram, ram/2, zstd |
+| Swap     | zram, ram/2, zstd; swappiness 180, page-cluster 0 ([sysctl.d/70-zram.conf](etc/sysctl.d/70-zram.conf)) |
 | Boot     | systemd-boot + UKI (installkernel → dracut), Plymouth splash and passphrase prompt |
 | Kernel   | `sys-kernel/gentoo-kernel` from the binhost ([state/kernel](state/kernel)) |
 | Packages | Official binhost, x86-64-v3; `-march=native` for source builds |
 | Network  | NetworkManager with iwd |
 | Desktop  | niri, quickshell (clock overlay + Mod+D omni panel), foot, mako, swaylock, greetd + tuigreet; GURU overlay enabled |
 | Fonts    | Iosevka everywhere (Iosevka Term for monospace, Iosevka Etoile for the shell's serif, Iosevka Aile for GTK UI); Symbols Nerd Font for icons; Noto + Noto Color Emoji as fallback |
-| Laptop   | power-profiles-daemon, thermald, fwupd, battery charge 75–80 % (Mod+D "Full charge" lifts it to 100 % until reboot) |
+| Laptop   | power-profiles-daemon (thermal control is the firmware's: thermald refuses this model), fwupd, battery charge 75–80 % (Mod+D "Full charge" lifts it to 100 % until reboot) |
 
 ## Files
 
@@ -264,7 +264,10 @@ it opens a terminal with the details and the failed units' logs.
   [hourly timer](etc/systemd/system/btrbk.timer.d/hourly.conf)). Kept: everything for 2 days, then
   48 hourly, 14 daily, 6 weekly and 3 monthly. `@var_log` and `@var_tmp` are not snapshotted.
   btrbk works on the btrfs top level, automounted at `/mnt/btr_pool` ([etc/fstab](etc/fstab)).
-  Snapshots are on the same disk, so they are not a backup.
+  Snapshots are on the same disk, so they are not a backup. Rebuildable folders stay out of them:
+  cargo's `target/` in each repo and `~/.cache` are nested subvolumes, which snapshots skip
+  ([usr-local/bin/deck-nosnap](usr-local/bin/deck-nosnap) converts a folder in place, no root needed;
+  the tile lists any that aren't).
 - **Updates and rollback.** `sudo emerge` ([usr-local/sbin/emerge](usr-local/sbin/emerge)) first
   takes a read-only snapshot of `@`, `/.snapshots/@.pre-emerge.<time>` (the last 5 kept; btrbk
   ignores them), unless the command changes nothing (`-p`, `--search`, `--sync`, ...). To go back,
@@ -323,6 +326,9 @@ it opens a terminal with the details and the failed units' logs.
 - **Power profile** follows the plug ([quickshell/Battery.qml](home/.config/quickshell/Battery.qml)):
   Performance on AC, Balanced on battery. A choice made in the panel holds until the next plug change.
 - **Builds** run at `PORTAGE_NICENESS=10` with idle I/O ([portage/make.conf](portage/make.conf)).
+- **Video** decodes on the GPU: Firefox's media process loads Intel's VA-API driver
+  (`iHD_drv_video.so`, `media-libs/libva-intel-media-driver`) by itself; no prefs needed. Check:
+  `grep -l iHD_drv_video /proc/$(pgrep -f 'RDD Process')/maps`.
 - **Memory guard** (2026-10-12), so a runaway program fails on its own instead of freezing the
   machine into a hard reset:
   - systemd-oomd ([oomd.conf.d/deck.conf](etc/systemd/oomd.conf.d/deck.conf)) kills the cgroup
@@ -373,7 +379,9 @@ Skipped: Android SDK/JDK (eInk-markdown-editor, possibly dead), zig (only omnidi
 friends-and-family-ca's release workflows use it), Nix.
 
 `~/.cargo/config.toml` links with mold but leaves out `target-cpu=native`:
-these repos build binaries that ship.
+these repos build binaries that ship. It runs rustc through sccache (`dev-util/sccache`, cache in
+`~/.cache/sccache`), so dependencies compiled once are reused by clean builds, worktrees and other
+repos; `sccache --show-stats` shows hits.
 
 Go is `dev-lang/go` from Portage, in world. `GOTOOLCHAIN=local`
 ([home/.config/go/env](home/.config/go/env)) stops `go` from downloading newer toolchains that a

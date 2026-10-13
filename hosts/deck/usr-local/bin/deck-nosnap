@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# deck-nosnap DIR...: keep rebuildable folders (cargo's target/, ~/.cache) out of the btrfs snapshots.
+#
+# btrbk snapshots @home hourly and keeps snapshots for up to 3 months (etc/btrbk/btrbk.conf). Build
+# output churns: every build rewrites gigabytes, and the snapshots keep each old version alive,
+# using disk and leaving btrfs to clean it up in the background when they expire. A snapshot
+# doesn't descend into nested subvolumes, so turning such a folder into its own subvolume leaves
+# it out, at the same path. Runs as the folder's owner, no root needed; `rm -rf` and `cargo clean`
+# still work on it.
+#
+# The contents are moved with reflinks (no data copied). Stop builds and editors' build servers
+# (rust-analyzer) using the folder first. The tile's "Build output in snapshots" line lists folders
+# that need it (deck-attention).
+set -euo pipefail
+
+is_subvolume() { [[ $(stat -c %i "$1") == 256 ]]; }
+
+(($#)) || { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+for dir in "$@"; do
+  dir=${dir%/}
+  if [[ ! -d $dir ]]; then
+    btrfs subvolume create "$dir" >/dev/null
+    echo "deck-nosnap: $dir created as a subvolume"
+    continue
+  fi
+  if is_subvolume "$dir"; then
+    echo "deck-nosnap: $dir is already a subvolume"
+    continue
+  fi
+  new=$dir.nosnap-new old=$dir.nosnap-old
+  [[ -e $new || -e $old ]] && { echo "deck-nosnap: $new or $old is in the way; remove it first" >&2; exit 1; }
+  btrfs subvolume create "$new" >/dev/null
+  cp -a --reflink=always "$dir/." "$new/"
+  mv "$dir" "$old"
+  mv "$new" "$dir"
+  rm -rf "$old"
+  echo "deck-nosnap: $dir is now a subvolume, out of the snapshots"
+done

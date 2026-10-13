@@ -15,7 +15,7 @@ Fields, all optional (a missing sensor is left out):
   fan                         RPM
   psys pkg_w core_w uncore_w  power in W over the last interval (RAPL: whole platform, CPU
                               package, cores, uncore/graphics)
-  pl1 pl2                     the package power limits in force, W
+  pl1 pl2                     the package power limits in force, W (the lower of MSR and MMIO)
   mhz mhz_max gpu_mhz         average and fastest CPU core, graphics frequency
   load                        1-minute load average
   mem_avail swap_used         GiB
@@ -118,12 +118,17 @@ class Energy:
 
 
 def limits():
-    d = "/sys/class/powercap/intel-rapl:0"
+    """The package power limits in force: the lower of the MSR copy (intel-rapl) and the MMIO copy
+    (intel-rapl-mmio), which Lenovo's firmware sets per platform profile and which wins."""
     out = {}
-    for i in range(3):
-        name = read(f"{d}/constraint_{i}_name")
-        if name in ("long_term", "short_term"):
-            out["pl1" if name == "long_term" else "pl2"] = num(f"{d}/constraint_{i}_power_limit_uw", 1e6)
+    for d in ("/sys/class/powercap/intel-rapl:0", "/sys/class/powercap/intel-rapl-mmio:0"):
+        for i in range(3):
+            name = read(f"{d}/constraint_{i}_name")
+            if name in ("long_term", "short_term"):
+                key = "pl1" if name == "long_term" else "pl2"
+                w = num(f"{d}/constraint_{i}_power_limit_uw", 1e6)
+                if w and (key not in out or w < out[key]):
+                    out[key] = w
     return out
 
 

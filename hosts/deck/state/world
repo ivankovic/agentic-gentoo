@@ -25,6 +25,7 @@ dev-util/github-cli
 dev-util/gitleaks
 dev-util/omnidiff
 dev-util/rustup
+dev-util/sccache
 dev-util/stylua
 dev-util/tree-sitter-cli
 dev-vcs/git
@@ -71,7 +72,6 @@ sys-fs/udisks
 sys-kernel/gentoo-kernel
 sys-kernel/linux-firmware
 sys-power/power-profiles-daemon
-sys-power/thermald
 www-apps/hugo
 www-client/firefox-bin
 x11-themes/bibata-xcursors

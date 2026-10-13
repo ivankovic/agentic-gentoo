@@ -14,6 +14,8 @@ events (crashes, an unclean shutdown) as seen: the tile drops them until a newer
   portage   no @world update for 14 days, unread Gentoo news, preserved libraries waiting for
             `emerge @preserved-rebuild`, depclean blocked; from /var/lib/deck-health/portage.json
             (etc/deck-health/portage.py, run as root after syncs and emerges)
+  snapshots build output inside the hourly snapshots of @home: a cargo target/ in ~/src, or
+            ~/.cache, that isn't its own subvolume (fix: deck-nosnap DIR)
   disk      / or /efi more than 85% full (btrfs slows down and can fail to write when nearly full;
             a full ESP fails the next kernel install)
 
@@ -159,6 +161,12 @@ def portage():
     return found
 
 
+def snapshotted():
+    """Rebuildable folders that the hourly @home snapshots still include (not subvolumes)."""
+    dirs = sorted(SRC.glob("*/target")) + [HOME / ".cache"]
+    return [d for d in dirs if d.is_dir() and not d.is_symlink() and d.stat().st_ino != 256]
+
+
 def disks():
     found = []
     for mount in ("/", "/efi"):
@@ -206,6 +214,13 @@ def main():
         if u > last_seen:
             lines.append(f"Unclean shutdown before {stamp}")
         text.append(f"Unclean shutdown before {stamp} (see Disk health below)")
+
+    snap = snapshotted()
+    if snap:
+        names = [str(d.relative_to(SRC)) if d.is_relative_to(SRC) else "~/" + str(d.relative_to(HOME)) for d in snap]
+        lines.append("Build output in snapshots: " + ", ".join(names))
+        text += ["Build output in the hourly snapshots of @home (stop builds, then):",
+                 "  deck-nosnap " + " ".join(str(d).replace(str(HOME), "~", 1) for d in snap)]
 
     for line, detail in portage() + disks():
         lines.append(line)

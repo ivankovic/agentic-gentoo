@@ -3,3 +3,9 @@
 [target.x86_64-unknown-linux-gnu]
 linker = "clang"
 rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+# Cache compiled crates across builds and repos (dev-util/sccache, ~/.cache/sccache, 10 GiB): a
+# clean build, a new worktree or another repo with the same dependencies reuses them. Crates built
+# incrementally (the workspace's own, in debug) are left to cargo. `sccache --show-stats` for hits.
+[build]
+rustc-wrapper = "sccache"
