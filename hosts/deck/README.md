@@ -233,6 +233,14 @@ After an unexplained reset: `ls /var/lib/systemd/pstore/`, `journalctl -b -1 -k 
 empty pstore after a reset with no panic screen points at firmware or hardware (power, thermal,
 EC), not the kernel.
 
+**Memory test.** `sys-apps/memtest86+` (EFI build only, [package.use/memtest](portage/package.use/memtest))
+has its own systemd-boot entry, last in the menu and never the default:
+[efi/loader/entries/memtest86+.conf](efi/loader/entries/memtest86+.conf) (a record; `deploy.sh`
+does not write `/efi`), pointing at a copy in `/efi/EFI/memtest86+/memtest.efi`. Boot it once with
+`systemctl reboot --boot-loader-entry=memtest86+.conf`; the following boot is Gentoo again. Leave
+it on AC overnight (one pass takes about an hour). After a memtest86+ upgrade, copy
+`/usr/share/memtest86+/memtest.efi64` over the ESP copy again.
+
 ## Security
 
 Hardening (2026-10-09):

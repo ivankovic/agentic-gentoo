@@ -67,6 +67,7 @@ sys-apps/dmidecode
 sys-apps/fd
 sys-apps/fwupd
 sys-apps/lm-sensors
+sys-apps/memtest86+
 sys-apps/nvme-cli
 sys-apps/usbutils
 sys-apps/xdg-desktop-portal-gnome

@@ -1,0 +1,2 @@
+# EFI build only, kept in /usr/share; the ESP copy and loader entry are set up by hand (README).
+sys-apps/memtest86+ -bios64 -boot
