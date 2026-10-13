@@ -223,8 +223,9 @@ Wi-Fi. What is set because of it:
   synced every 2 s and kept four days ([journald@vitals.conf](etc/systemd/journald@vitals.conf)).
   About 4 ms of CPU per 10 s; the EC sensors and battery (about 1 ms each, through ACPI) are read
   every 10 s, the SSD temperature (which wakes the drive) every 30 s.
-  All three unexplained resets (2026-10-09 during light work, 2026-10-11 under a full-core build,
-  2026-10-13 22:07 idle on AC at 52 °C and 12 W with throttle and AER counts at 0) left
+  All four unexplained resets (2026-10-09 during light work, 2026-10-11 under a full-core build,
+  2026-10-13 22:07 and 22:34 idle on AC at 50–55 °C and about 10 W, battery held at 79% by the
+  75/80 charge limit, throttle and AER counts at 0, no USB-C/UCSI messages) left
   nothing: no kernel message, empty pstore, no firmware error record. So the kernel never saw them
   coming, which points below it (power, firmware, a PCIe device, RAM).
 
