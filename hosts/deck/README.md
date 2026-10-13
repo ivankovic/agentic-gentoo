@@ -227,7 +227,11 @@ Wi-Fi. What is set because of it:
   2026-10-13 22:07 and 22:34 idle on AC at 50–55 °C and about 10 W, battery held at 79% by the
   75/80 charge limit, throttle and AER counts at 0, no USB-C/UCSI messages) left
   nothing: no kernel message, empty pstore, no firmware error record. So the kernel never saw them
-  coming, which points below it (power, firmware, a PCIe device, RAM).
+  coming, which points below it (power, firmware, a PCIe device, RAM). Both 2026-10-13 resets
+  were heard the same way: the fan racing for a few seconds (after the last vitals line, which
+  showed about 3160 RPM), then 10–20 s of black screen, then the Lenovo logo. That fits the
+  embedded controller noticing a frozen machine, going to full fan and power-cycling it. Since
+  the first of them the fan also idles at about 3160 RPM where it used to sit at about 2580 or 0.
 
 After an unexplained reset: `ls /var/lib/systemd/pstore/`, `journalctl -b -1 -k -p warning`, and
 `journalctl --namespace=vitals -b -1 -n 50` for the last 100 s of temperatures and power. An
