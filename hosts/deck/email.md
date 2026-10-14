@@ -121,8 +121,8 @@ The user, per account, before setup (about 15 minutes):
 2. The Workspace account: in the Workspace admin console, IMAP enabled for users and app passwords
    allowed.
 3. Gmail settings → Forwarding and POP/IMAP: IMAP on, auto-expunge on, expunged messages moved
-   to the Trash. Gmail in another language may name its folders `[Google Mail]/…`: then
-   `FOLDERS` in deck-mail needs that.
+   to the Trash. Gmail names its folders in the account's language (British English: Trash is
+   `[Gmail]/Bin`); `deck-mail config` finds them by their IMAP special-use flags.
 4. The promotions filter above, applied to existing conversations.
 5. Note the account's size.
 

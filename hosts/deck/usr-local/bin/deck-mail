@@ -27,6 +27,7 @@ Every 5 min deck-mail.timer runs `sync`. It never asks for the passphrase itself
 doesn't have it, it notifies once and waits for `deck-mail unlock` (or a `sync` in a terminal).
 """
 import fcntl
+import imaplib
 import os
 import pathlib
 import shlex
@@ -41,9 +42,12 @@ ACCOUNTS = CONFIG / "deck-mail/accounts"
 MAIL = HOME / "Mail"
 ISYNCRC = CONFIG / "isyncrc"
 MSMTPQ = "/usr/share/msmtp/msmtpq"
-# Gmail's folders; local name, Gmail name. Spam and the inbox tabs aren't synced.
-FOLDERS = [("INBOX", "INBOX"), ("All", "[Gmail]/All Mail"), ("Sent", "[Gmail]/Sent Mail"),
-           ("Drafts", "[Gmail]/Drafts"), ("Trash", "[Gmail]/Trash")]
+# Gmail's folders: local name, the IMAP special-use flag that finds it, its English name.
+# Gmail names them in the account's language (British English: "[Gmail]/Bin"), so `config` asks
+# the server; the names here are the fallback. Spam and the inbox tabs aren't synced.
+FOLDERS = [("INBOX", None, "INBOX"), ("All", r"\All", "[Gmail]/All Mail"),
+           ("Sent", r"\Sent", "[Gmail]/Sent Mail"), ("Drafts", r"\Drafts", "[Gmail]/Drafts"),
+           ("Trash", r"\Trash", "[Gmail]/Trash")]
 NOTIFY_EVERY = 3600
 # msmtpq: the queue and its log in the state folder; no connection test (debian.org ping): when
 # msmtp fails, the mail is queued and the next sync sends it.
@@ -98,7 +102,7 @@ Path {MAIL}/{n}/
 Inbox {MAIL}/{n}/INBOX
 SubFolders Verbatim
 """)
-        for local, remote in FOLDERS:
+        for local, remote in a["folders"]:
             out.append(f"""
 Channel {n}-{local.lower()}
 Far :{n}-far:"{remote}"
@@ -109,7 +113,7 @@ Expunge Near
 SyncState *
 CopyArrivalDate yes
 """)
-        out.append(f"\nGroup {n}\n" + "".join(f"Channel {n}-{l.lower()}\n" for l, _ in FOLDERS))
+        out.append(f"\nGroup {n}\n" + "".join(f"Channel {n}-{l.lower()}\n" for l, _ in a["folders"]))
     return "".join(out)
 
 
@@ -187,8 +191,34 @@ outgoing = {send}
     return "".join(out)
 
 
+def folders(a):
+    """The account's Gmail folders, local name and Gmail's, by their special-use flags."""
+    names = {flag: name for _, flag, name in FOLDERS if flag}
+    env = dict(os.environ, PASSWORD_STORE_GPG_OPTS="--pinentry-mode=error")
+    pw = subprocess.run(["pass", "show", f"mail/{a['name']}"], capture_output=True, text=True,
+                        env=env)
+    if pw.returncode == 0 and pw.stdout.strip():
+        try:
+            imap = imaplib.IMAP4_SSL("imap.gmail.com", timeout=30)
+            imap.login(a["address"], pw.stdout.splitlines()[0])
+            for line in imap.list()[1]:
+                line = line.decode()
+                flags, name = line[1:line.index(")")].split(), line.rsplit(' "/" ', 1)[1].strip('"')
+                for flag in names:
+                    if flag in flags:
+                        names[flag] = name
+            imap.logout()
+        except (OSError, imaplib.IMAP4.error, ValueError) as e:
+            print(f"deck-mail: {a['name']}: couldn't list Gmail's folders ({e}); English names")
+    else:
+        print(f"deck-mail: {a['name']}: no password to list Gmail's folders; English names")
+    return [(local, names[flag] if flag else name) for local, flag, name in FOLDERS]
+
+
 def config():
     accts = accounts()
+    for a in accts:
+        a["folders"] = folders(a)
     write(ISYNCRC, isyncrc(accts))
     write(CONFIG / "msmtp/config", msmtprc(accts))
     write(CONFIG / "notmuch/default/config", notmuch(accts))
