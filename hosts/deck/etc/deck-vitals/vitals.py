@@ -22,6 +22,8 @@ Fields, all optional (a missing sensor is left out):
   psi_cpu psi_mem psi_io      pressure: % of time stalled over the last 10 s ("some")
   throttle                    package thermal-throttle events since the previous line
   aer                         PCIe errors (correctable+nonfatal+fatal) since the previous line
+  idle_off                    CPU idle states switched off (on cpu0, e.g. C3_ACPI), every
+                              ~60 s; left out when none are
   ac bat bat_w profile        on AC (1/0), battery %, battery discharge W, platform profile
 
 The EC's sensors (gpu, ec) and the battery go through ACPI at about 1 ms a read, so on AC
@@ -224,6 +226,14 @@ def fmt(fields):
     return " ".join(parts)
 
 
+def idle_off():
+    """The idle states disabled through cpuidle/stateN/disable, on cpu0."""
+    off = [read(os.path.join(os.path.dirname(p), "name"))
+           for p in sorted(glob.glob("/sys/devices/system/cpu/cpu0/cpuidle/state*/disable"))
+           if read(p) == "1"]
+    return {"idle_off": ",".join(off)} if off else {}
+
+
 def main():
     energy, delta = Energy(), Delta()
     n = 0
@@ -246,6 +256,7 @@ def main():
         f["throttle"] = delta("throttle", counter_sum("/sys/devices/system/cpu/cpu*/thermal_throttle/package_throttle_count"))
         if n % 30 == 0:
             f["aer"] = delta("aer", counter_sum("/sys/bus/pci/devices/*/aer_dev_*", field=True))
+            f.update(idle_off())
         f.update(power_supply(slow))
         if n > 0:  # the first line has no power or deltas yet
             print(fmt(f), flush=True)

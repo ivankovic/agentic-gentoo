@@ -248,6 +248,13 @@ it on AC overnight (one pass takes about an hour). After a memtest86+ upgrade, c
 Run 2026-10-14 00:19–09:20 on AC: passed, and no freeze or reset in those 9 hours outside Linux.
 Memtest keeps the CPU busy, so the processor never entered its deep idle states the whole time.
 
+**Idle-state test** (from 2026-10-14 ~09:30): the deepest idle state, `C3_ACPI` (intel_idle using
+the firmware's ACPI table; about 1 ms to wake), switched off at runtime on every CPU with
+`echo 1 | sudo tee /sys/devices/system/cpu/cpu*/cpuidle/state3/disable`. Not persistent: a reboot
+turns it back on, so re-run it after each boot while the test lasts. Vitals logs `idle_off=C3_ACPI`
+while it is in force. A few days on AC without a freeze points at that state (then: BIOS update or
+a Lenovo report, and a permanent setting); a freeze with it off rules idle states out.
+
 **Terminals come back after a crash.** [deck-terminals](usr-local/bin/deck-terminals), run by the
 user service [deck-terminals.service](home/.config/systemd/user/deck-terminals.service), records
 every 10 s each foot window's workspace, column, width, directory and foreground program in
