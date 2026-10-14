@@ -259,6 +259,12 @@ a Lenovo report, and a permanent setting); a freeze with it off rules idle state
 at 79%, 55 s after unlocking the screen). The deepest idle state isn't the cause. Freezes since
 2026-10-13 came after 0.5–2 h of Linux; the 9 h of memtest had none.
 
+**Firefox.** The user was in Firefox at every reset. In the last 60 s before each of the three
+logged ones the GPU was mostly asleep (`gpu_mhz=0`, uncore about 0.1 W): no video or heavy
+drawing, and no i915 message (GPU hang, reset, fault) in any boot since 2026-10-09. Firefox runs
+with its defaults: WebRender on the GPU, video decoded through VA-API (`iHD`). GPU: i915, Raptor
+Lake-P, GuC 70.49.4, HuC 7.9.3, DMC 2.20.
+
 **Terminals come back after a crash.** [deck-terminals](usr-local/bin/deck-terminals), run by the
 user service [deck-terminals.service](home/.config/systemd/user/deck-terminals.service), records
 every 10 s each foot window's workspace, column, width, directory and foreground program in
