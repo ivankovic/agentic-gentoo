@@ -1,119 +1,120 @@
-# Email on deck: plan (tabled)
+# Email on deck: plan
 
-Status: discussed 2026-10-13/14, nothing installed yet. Two accounts for now (personal Gmail and a
-Google Workspace account on the user's domain), maybe more later.
+Status (2026-10-14): setup decided, nothing installed yet. Accounts: a personal Gmail
+account (28,060 messages) and a Google Workspace account on the user's own domain (43,221
+messages); more may follow. Addresses stay out of the repo. Disk: 323 GB free on `/home`.
 
-## Decided so far
+## Decided
 
-- **Offline mail**: a local copy on deck, readable and searchable without a connection; mail
-  written offline is sent when back online.
-- **No Google Cloud OAuth client.** No registering with Google for OAuth keys, so no Gmail API
-  and no lieer. That leaves IMAP and SMTP with an **app password** per account.
-- **Gmail labels should sync both ways** with local tags, so a label set on the phone shows on
-  deck and the reverse. mbsync can't do that, hence a sync tool of our own (below).
-- Building and patching software is acceptable; tools go through Portage (local overlay).
+- **Offline**: a full local copy of every account, readable and searchable without a connection;
+  mail written offline is sent when back online.
+- **Everything syncs**: all history, promotions included. Only Spam stays on the server.
+- **One view over all accounts**, plus each account on its own.
+- **No Google Cloud OAuth client**: IMAP and SMTP with an **app password** per account.
+- **No Gmail labels to sync**: only Gmail's built-ins are in use. Inbox, Starred, read/unread,
+  Sent, Drafts and Trash map onto IMAP; the inbox tabs (Primary, Social, Promotions, Updates,
+  Forums) exist only in Gmail's own apps. So mbsync loses nothing that matters, and the
+  label-aware sync tool once considered isn't needed (see the end).
+- Tools through Portage; building and patching are acceptable.
 
-## Layers
+## Setup
 
 ```
- Google ⇄ [sync] ⇄ ~/Mail/<account>/ (maildir) → [notmuch: index + tags] → [aerc]
-                                                                              │
-                                                      [msmtp / msmtpq] ← send ┘
+gmail ────┐ mbsync ┌→ ~/Mail/gmail/      ┐
+          │ (every │                     ├→ notmuch → aerc: "All" + one tab per account
+workspace ┘ 5 min) └→ ~/Mail/ivankovic/  ┘
+                                                 aerc → msmtpq → the right account's SMTP
 ```
 
-| Layer | Choice | Alternatives considered |
+| Layer | Tool | Package |
 |---|---|---|
-| Sync | Own Gmail-label-aware IMAP sync (below) | mbsync (stable, any provider, but labels become duplicate folders and tags stay local); lieer (labels as tags over the Gmail API, needs an OAuth client: ruled out); OfflineIMAP `synclabels` (labels in a header inside each file, slow, not in Portage) |
-| Index + tags | notmuch (`net-mail/notmuch`, `USE=python` for the bindings) | mu (folder model, Emacs-centred) |
-| Reader | aerc (`mail-client/aerc`, `~amd64`) on notmuch | neomutt (most mature, most configuration, weaker images); alot; notmuch-vim; Emacs notmuch.el / mu4e (best inline HTML and images, but Emacs) |
-| Send | msmtp, with `msmtpq` queueing mail written offline (`mail-mta/msmtp`) | aerc's own SMTP (no offline queue) |
-| Secrets | app passwords in `pass` (`app-admin/pass`, GPG; gpg-agent caches the passphrase) | |
-| New-mail push | IDLE in the sync tool | goimapnotify (GURU), for mbsync accounts |
-| Auto-tagging | notmuch `post-new` hook with a rules file | afew (not in Portage) |
+| Sync | mbsync, a user timer every 5 min | `net-mail/isync` (stable) |
+| Index, tags, search | notmuch, one database over `~/Mail` | `net-mail/notmuch` (0.39 stable) |
+| Reader | aerc: "All" tab (combined inbox, unread, flagged, sent) + one tab per account | `mail-client/aerc` (`~amd64`) |
+| Send | msmtp: picks the account by the From address (`--read-envelope-from`); `msmtpq` queues mail written offline | `mail-mta/msmtp` (`~amd64` for current) |
+| Secrets | app passwords in `pass` (GPG; gpg-agent caches the passphrase) | `app-admin/pass` (stable) |
+| HTML, images | `w3m` renders HTML as text; `chafa` shows image attachments as sixel in aerc's viewer; `:open` sends anything to Firefox or `imv` | `www-client/w3m`, `media-gfx/chafa`, `media-gfx/imv` (stable) |
 
-A future non-Google account would use mbsync into the same `~/Mail` and the same notmuch
-database; aerc shows each account as a tab, notmuch searches all of them (`folder:<account>/**`).
+Config templates go in the repo (no secrets); passwords stay in `pass` on deck.
 
-## Images
+### Gmail over IMAP
 
-None of the readers shows images inline in HTML mail: HTML goes through `w3m` as text, remote
-images are never fetched (good for privacy). Attached images: aerc's built-in terminal passes
-sixel through, so `image/*=chafa -f sixel …` (`media-gfx/chafa`) can show them in the viewer
-(to confirm with aerc 0.21 on deck); neomutt via mailcap, full screen. Anything image-heavy: one
-key opens it in Firefox or `imv` (`media-gfx/imv`).
+Per account, mbsync syncs `INBOX`, `[Gmail]/All Mail`, `[Gmail]/Sent Mail`, `[Gmail]/Drafts` and
+`[Gmail]/Trash`. A message in several folders is one message to notmuch.
 
-Experiment for later: `w3m -sixel` (with `media-libs/libsixel`) inside aerc's terminal might show
-images that are attached to the mail itself in rendered HTML.
-
-## The sync tool: Gmail-label-aware IMAP
-
-Gmail's IMAP advertises `X-GM-EXT-1`:
-
-| Extension | Use |
+| Gmail | notmuch |
 |---|---|
-| `X-GM-MSGID` | permanent 64-bit message ID, same in every folder: no duplicates, no confusion |
-| `X-GM-THRID` | Gmail's thread ID |
-| `X-GM-LABELS` | read labels with FETCH; add/remove with `STORE +X-GM-LABELS` / `-X-GM-LABELS`, system labels included (`\Inbox`, `\Important`, `\Sent`, `\Trash`) |
-| `X-GM-RAW` | Gmail search syntax on the server (`older_than:2y`) |
-| CONDSTORE | changes since the last sync, via `CHANGEDSINCE` (to confirm early: that label changes count as changes) |
-| IDLE | instant notice of new mail |
+| Inbox | `inbox` tag (both ways) |
+| Starred | `flagged` tag (both ways, maildir flag) |
+| read / unread | `unread` tag (both ways, maildir flag) |
+| Sent, Drafts | `sent`, `draft`, from their folders |
+| Trash | `deleted` |
+| inbox tabs | not visible over IMAP; local rules instead (below) |
 
-Design (as lieer does over the API, here over IMAP):
+- **Archive** = remove `inbox`: a notmuch hook deletes the INBOX copy, mbsync expunges it, Gmail
+  removes the Inbox label (the All Mail copy stays). Gmail setting: auto-expunge on, "archive the
+  message" for expunged messages.
+- **Delete** = tag `deleted`: the hook moves the file to the Trash folder; Gmail keeps Trash 30 days.
+- **Read/unread and starred**: notmuch `synchronize_flags` keeps maildir flags and tags in step;
+  mbsync carries the flags.
 
-- **Only `[Gmail]/All Mail`** (everything but Spam and Trash), plus Spam/Trash if wanted.
-- **Pull:** `UID FETCH … (X-GM-MSGID X-GM-LABELS FLAGS) (CHANGEDSINCE <modseq>)`; new messages
-  downloaded into the maildir and added to notmuch; deletions found by comparing UID lists.
-- **Push:** notmuch's revision counter (`lastmod:`) gives every local tag change since the last
-  sync in one query; each becomes a label or flag STORE.
-- **Merge:** a small state database keeps each message's labels at the last sync, so both sides'
-  changes merge label by label. Only "added on one side, removed on the other" conflicts; the
-  server wins.
-- **Mapping:**
+### Promotions and other bulk mail
 
-  | Gmail | notmuch |
-  |---|---|
-  | `\Inbox` | `inbox` |
-  | no `\Seen` flag | `unread` |
-  | `\Flagged` (starred) | `flagged` |
-  | `\Answered` | `replied` |
-  | `\Important`, `\Sent` | `important`, `sent` |
-  | user labels | same-name tags |
+All of it comes to disk. To keep it out of the way:
 
-  notmuch's automatic tags (`attachment`, `signed`, `encrypted`) stay local.
-- **Delete** = add `\Trash`. Never EXPUNGE or delete permanently; Gmail keeps Trash 30 days.
-- **UIDVALIDITY change:** re-match by `X-GM-MSGID`, no re-download.
-- **Language:** Python: `imaplib` sends the X-GM commands, and has IDLE since Python 3.14
-  (deck runs 3.14); notmuch's official bindings. In the local overlay with an ebuild and tests.
-  Rough size 1000–1500 lines with tests.
-- Sent mail appears in Sent by itself on the next pull. Drafts stay local at first.
+- **Gmail filter** per account: `category:promotions` → *Skip the Inbox* (and "also apply to
+  matching conversations" for the existing ones). They stay in All Mail, so they're synced and
+  searchable, but out of the inbox everywhere, on the phone too.
+- **Local rules** in the notmuch `post-new` hook: tag bulk mail by its headers
+  (`List-Unsubscribe`, `Precedence: bulk`, `List-Id`) as `promotions` or `lists`; aerc's views
+  leave those out of the inbox. Rules live in the repo and can grow.
 
-### Phases and safety
+### First sync
 
-1. **App passwords first**, before any code: 2-Step Verification on both accounts; on Workspace
-   the admin console must allow app passwords and IMAP. Confirm both log in over IMAP.
-2. **Read-only** (`EXAMINE`, which can't change the server) for about a week: already a full
-   searchable offline copy with labels as tags.
-3. **Writing**, behind a dry-run mode and a log of every server change.
-4. **Guards:** no permanent deletion ever; stop if one run would change more than N messages;
-   the local copy is in the hourly btrfs snapshots.
+Gmail allows about 2.5 GB of IMAP download per account per day: a large account takes more than
+a day the first time. mbsync resumes where it stopped, so the timer just keeps going. Check each
+account's size first (Google storage page). Maildir is many small files: fine on btrfs with zstd;
+the notmuch index adds a fraction on top (to measure). Mail stays in the hourly snapshots: it
+churns little.
 
-Gmail caps IMAP downloads at about 2.5 GB per day per account: a large mailbox takes days for the
-first sync, so start with recent years and fetch older mail in the background.
+### Adding an account
 
-## Open decisions
+One block each in the mbsync, msmtp and aerc configs and one password in `pass`; notmuch picks up
+the new folder by itself. A non-Google account is the same, minus the Gmail folder names.
 
-1. How much history: everything, or the last N years first.
-2. Sync Spam and Trash, or skip them.
-3. A name for the tool (working name `gmsync`).
-4. Try the inline-image experiment once the basics work?
+## Steps
 
-## Packages (as of 2026-10-14)
+The user, per account, before setup (about 15 minutes):
 
-| Package | Version, keyword |
-|---|---|
-| `net-mail/notmuch` | 0.39 stable, 0.40 `~amd64` |
-| `mail-client/aerc` | 0.21.0 `~amd64` |
-| `mail-mta/msmtp` | 1.8.34 `~amd64` (older stable) |
-| `net-mail/isync` | 1.5.1 stable (for non-Google accounts) |
-| `app-admin/pass` | 1.7.4 stable |
-| `media-gfx/chafa`, `media-gfx/imv`, `www-client/w3m`, `media-libs/libsixel` | stable |
+1. 2-Step Verification on; an app password (myaccount.google.com → Security).
+2. The Workspace account: in the Workspace admin console, IMAP enabled for users and app passwords
+   allowed.
+3. Gmail settings → Forwarding and POP/IMAP: IMAP on, auto-expunge on, expunged messages archived.
+4. The promotions filter above, applied to existing conversations.
+5. Note the account's size.
+
+Then on deck:
+
+1. Keywords and packages; `pass` set up with the two app passwords.
+2. Templates in the repo: mbsync, msmtp, aerc, notmuch config and hooks; the sync timer.
+3. A first sync **pulling only** (mbsync `Sync Pull`), checked together; then both ways.
+4. A maintenance-tile line when sync has been failing for an hour.
+
+## Other options considered
+
+| Instead of | Considered | Why not now |
+|---|---|---|
+| mbsync | lieer (Gmail API, labels as tags) | needs a Google Cloud OAuth client |
+| mbsync | OfflineIMAP (`synclabels`) | slow, old, not in Portage; labels not needed |
+| notmuch | mu | folder model, Emacs-centred |
+| aerc | neomutt | most mature, but much more configuration; weaker images |
+| aerc | alot, notmuch-vim, Emacs (notmuch.el, mu4e) | smaller; vim has no images; Emacs is Emacs |
+| app passwords | OAuth2 (`cyrus-sasl-xoauth2`, a token helper) | needs a Google Cloud OAuth client |
+
+**Gmail-label-aware IMAP sync** (designed 2026-10-14, shelved): Gmail's IMAP has `X-GM-EXT-1`,
+with permanent message IDs (`X-GM-MSGID`), thread IDs, labels readable and writable
+(`X-GM-LABELS`), Gmail search (`X-GM-RAW`) and CONDSTORE for "what changed". A Python tool could
+sync only All Mail and map labels to tags both ways (three-way merge against the last-synced
+state, never deleting permanently, read-only phase first). Not needed while only Gmail's built-in
+labels are in use; worth revisiting if custom labels or the inbox tabs as tags become wanted
+(`X-GM-RAW "category:promotions"` would give the tabs).
