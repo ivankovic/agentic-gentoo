@@ -278,6 +278,14 @@ charger is not it. Idle until the last sample (22:55:55): 2–3 W package, 46 °
 0.2; that sample shows a sudden start of something (12 W, cores to 3.6 GHz, memory pressure 2.7%,
 swap +0.5 GiB). The next sample, 10 s later, never came; deck was booting again at 22:56:30.
 Again a burst of activity from idle, as at 11:13.
+The user was in Firefox, on Gmail: Firefox at all six.
+
+**Firefox GPU-off test** (from 2026-10-14 ~23:10): in the profile's `user.js`
+(`~/.config/mozilla/firefox/<profile>/user.js`, not in the repo), `gfx.webrender.software=true`
+(pages drawn on the CPU) and `media.hardware-video-decoding.enabled=false` (no VA-API). Firefox
+used as usual. Resets stopping for a day or two of that points at i915/the media engine (a kernel
+bug report, or Lenovo); resets carrying on clear Firefox's GPU use. Undo: delete `user.js`, reset
+both prefs in about:config. `about:support` → Graphics shows "Compositing: WebRender (Software)".
 
 **Terminals come back after a crash.** [deck-terminals](usr-local/bin/deck-terminals), run by the
 user service [deck-terminals.service](home/.config/systemd/user/deck-terminals.service), records
