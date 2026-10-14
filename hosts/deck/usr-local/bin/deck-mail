@@ -179,7 +179,7 @@ def aerc(accts):
 [All]
 source = notmuch://{MAIL}
 query-map = {CONFIG}/aerc/all.map
-folders-sort = Inbox,Unread,Flagged,Sent,Drafts,Everything
+folders-sort = Inbox,Unread,Flagged,Sent,Drafts,Everything,Bin
 default = Inbox
 from = {first["realname"]} <{first["address"]}>
 aliases = {", ".join(a["address"] for a in accts[1:])}

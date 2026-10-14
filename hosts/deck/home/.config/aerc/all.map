@@ -1,6 +1,7 @@
-Inbox=tag:inbox
-Unread=tag:unread
-Flagged=tag:flagged
-Sent=tag:sent
-Drafts=tag:draft
-Everything=*
+Inbox=tag:inbox and not tag:deleted
+Unread=tag:unread and not tag:deleted
+Flagged=tag:flagged and not tag:deleted
+Sent=tag:sent and not tag:deleted
+Drafts=tag:draft and not tag:deleted
+Everything=not tag:deleted
+Bin=tag:deleted
