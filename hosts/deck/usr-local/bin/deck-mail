@@ -1,0 +1,286 @@
+#!/usr/bin/env python3
+"""deck-mail: the mail setup on deck (hosts/deck/email.md): Gmail accounts kept offline in
+~/Mail with mbsync, indexed by notmuch, read in aerc, sent through msmtp(q).
+
+  deck-mail config   write each account's config from ~/.config/deck-mail/accounts
+  deck-mail sync     fetch mail (mbsync), index it (notmuch new), send what's queued
+  deck-mail unlock   ask for the GPG passphrase now, so the timer's syncs can read the passwords
+  deck-mail send     aerc's outgoing command: msmtpq, which queues what can't go out now
+
+The account list stays out of the repo, which is public: addresses only on deck.
+~/.config/deck-mail/accounts, one account a line, the first one the default for sending:
+
+  # name       address               your name as senders see it
+  ivankovic    you@your.domain       Your Name
+  gmail        you@gmail.com         Your Name
+
+`config` writes, from it: ~/.config/isyncrc (mbsync), ~/.config/msmtp/config,
+~/.config/notmuch/default/config, ~/.config/aerc/accounts.conf. The rest is tracked in the repo
+(aerc.conf, the notmuch hooks, the sync timer). Each account's app password is in `pass` as
+mail/<name>.
+
+Sync is one way for now: Gmail to deck (mbsync "Sync Pull"). Reading, starring and archiving in
+aerc stay on deck and aren't sent back; what changes in Gmail comes down. Both ways comes once
+the first full sync has been checked.
+
+Every 5 min deck-mail.timer runs `sync`. It never asks for the passphrase itself: when gpg-agent
+doesn't have it, it notifies once and waits for `deck-mail unlock` (or a `sync` in a terminal).
+"""
+import fcntl
+import os
+import pathlib
+import shlex
+import subprocess
+import sys
+import time
+
+HOME = pathlib.Path.home()
+CONFIG = pathlib.Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config")
+STATE = pathlib.Path(os.environ.get("XDG_STATE_HOME") or HOME / ".local/state") / "deck-mail"
+ACCOUNTS = CONFIG / "deck-mail/accounts"
+MAIL = HOME / "Mail"
+ISYNCRC = CONFIG / "isyncrc"
+MSMTPQ = "/usr/share/msmtp/msmtpq"
+# Gmail's folders; local name, Gmail name. Spam and the inbox tabs aren't synced.
+FOLDERS = [("INBOX", "INBOX"), ("All", "[Gmail]/All Mail"), ("Sent", "[Gmail]/Sent Mail"),
+           ("Drafts", "[Gmail]/Drafts"), ("Trash", "[Gmail]/Trash")]
+NOTIFY_EVERY = 3600
+# msmtpq: the queue and its log in the state folder; no connection test (debian.org ping): when
+# msmtp fails, the mail is queued and the next sync sends it.
+QUEUE_ENV = {"MSMTPQ_Q": str(STATE / "queue"), "MSMTPQ_LOG": str(STATE / "msmtpq.log"),
+             "EMAIL_CONN_TEST": "x"}
+
+
+def accounts():
+    out = []
+    for line in ACCOUNTS.read_text().splitlines():
+        line = line.split("#", 1)[0].split()
+        if line:
+            if len(line) < 3 or "@" not in line[1]:
+                sys.exit(f"deck-mail: {ACCOUNTS}: expected 'name address Your Name': {' '.join(line)}")
+            out.append({"name": line[0], "address": line[1], "realname": " ".join(line[2:])})
+    if not out:
+        sys.exit(f"deck-mail: no accounts in {ACCOUNTS}")
+    return out
+
+
+def write(path, text, mode=0o600):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+    print(f"deck-mail: wrote {path}")
+
+
+HEADER = "# Written by `deck-mail config` from {} (addresses stay off the repo). Edit that instead.\n"
+
+
+def isyncrc(accts):
+    out = [HEADER.format(ACCOUNTS)]
+    for a in accts:
+        n = a["name"]
+        out.append(f"""
+IMAPAccount {n}
+Host imap.gmail.com
+User {a["address"]}
+PassCmd "pass show mail/{n}"
+TLSType IMAPS
+AuthMechs LOGIN
+
+IMAPStore {n}-far
+Account {n}
+
+MaildirStore {n}-near
+Path {MAIL}/{n}/
+Inbox {MAIL}/{n}/INBOX
+SubFolders Verbatim
+""")
+        for local, remote in FOLDERS:
+            out.append(f"""
+Channel {n}-{local.lower()}
+Far :{n}-far:"{remote}"
+Near :{n}-near:{local}
+Sync Pull
+Create Near
+Expunge Near
+SyncState *
+CopyArrivalDate yes
+""")
+        out.append(f"\nGroup {n}\n" + "".join(f"Channel {n}-{l.lower()}\n" for l, _ in FOLDERS))
+    return "".join(out)
+
+
+def msmtprc(accts):
+    out = [HEADER.format(ACCOUNTS), f"""
+defaults
+auth on
+tls on
+tls_trust_file system
+logfile {STATE}/msmtp.log
+"""]
+    for a in accts:
+        out.append(f"""
+account {a["name"]}
+host smtp.gmail.com
+port 465
+tls_starttls off
+user {a["address"]}
+from {a["address"]}
+passwordeval pass show mail/{a["name"]}
+""")
+    out.append(f"\naccount default : {accts[0]['name']}\n")
+    return "".join(out)
+
+
+def notmuch(accts):
+    others = ";".join(a["address"] for a in accts[1:])
+    return HEADER.format(ACCOUNTS) + f"""
+[database]
+path={MAIL}
+hook_dir={CONFIG}/notmuch/default/hooks
+
+[user]
+name={accts[0]["realname"]}
+primary_email={accts[0]["address"]}
+other_email={others}
+
+[new]
+tags=new
+ignore=.mbsyncstate;.mbsyncstate.journal;.mbsyncstate.new;.mbsyncstate.lock;.uidvalidity;.isyncuidmap.db
+
+[search]
+exclude_tags=deleted;spam
+
+[maildir]
+synchronize_flags=true
+"""
+
+
+def aerc(accts):
+    send = "/usr/local/bin/deck-mail send"
+    first = accts[0]
+    out = [HEADER.format(ACCOUNTS), f"""
+# Everything, every account: notmuch searches (aerc/all.map).
+[All]
+source = notmuch://{MAIL}
+query-map = {CONFIG}/aerc/all.map
+folders-sort = Inbox,Unread,Flagged,Sent,Drafts,Everything
+default = Inbox
+from = {first["realname"]} <{first["address"]}>
+aliases = {", ".join(a["address"] for a in accts[1:])}
+outgoing = {send}
+"""]
+    for a in accts:
+        out.append(f"""
+[{a["name"]}]
+source = notmuch://{MAIL}
+maildir-store = {MAIL}
+maildir-account-path = {a["name"]}
+folders-sort = INBOX,All,Sent,Drafts,Trash
+default = INBOX
+from = {a["realname"]} <{a["address"]}>
+outgoing = {send}
+""")
+    return "".join(out)
+
+
+def config():
+    accts = accounts()
+    write(ISYNCRC, isyncrc(accts))
+    write(CONFIG / "msmtp/config", msmtprc(accts))
+    write(CONFIG / "notmuch/default/config", notmuch(accts))
+    write(CONFIG / "aerc/accounts.conf", aerc(accts))
+    STATE.mkdir(parents=True, exist_ok=True)
+    for a in accts:
+        (MAIL / a["name"]).mkdir(parents=True, exist_ok=True)
+    # The index is rebuilt from the mail by `notmuch new`: out of the hourly snapshots.
+    if not (MAIL / ".notmuch").exists():
+        subprocess.run(["deck-nosnap", str(MAIL / ".notmuch")], check=False)
+    missing = [a["name"] for a in accts if not passwords_has(a["name"])]
+    if missing:
+        print("deck-mail: no app password yet for " + ", ".join(missing) + ": "
+              + "; ".join(f"pass insert mail/{m}" for m in missing))
+    return 0
+
+
+def passwords_has(name):
+    store = pathlib.Path(os.environ.get("PASSWORD_STORE_DIR") or HOME / ".password-store")
+    return (store / f"mail/{name}.gpg").exists()
+
+
+def unlocked(accts, interactive):
+    """Whether gpg-agent can decrypt the passwords; asks for the passphrase only if interactive."""
+    env = dict(os.environ)
+    if not interactive:
+        env["PASSWORD_STORE_GPG_OPTS"] = "--pinentry-mode=error"
+    r = subprocess.run(["pass", "show", f"mail/{accts[0]['name']}"], env=env,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return r.returncode == 0
+
+
+def notify(summary, body):
+    stamp = STATE / "notified"
+    try:
+        if time.time() - stamp.stat().st_mtime < NOTIFY_EVERY:
+            return
+    except OSError:
+        pass
+    subprocess.run(["notify-send", "--app-name=deck-mail", summary, body], capture_output=True)
+    stamp.touch()
+
+
+def sync(interactive):
+    accts = accounts()
+    STATE.mkdir(parents=True, exist_ok=True)
+    lock = open(STATE / "lock", "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("deck-mail: a sync is already running")
+        return 0
+    accts = [a for a in accts if passwords_has(a["name"])]
+    if not accts:
+        print("deck-mail: no app passwords in pass yet (pass insert mail/<name>)")
+        return 0
+    if not unlocked(accts, interactive):
+        notify("Mail sync is waiting", "The GPG passphrase isn't cached: run deck-mail unlock.")
+        print("deck-mail: passwords locked; run deck-mail unlock")
+        return 75
+    (STATE / "notified").unlink(missing_ok=True)
+    env = dict(os.environ, PASSWORD_STORE_GPG_OPTS="--pinentry-mode=error")
+    failed = []
+    for a in accts:  # one account failing doesn't hold up the others
+        quiet = [] if interactive else ["-q"]  # in a terminal: progress
+        r = subprocess.run(["mbsync", "-c", str(ISYNCRC), *quiet, a["name"]], env=env)
+        if r.returncode:
+            failed.append(a["name"])
+    subprocess.run(["notmuch", "new", *([] if interactive else ["--quiet"])], check=True)
+    if any((STATE / "queue").glob("*.mail")):
+        subprocess.run([f"{MSMTPQ}/msmtp-queue", "-r"], env=dict(env, **QUEUE_ENV))
+    if failed:
+        print("deck-mail: mbsync failed for " + ", ".join(failed))
+        return 1
+    (STATE / "synced").touch()
+    return 0
+
+
+def main():
+    cmd = sys.argv[1:]
+    if cmd == ["config"]:
+        return config()
+    if cmd == ["sync"]:
+        return sync(sys.stdin.isatty())
+    if cmd[:1] == ["send"]:  # aerc gives the recipients as arguments, the mail on stdin
+        os.execve(f"{MSMTPQ}/msmtpq", ["msmtpq", "--read-envelope-from", *cmd[1:]],
+                  dict(os.environ, **QUEUE_ENV))
+    if cmd == ["unlock"]:
+        return 0 if unlocked(accounts(), True) else 1
+    print(__doc__.split("\n\n", 2)[1], file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

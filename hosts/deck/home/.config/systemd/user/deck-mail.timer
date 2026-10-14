@@ -1,0 +1,10 @@
+# Enable once: systemctl --user enable --now deck-mail.timer
+[Unit]
+Description=Sync mail every 5 minutes
+
+[Timer]
+OnStartupSec=1min
+OnUnitInactiveSec=5min
+
+[Install]
+WantedBy=timers.target

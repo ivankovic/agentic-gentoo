@@ -1,0 +1,4 @@
+# aerc reads the notmuch database; pass and imv without X (Wayland only).
+mail-client/aerc notmuch
+app-admin/pass -X
+media-gfx/imv -X

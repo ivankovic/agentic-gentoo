@@ -1,0 +1,13 @@
+# Fetches mail and sends what's queued (/usr/local/bin/deck-mail sync); deck-mail.timer runs it.
+[Unit]
+Description=Sync mail
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/deck-mail sync
+# 75: the GPG passphrase isn't cached; deck-mail has said so.
+SuccessExitStatus=75
+Nice=10
+IOSchedulingClass=idle

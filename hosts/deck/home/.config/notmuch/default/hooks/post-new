@@ -1,0 +1,25 @@
+#!/bin/bash
+# After `notmuch new` (deck-mail sync): tags from the Gmail folder each message is in
+# (~/Mail/<account>/{INBOX,All,Sent,Drafts,Trash}, usr-local/bin/deck-mail). While sync is one
+# way, `inbox` follows Gmail exactly: archived there, out of the inbox here.
+set -euo pipefail
+cd "$(notmuch config get database.mail_root)"
+inbox=() sent=() drafts=() trash=()
+for a in */; do
+	a=${a%/}
+	[[ -d $a/INBOX ]] || continue
+	inbox+=("folder:\"$a/INBOX\"") sent+=("folder:\"$a/Sent\"")
+	drafts+=("folder:\"$a/Drafts\"") trash+=("folder:\"$a/Trash\"")
+done
+((${#inbox[@]})) || exit 0
+or() { local IFS='|'; local q="$*"; echo "(${q//|/ or })"; }
+notmuch tag --batch <<END
++inbox -- $(or "${inbox[@]}") and not tag:inbox
+-inbox -- tag:inbox and not $(or "${inbox[@]}")
++sent -- tag:new and $(or "${sent[@]}")
++draft -- $(or "${drafts[@]}") and not tag:draft
+-draft -- tag:draft and not $(or "${drafts[@]}")
++deleted -- $(or "${trash[@]}") and not tag:deleted
+-deleted -- tag:deleted and not $(or "${trash[@]}")
+-new -- tag:new
+END

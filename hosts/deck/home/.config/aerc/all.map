@@ -1,0 +1,6 @@
+Inbox=tag:inbox
+Unread=tag:unread
+Flagged=tag:flagged
+Sent=tag:sent
+Drafts=tag:draft
+Everything=*
