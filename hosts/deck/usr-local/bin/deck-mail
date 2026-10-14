@@ -193,6 +193,7 @@ def config():
     write(CONFIG / "msmtp/config", msmtprc(accts))
     write(CONFIG / "notmuch/default/config", notmuch(accts))
     write(CONFIG / "aerc/accounts.conf", aerc(accts))
+    gpg_agent()
     STATE.mkdir(parents=True, exist_ok=True)
     for a in accts:
         (MAIL / a["name"]).mkdir(parents=True, exist_ok=True)
@@ -204,6 +205,23 @@ def config():
         print("deck-mail: no app password yet for " + ", ".join(missing) + ": "
               + "; ".join(f"pass insert mail/{m}" for m in missing))
     return 0
+
+
+# gpg-agent keeps the passphrase while it's used (a sync every 5 min), at most 12 h. Written here:
+# the repo's hooks keep anything under .gnupg out of it.
+GPG_AGENT = {"default-cache-ttl": "900", "max-cache-ttl": "43200"}
+
+
+def gpg_agent():
+    gnupg = pathlib.Path(os.environ.get("GNUPGHOME") or HOME / ".gnupg")
+    conf = gnupg / "gpg-agent.conf"
+    lines = conf.read_text().splitlines() if conf.exists() else []
+    keep = [l for l in lines if l.split()[:1] not in ([k] for k in GPG_AGENT)]
+    new = keep + [f"{k} {v}" for k, v in GPG_AGENT.items()]
+    if new != lines:
+        gnupg.mkdir(mode=0o700, exist_ok=True)
+        write(conf, "\n".join(new) + "\n")
+        subprocess.run(["gpgconf", "--reload", "gpg-agent"], check=False)
 
 
 def passwords_has(name):

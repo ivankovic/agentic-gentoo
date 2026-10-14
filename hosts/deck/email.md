@@ -46,7 +46,7 @@ workspace ┘ 5 min) └→ ~/Mail/ivankovic/  ┘
 | `home/.config/aerc/` | `aerc.conf`; `all.map`, the "All" tab's searches |
 | `home/.config/notmuch/default/hooks/post-new` | tags from Gmail folders: `inbox`, `sent`, `draft`, `deleted` |
 | `home/.config/systemd/user/deck-mail.{service,timer}` | `deck-mail sync` 1 min after login, then 5 min after each sync ends |
-| `home/.gnupg/gpg-agent.conf` | the passphrase stays cached while used, at most 12 h |
+| `~/.gnupg/gpg-agent.conf` | cache times, set by `deck-mail config`: the passphrase stays cached while used, at most 12 h |
 | `portage/package.{use,accept_keywords}/mail` | aerc with notmuch (`~amd64`); pass and imv without X |
 | `pass`: `mail/<name>` | each account's app password |
 
