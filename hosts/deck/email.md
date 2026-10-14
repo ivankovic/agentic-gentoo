@@ -1,7 +1,7 @@
 # Email on deck
 
-Status (2026-10-14): installed and configured on deck, waiting for the app passwords; sync is
-one way (Gmail to deck) until the first full sync has been checked. Accounts: a personal Gmail
+Status (2026-10-14): running. First sync done (Gmail throttles the last few); sync both ways:
+flags by mbsync, archive and delete by deck-mail over Gmail's IMAP. Accounts: a personal Gmail
 account (28,060 messages) and a Google Workspace account on the user's own domain (43,221
 messages); more may follow. Addresses stay out of the repo. Disk: 323 GB free on `/home`.
 
@@ -74,20 +74,25 @@ Per account, mbsync syncs `INBOX`, `[Gmail]/All Mail`, `[Gmail]/Sent Mail`, `[Gm
 | Trash | `deleted` |
 | inbox tabs | not visible over IMAP; local rules instead (below) |
 
-Now (one way, mbsync `Sync Pull`, `Expunge Near`): Gmail's state comes down; the `post-new`
-hook sets `inbox`, `draft` and `deleted` from the folders, so archiving in Gmail archives here.
-Changes made on deck stay on deck.
+mbsync (`Sync PullNew PullGone Flags`, `Expunge Near`) brings Gmail's state down and carries
+flags both ways; it never uploads or deletes messages on Gmail. The `post-new` hook sets
+`inbox`, `draft` and `deleted` from the folders, so whatever Gmail does shows here.
 
-Both ways, next (not built yet):
+From deck (aerc: `d` delete, `a` archive; `home/.config/aerc/binds.conf`):
 
-- **Archive** = remove `inbox`: before mbsync, the INBOX copy is deleted, mbsync expunges it,
-  Gmail removes the Inbox label (the All Mail copy stays). Gmail setting: auto-expunge on.
-- **Delete** = tag `deleted`: every copy but Trash is deleted; expunged from All Mail, Gmail
-  moves it to Trash with the setting "When a message is marked as deleted and expunged from the
-  last visible IMAP folder: **Move the message to the Trash**" (not "archive", as first planned).
-  Gmail keeps Trash 30 days.
 - **Read/unread and starred**: notmuch `synchronize_flags` keeps maildir flags and tags in step;
   mbsync carries the flags.
+- **Archive** = remove `inbox`. `deck-mail sync`, before mbsync, takes the Inbox label off in
+  Gmail (`UID STORE -X-GM-LABELS (\Inbox)`, found by Message-ID with `X-GM-RAW rfc822msgid:`);
+  mbsync then brings the INBOX copy's disappearance down.
+- **Delete** = tag `deleted`. `deck-mail sync` moves it from All Mail to the Bin (`UID MOVE`);
+  Gmail keeps the Bin 30 days. Undelete in Gmail. A message in both accounts (mail between
+  them) goes in both.
+- Neither depends on Gmail's IMAP expunge settings. aerc's own `:delete`/`:archive` are rebound:
+  they'd only touch deck's files.
+- If Gmail can't be reached, the whole sync waits (the hook would otherwise put `inbox` and
+  `deleted` back as the folders say). A tag changed while a sync runs can still be undone by
+  it; do it again.
 
 ### Promotions and other bulk mail
 
@@ -120,20 +125,19 @@ The user, per account, before setup (about 15 minutes):
 1. 2-Step Verification on; an app password (myaccount.google.com → Security).
 2. The Workspace account: in the Workspace admin console, IMAP enabled for users and app passwords
    allowed.
-3. Gmail settings → Forwarding and POP/IMAP: IMAP on, auto-expunge on, expunged messages moved
-   to the Trash. Gmail names its folders in the account's language (British English: Trash is
-   `[Gmail]/Bin`); `deck-mail config` finds them by their IMAP special-use flags.
+3. Gmail settings → Forwarding and POP/IMAP: IMAP on (the expunge settings don't matter).
+   Gmail names its folders in the account's language (British English: Trash is `[Gmail]/Bin`);
+   `deck-mail config` finds them by their IMAP special-use flags.
 4. The promotions filter above, applied to existing conversations.
 5. Note the account's size.
 
 Then on deck:
 
-1. ~~Keywords and packages~~; a GPG key, `pass init`, the two app passwords
-   (`pass insert mail/<name>`). (Done 2026-10-14 except the passwords.)
+1. ~~Keywords and packages; a GPG key, `pass init`, the two app passwords
+   (`pass insert mail/<name>`)~~ (2026-10-14).
 2. ~~Configs: deck-mail, aerc, notmuch hook, the sync timer~~ (2026-10-14).
-3. A first sync **pulling only**: `deck-mail sync` in a terminal (it shows progress and can take
-   more than a day: Gmail's daily IMAP limit), then `systemctl --user start deck-mail.timer`;
-   checked together; then both ways.
+3. ~~A first sync pulling only, then both ways~~ (2026-10-14). The accounts held far less than
+   the sizes noted above: 17,343 and 1,901 messages in All Mail.
 4. A maintenance-tile line when sync has been failing for an hour (`~/.local/state/deck-mail/synced`
    is touched after each good sync).
 

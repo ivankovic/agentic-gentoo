@@ -19,15 +19,23 @@ The account list stays out of the repo, which is public: addresses only on deck.
 (aerc.conf, the notmuch hooks, the sync timer). Each account's app password is in `pass` as
 mail/<name>.
 
-Sync is one way for now: Gmail to deck (mbsync "Sync Pull"). Reading, starring and archiving in
-aerc stay on deck and aren't sent back; what changes in Gmail comes down. Both ways comes once
-the first full sync has been checked.
+Both ways, as tags in notmuch (aerc's d and a, home/.config/aerc/binds.conf):
+
+  unread, flagged  maildir flags, which mbsync carries both ways
+  archive          `inbox` removed: `sync` takes the Inbox label off in Gmail, over IMAP
+  delete           tag `deleted`: `sync` moves the message to Gmail's Bin (kept 30 days)
+  the rest         comes from Gmail: new mail, archiving and deleting there, labels moved
+
+mbsync itself never deletes or uploads on Gmail: it pulls messages and their disappearance, and
+pushes only flags. Archive and delete go through Gmail's own IMAP commands (X-GM-LABELS, MOVE),
+whatever the account's IMAP settings say.
 
 Every 5 min deck-mail.timer runs `sync`. It never asks for the passphrase itself: when gpg-agent
 doesn't have it, it notifies once and waits for `deck-mail unlock` (or a `sync` in a terminal).
 """
 import fcntl
 import imaplib
+import json
 import os
 import pathlib
 import shlex
@@ -107,7 +115,7 @@ SubFolders Verbatim
 Channel {n}-{local.lower()}
 Far :{n}-far:"{remote}"
 Near :{n}-near:{local}
-Sync Pull
+Sync PullNew PullGone Flags
 Create Near
 Expunge Near
 SyncState *
@@ -191,28 +199,88 @@ outgoing = {send}
     return "".join(out)
 
 
-def folders(a):
-    """The account's Gmail folders, local name and Gmail's, by their special-use flags."""
-    names = {flag: name for _, flag, name in FOLDERS if flag}
+def login(a):
+    """An IMAP connection to the account, or None without its password."""
     env = dict(os.environ, PASSWORD_STORE_GPG_OPTS="--pinentry-mode=error")
     pw = subprocess.run(["pass", "show", f"mail/{a['name']}"], capture_output=True, text=True,
                         env=env)
-    if pw.returncode == 0 and pw.stdout.strip():
-        try:
-            imap = imaplib.IMAP4_SSL("imap.gmail.com", timeout=30)
-            imap.login(a["address"], pw.stdout.splitlines()[0])
-            for line in imap.list()[1]:
-                line = line.decode()
-                flags, name = line[1:line.index(")")].split(), line.rsplit(' "/" ', 1)[1].strip('"')
-                for flag in names:
-                    if flag in flags:
-                        names[flag] = name
+    if pw.returncode or not pw.stdout.strip():
+        return None
+    imap = imaplib.IMAP4_SSL("imap.gmail.com", timeout=60)
+    imap.login(a["address"], pw.stdout.splitlines()[0])
+    return imap
+
+
+def special(imap):
+    """Gmail's folder names by special-use flag, in the account's language."""
+    names = {flag: name for _, flag, name in FOLDERS if flag}
+    for line in imap.list()[1]:
+        line = line.decode()
+        flags, name = line[1:line.index(")")].split(), line.rsplit(' "/" ', 1)[1].strip('"')
+        for flag in names:
+            if flag in flags:
+                names[flag] = name
+    return names
+
+
+def quote(s):
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def folders(a):
+    """The account's Gmail folders, local name and Gmail's, by their special-use flags."""
+    names = {flag: name for _, flag, name in FOLDERS if flag}
+    try:
+        imap = login(a)
+        if imap is None:
+            print(f"deck-mail: {a['name']}: no password to list Gmail's folders; English names")
+        else:
+            names = special(imap)
             imap.logout()
-        except (OSError, imaplib.IMAP4.error, ValueError) as e:
-            print(f"deck-mail: {a['name']}: couldn't list Gmail's folders ({e}); English names")
-    else:
-        print(f"deck-mail: {a['name']}: no password to list Gmail's folders; English names")
+    except (OSError, imaplib.IMAP4.error, ValueError) as e:
+        print(f"deck-mail: {a['name']}: couldn't list Gmail's folders ({e}); English names")
     return [(local, names[flag] if flag else name) for local, flag, name in FOLDERS]
+
+
+def pending(query):
+    """Message-IDs matching a notmuch search, deleted ones included."""
+    out = subprocess.run(["notmuch", "search", "--exclude=false", "--format=json",
+                          "--output=messages", query], capture_output=True, text=True, check=True)
+    return json.loads(out.stdout)
+
+
+def push(a):
+    """Archive and delete in Gmail what was archived and deleted on deck. False if it failed."""
+    n = a["name"]
+    archive = pending(f'folder:"{n}/INBOX" and not tag:inbox')
+    delete = pending(f'tag:deleted and path:"{n}/**" and not folder:"{n}/Trash"')
+    if not archive and not delete:
+        return True
+    try:
+        imap = login(a)
+        names = special(imap)
+
+        # Both from All Mail: with INBOX selected, Gmail answers that the label is gone, and keeps it.
+        if imap.select(quote(names[r"\All"]))[0] != "OK":
+            raise imaplib.IMAP4.error(f"can't open {names[r'\All']}")
+
+        def each(ids, *command):
+            for mid in ids:
+                uids = imap.uid("SEARCH", "X-GM-RAW", quote(f"rfc822msgid:{mid}"))[1][0].split()
+                if uids:
+                    typ, data = imap.uid(command[0], b",".join(uids).decode(), *command[1:])
+                    if typ != "OK":
+                        raise imaplib.IMAP4.error(f"{command[0]} {mid}: {data}")
+
+        each(archive, "STORE", "-X-GM-LABELS", r"(\Inbox)")
+        each(delete, "MOVE", quote(names[r"\Trash"]))
+        imap.close()
+        imap.logout()
+    except (OSError, imaplib.IMAP4.error, ValueError, AttributeError, IndexError) as e:
+        print(f"deck-mail: {n}: archiving and deleting in Gmail failed: {e}")
+        return False
+    print(f"deck-mail: {n}: {len(archive)} archived, {len(delete)} moved to the Bin in Gmail")
+    return True
 
 
 def config():
@@ -299,6 +367,10 @@ def sync(interactive):
         return 75
     (STATE / "notified").unlink(missing_ok=True)
     env = dict(os.environ, PASSWORD_STORE_GPG_OPTS="--pinentry-mode=error")
+    # Archives and deletes go first. If they can't (offline), nothing else runs: notmuch new's
+    # hook sets `inbox` and `deleted` from the folders, and would undo them.
+    if not all([push(a) for a in accts]):
+        return 1
     failed = []
     for a in accts:  # one account failing doesn't hold up the others
         quiet = [] if interactive else ["-q"]  # in a terminal: progress
