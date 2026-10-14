@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Block commit messages with secrets or private strings (.git/info/scan-secrets-deny).
+exec "$(git rev-parse --show-toplevel)/.githooks/scan-secrets" --message "$1"

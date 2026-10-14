@@ -26,7 +26,11 @@ them out:
   `*.psk`, `gh/hosts.yml`, `.netrc`, browser profiles, `*_history`, …) and content that looks like a
   secret (private key blocks, GitHub, GitLab, AWS, Slack, OpenAI, Anthropic and Google tokens,
   `psk=`, `password=`, `Authorization: Bearer`, password hashes). They also run
-  [gitleaks](https://github.com/gitleaks/gitleaks) when it is installed. Enable them once per clone:
+  [gitleaks](https://github.com/gitleaks/gitleaks) when it is installed. `commit-msg` checks the
+  message, and `pre-push` the messages being pushed. Private strings such as personal email
+  addresses go one per line in `.git/info/scan-secrets-deny` (never committed, so the list stays
+  private; matched literally, ignoring case): commits and pushes containing them are refused.
+  Enable the hooks once per clone:
 
   ```sh
   git config core.hooksPath .githooks
