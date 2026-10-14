@@ -245,6 +245,8 @@ does not write `/efi`), pointing at a copy in `/efi/EFI/memtest86+/memtest.efi`.
 `systemctl reboot --boot-loader-entry=memtest86+.conf`; the following boot is Gentoo again. Leave
 it on AC overnight (one pass takes about an hour). After a memtest86+ upgrade, copy
 `/usr/share/memtest86+/memtest.efi64` over the ESP copy again.
+Run 2026-10-14 00:19–09:20 on AC: passed, and no freeze or reset in those 9 hours outside Linux.
+Memtest keeps the CPU busy, so the processor never entered its deep idle states the whole time.
 
 **Terminals come back after a crash.** [deck-terminals](usr-local/bin/deck-terminals), run by the
 user service [deck-terminals.service](home/.config/systemd/user/deck-terminals.service), records
