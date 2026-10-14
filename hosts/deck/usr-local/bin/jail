@@ -1,0 +1,95 @@
+#!/bin/bash
+# jail: run a command (default: a shell) where only ~/src is writable and nothing secret is reachable.
+#
+#   jail                 a shell in the jail, in the current directory if it is under ~/src
+#   jail claude          any program, e.g. a coding agent
+#
+# What the jailed program sees (bubblewrap: its own user, PID, IPC, UTS and cgroup namespaces;
+# the network is shared, so it has full network access):
+#
+#   ~/src                read-write, except each repository's .git/config, .git/hooks and hooks
+#                        directory (core.hooksPath), read-only: git on the host runs those, so a
+#                        jailed program must not be able to change them
+#   home                 its own, ~/.local/share/jail/home, kept between runs: the tools' logins,
+#                        settings, history and caches (cargo registry, Go modules, sccache, npm)
+#   from the real home   read-only: toolchains (~/.rustup, ~/.cargo/bin, ~/go/bin, ~/.local/bin
+#                        and what it links to), ~/.bashrc, ~/.gitconfig, ~/.config/{git,go,nvim},
+#                        ~/.local/share/nvim
+#   system               /usr, /etc, /opt, /sys read-only; private /tmp, /run, /var/tmp
+#
+# Not there: the rest of the home (~/.ssh, ~/.gnupg, ~/.config/gh, ~/.cargo/credentials.toml,
+# browser, mail), the SSH and GPG agents, D-Bus, the Wayland session. So no git push, no
+# `gh`, no crates.io publishing, no clipboard. sudo can't work (no_new_privs).
+#
+# Limits: everything jailed shares jail.slice (home/.config/systemd/user/jail.slice): memory
+# throttled above 22 GiB and capped at 24 GiB, 90% of the CPU, 2000 tasks.
+#
+# Not a defence against what you later run on the host from ~/src: build scripts, Makefiles,
+# tests and tracked hook files a jailed program changed run with your full rights. Read the
+# diff first.
+set -euo pipefail
+
+src=$HOME/src
+jhome=${XDG_DATA_HOME:-$HOME/.local/share}/jail/home
+mkdir -p "$jhome/.cargo" "$jhome/go"
+# Its caches stay out of the hourly snapshots: each its own btrfs subvolume (deck-nosnap).
+if command -v deck-nosnap >/dev/null; then
+	deck-nosnap "$jhome/.cache" "$jhome/.cargo/registry" "$jhome/go/pkg" "$jhome/.npm" >/dev/null
+fi
+
+case $PWD/ in
+"$src"/*) dir=$PWD ;;
+*) dir=$src ;;
+esac
+
+args=(
+	--unshare-user --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try
+	--share-net --die-with-parent --hostname jail
+	--ro-bind /usr /usr
+	--symlink usr/bin /bin --symlink usr/sbin /sbin --symlink usr/lib /lib --symlink usr/lib64 /lib64
+	--ro-bind /etc /etc
+	--ro-bind-try /opt /opt
+	--ro-bind /sys /sys
+	--proc /proc --dev /dev
+	--tmpfs /tmp --tmpfs /run --tmpfs /var --dir /var/tmp
+	--ro-bind-try /run/systemd/resolve /run/systemd/resolve
+	--bind "$jhome" "$HOME"
+	--bind "$src" "$src"
+)
+
+ro=(
+	.rustup .cargo/bin .cargo/config.toml .cargo/env go/bin
+	.local/bin .local/share/claude .local/share/uv
+	.bashrc .gitconfig .config/git .config/go .config/nvim .local/share/nvim
+)
+for p in "${ro[@]}"; do
+	[[ -e $HOME/$p ]] && args+=(--ro-bind "$HOME/$p" "$HOME/$p")
+done
+
+# Repositories up to two levels down: what git on the host executes stays read-only.
+while IFS= read -r git; do
+	repo=${git%/.git}
+	for p in "$git/config" "$git/hooks"; do
+		[[ -e $p ]] && args+=(--ro-bind "$p" "$p")
+	done
+	hooks=$(git -C "$repo" config --get core.hooksPath 2>/dev/null || true)
+	if [[ -n $hooks ]]; then
+		[[ $hooks = /* ]] || hooks=$repo/$hooks
+		[[ -d $hooks ]] && args+=(--ro-bind "$hooks" "$hooks")
+	fi
+done < <(find "$src" -mindepth 2 -maxdepth 3 -name .git -type d -prune 2>/dev/null)
+
+# A clean environment: nothing from the session leaks in (agent sockets, tokens, D-Bus).
+env=(--clearenv --setenv HOME "$HOME" --setenv USER "$USER" --setenv LOGNAME "$USER"
+	--setenv SHELL /bin/bash --setenv JAIL 1
+	--setenv PATH "$HOME/.local/bin:$HOME/go/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin")
+for v in TERM COLORTERM LANG LC_ALL LC_CTYPE LC_MESSAGES TZ EDITOR VISUAL; do
+	[[ -n ${!v-} ]] && env+=(--setenv "$v" "${!v}")
+done
+
+(($#)) || set -- /bin/bash -i
+
+# Not exec: this script stays the terminal's foreground process, so deck-terminals can tell a
+# jailed program apart and reopen it in the jail.
+systemd-run --user --scope --slice=jail.slice --collect --quiet --unit="jail-$$.scope" -- \
+	bwrap "${args[@]}" "${env[@]}" --chdir "$dir" -- "$@"

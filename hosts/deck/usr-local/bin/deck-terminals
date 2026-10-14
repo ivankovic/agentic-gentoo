@@ -17,6 +17,8 @@ What was running comes back through ~/.bashrc (DECK_RESTORE_CMD):
   claude           resumed: `claude --resume <session>`, the session found by the window title
                    (Claude Code's title for it) in ~/.claude/projects/<directory>/; when no title
                    matches, `claude --continue`
+  jail ...         back in the jail (/usr/local/bin/jail), by the same rules for what it ran;
+                   a jailed claude's sessions are in the jail's home
   anything else    not run, but on ↑ in that shell's history
 
 Not restored: scrollback, shell variables, programs mid-run, windows other than foot, and foot
@@ -34,6 +36,8 @@ import time
 
 STATE = pathlib.Path.home() / ".local/state/deck-terminals/session.json"
 PROJECTS = pathlib.Path.home() / ".claude/projects"
+# What /usr/local/bin/jail gives jailed programs as their home.
+JAIL_HOME = pathlib.Path(os.environ.get("XDG_DATA_HOME") or pathlib.Path.home() / ".local/share") / "jail/home"
 INTERVAL = 10
 RERUN = {"ssh", "nvim", "vim"}
 SHELLS = {"bash", "sh", "zsh", "fish"}
@@ -80,14 +84,14 @@ def foreground(shell):
 _sessions = {}
 
 
-def claude_session(cwd, title):
+def claude_session(cwd, title, projects=PROJECTS):
     """The Claude Code session whose title the window shows, newest first; None if none does."""
     title = re.sub(r"^[^\w(\[]+", "", title).strip()
-    key = (cwd, title)
+    key = (cwd, title, projects)
     if key not in _sessions:
         needle = ('"aiTitle":' + json.dumps(title, ensure_ascii=False)).encode()
         found = None
-        project = PROJECTS / re.sub(r"[^A-Za-z0-9]", "-", cwd)
+        project = projects / re.sub(r"[^A-Za-z0-9]", "-", cwd)
         files = sorted(project.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
         for f in files if title else []:
             try:
@@ -115,17 +119,26 @@ def terminal(window):
     fg = foreground(shell)
     if fg:
         cmd = argv(fg)
+        # jail is a script: its process is "bash /usr/local/bin/jail ...".
+        if len(cmd) > 1 and pathlib.Path(cmd[0]).name in SHELLS and pathlib.Path(cmd[1]).name == "jail":
+            cmd = cmd[1:]
+        jailed = bool(cmd) and pathlib.Path(cmd[0]).name == "jail"
+        if jailed:
+            cmd = cmd[1:]
         name = pathlib.Path(cmd[0]).name if cmd else ""
         if name == "claude":
             try:
                 where = os.readlink(f"/proc/{fg}/cwd")
             except OSError:
                 where = cwd
-            sid = claude_session(where, window.get("title") or "")
+            sid = claude_session(where, window.get("title") or "",
+                                 JAIL_HOME / ".claude/projects" if jailed else PROJECTS)
             cmd = ["claude", "--resume", sid] if sid else ["claude", "--continue"]
             run = True
-        elif name in RERUN:
+        elif name in RERUN or (jailed and not cmd):  # a jail's own shell comes back too
             run = True
+        if jailed:
+            cmd = ["jail", *cmd]
         cmd = shlex.join(cmd) if cmd else None
     layout = window.get("layout") or {}
     col, row = layout.get("pos_in_scrolling_layout") or (999, 1)

@@ -1,0 +1,9 @@
+# Everything run through /usr/local/bin/jail shares these limits.
+[Unit]
+Description=Jailed programs (jail)
+
+[Slice]
+MemoryHigh=22G
+MemoryMax=24G
+CPUQuota=1800%
+TasksMax=2000

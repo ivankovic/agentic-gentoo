@@ -268,6 +268,9 @@ The user is mostly in the terminal, so Firefox at every reset is a real pattern.
 2026-10-14 11:13 reset they were opening a Reddit link (a sudden burst of page loading, drawing
 and possibly autoplay video); the screen went black at once, with no freeze first.
 
+**Battery test** (from 2026-10-14 ~11:45): deck on battery, everything else as before, to tell a
+power-path fault from the rest.
+
 **Terminals come back after a crash.** [deck-terminals](usr-local/bin/deck-terminals), run by the
 user service [deck-terminals.service](home/.config/systemd/user/deck-terminals.service), records
 every 10 s each foot window's workspace, column, width, directory and foreground program in
@@ -309,6 +312,21 @@ Hardening (2026-10-09):
 - **Shelved.** Secure Boot is disabled. Signing the UKIs with own keys (`sbctl`) was considered
   and set aside (2026-10-12): a missed signature or a BIOS update resetting the keys would leave
   every entry, the recovery included, unbootable.
+
+**Jail for tools working in `~/src`** (2026-10-14), for coding agents and anything else not fully
+trusted, not tied to any one tool: `jail` (a shell) or `jail <command>`, e.g. `jail claude`.
+[usr-local/bin/jail](usr-local/bin/jail) runs it with bubblewrap: `~/src` read-write, except each
+repository's `.git/config`, `.git/hooks` and `core.hooksPath` directory, which git on the host
+runs; its own home in `~/.local/share/jail/home` (logins, settings, history; caches as their own
+subvolumes, out of the snapshots); toolchains and editor and shell settings from the real home
+read-only; `/usr`, `/etc`, `/opt` read-only; full network. Not there: the rest of the home (SSH and
+GPG keys, `gh`, `~/.cargo/credentials.toml`, browser, mail), the SSH and GPG agents, D-Bus,
+Wayland, sudo. So nothing jailed can push, publish or sign: commit inside, review and push outside.
+All jailed programs share [jail.slice](home/.config/systemd/user/jail.slice): 22 GiB memory high,
+24 GiB max, 90% of the CPU, 2000 tasks. The prompt says `jail`; deck-terminals reopens jailed
+programs in the jail. A jailed tool logs in once on its own (its login lives in the jail home).
+What a jailed program writes in `~/src` and you later run on the host (build scripts, tests,
+tracked hook files) runs with your rights: read the diff first.
 
 ## Maintenance
 

@@ -27,7 +27,8 @@ export PATH="$HOME/.local/bin:$HOME/go/bin:$PATH"
 # Line one: the directory in linen; the git branch in sage, with * unstaged, + staged,
 # % untracked, $ stashed, |REBASE and the like mid-operation, ↑/↓ commits ahead of and behind
 # upstream; then, only when they apply, the duration of a command that ran 5 s or more, the exit
-# status (with the signal for 129-159), background jobs, the venv, and user@host over SSH.
+# status (with the signal for 129-159), background jobs, the venv, "jail" inside
+# /usr/local/bin/jail, and user@host over SSH.
 # Line two: ❯ in brass, oxblood after a failure, # as root; plain ASCII on the text console.
 #
 # For foot: OSC 7 reports the directory (Ctrl+Shift+N opens a terminal there), OSC 133 marks
@@ -127,6 +128,7 @@ __prompt() {
 	jobs=$(jobs -p | wc -l)
 	((jobs)) && line+="$o$e[35m$c  $jobs job$( ((jobs > 1)) && echo s)"
 	[[ -n ${VIRTUAL_ENV-} ]] && line+="$o$e[34m$c  venv ${VIRTUAL_ENV##*/}"
+	[[ -n ${JAIL-} ]] && line+="$o$e[33m$c  jail"
 	[[ -n ${SSH_CONNECTION-} ]] && line+="$o$e[34m$c  $USER@${HOSTNAME%%.*}"
 
 	local arrow='❯' mark=33
