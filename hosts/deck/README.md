@@ -273,6 +273,12 @@ power-path fault from the rest. No reset in 2.5 h, including load up to 46 W pla
 package. Weak evidence alone: on AC the gaps between resets were 0.5–2 h, and one AC stretch
 (2026-10-13 22:35 to 00:18) also went 1.7 h without one.
 
+**Sixth reset, on battery** (2026-10-14 ~22:56): `ac=0`, battery 60%, so the power path from the
+charger is not it. Idle until the last sample (22:55:55): 2–3 W package, 46 °C, GPU asleep, load
+0.2; that sample shows a sudden start of something (12 W, cores to 3.6 GHz, memory pressure 2.7%,
+swap +0.5 GiB). The next sample, 10 s later, never came; deck was booting again at 22:56:30.
+Again a burst of activity from idle, as at 11:13.
+
 **Terminals come back after a crash.** [deck-terminals](usr-local/bin/deck-terminals), run by the
 user service [deck-terminals.service](home/.config/systemd/user/deck-terminals.service), records
 every 10 s each foot window's workspace, column, width, directory and foreground program in

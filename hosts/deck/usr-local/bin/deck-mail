@@ -379,7 +379,7 @@ def sync(interactive):
             failed.append(a["name"])
     subprocess.run(["notmuch", "new", *([] if interactive else ["--quiet"])], check=True)
     if any((STATE / "queue").glob("*.mail")):
-        subprocess.run([f"{MSMTPQ}/msmtp-queue", "-r"], env=dict(env, **QUEUE_ENV))
+        subprocess.run([f"{MSMTPQ}/msmtpq", "--q-mgmt", "-r"], env=dict(env, **QUEUE_ENV))
     if failed:
         print("deck-mail: mbsync failed for " + ", ".join(failed))
         return 1
