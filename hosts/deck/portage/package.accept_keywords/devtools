@@ -3,3 +3,4 @@ net-dialup/tio ~amd64
 dev-util/cargo-audit ~amd64
 app-text/typst ~amd64
 dev-util/stylua ~amd64
+www-apps/hugo ~amd64
