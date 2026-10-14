@@ -44,6 +44,7 @@ Paths mirror the `~/system` layout proposed in research overview §2.5.
 | `home/` | `~` (your user's home) |
 | `state/world` | `/var/lib/portage/world` (observed, not deployed) |
 | `recovery/` | the recovery system on `nvme0n1p3`, built and installed by its own scripts (not by deploy.sh); see [recovery/README.md](recovery/README.md) |
+| `email.md`, `runbook.md`, `bench/` | records and plans (not deployed); [email.md](email.md) is the tabled offline-email plan |
 
 `etc/kernel/cmdline`, `etc/dracut.conf.d/10-luks.conf` and `etc/fstab` contain this machine's
 LUKS and filesystem UUIDs. Replace them on any other machine.
@@ -253,7 +254,10 @@ the firmware's ACPI table; about 1 ms to wake), switched off at runtime on every
 `echo 1 | sudo tee /sys/devices/system/cpu/cpu*/cpuidle/state3/disable`. Not persistent: a reboot
 turns it back on, so re-run it after each boot while the test lasts. Vitals logs `idle_off=C3_ACPI`
 while it is in force. A few days on AC without a freeze points at that state (then: BIOS update or
-a Lenovo report, and a permanent setting); a freeze with it off rules idle states out.
+a Lenovo report, and a permanent setting); a freeze with it off rules idle states out. Result: deck froze 2026-10-14 ~11:13 with
+`idle_off=C3_ACPI` in force (last vitals line 11:13:01: 46 °C, 8–17 W, fan 2587 and steady, on AC
+at 79%, 55 s after unlocking the screen). The deepest idle state isn't the cause. Freezes since
+2026-10-13 came after 0.5–2 h of Linux; the 9 h of memtest had none.
 
 **Terminals come back after a crash.** [deck-terminals](usr-local/bin/deck-terminals), run by the
 user service [deck-terminals.service](home/.config/systemd/user/deck-terminals.service), records
