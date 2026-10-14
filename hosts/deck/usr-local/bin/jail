@@ -21,8 +21,9 @@
 # browser, mail), the SSH and GPG agents, D-Bus, the Wayland session. So no git push, no
 # `gh`, no crates.io publishing, no clipboard. sudo can't work (no_new_privs).
 #
-# Limits: everything jailed shares jail.slice (home/.config/systemd/user/jail.slice): memory
-# throttled above 22 GiB and capped at 24 GiB, 90% of the CPU, 2000 tasks.
+# Limits: everything jailed shares jail.slice (home/.config/systemd/user/jail.slice): a fifth of
+# the desktop's CPU priority and at most 90% of the CPU, memory throttled above 22 GiB and capped at
+# 24 GiB, 4 GiB of swap, 2000 tasks; systemd-oomd kills inside it when it stalls on memory.
 #
 # Not a defence against what you later run on the host from ~/src: build scripts, Makefiles,
 # tests and tracked hook files a jailed program changed run with your full rights. Read the

@@ -3,7 +3,16 @@
 Description=Jailed programs (jail)
 
 [Slice]
+# Priority, not only a cap: the desktop gets the CPU first (default weight 100); with nothing else
+# running, the jail still gets up to 90% of the 20 threads.
+CPUWeight=20
+CPUQuota=1800%
 MemoryHigh=22G
 MemoryMax=24G
-CPUQuota=1800%
+# zram swap is shared with everything else: the jail may use only this much of it.
+MemorySwapMax=4G
+# systemd-oomd kills inside the jail when the jail itself spends over half its time stalled on
+# memory for 20 s (oomd.conf.d/deck.conf), before the session's own limit (user@.service.d) is hit.
+ManagedOOMMemoryPressure=kill
+ManagedOOMMemoryPressureLimit=50%
 TasksMax=2000

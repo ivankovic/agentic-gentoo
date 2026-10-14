@@ -322,8 +322,9 @@ subvolumes, out of the snapshots); toolchains and editor and shell settings from
 read-only; `/usr`, `/etc`, `/opt` read-only; full network. Not there: the rest of the home (SSH and
 GPG keys, `gh`, `~/.cargo/credentials.toml`, browser, mail), the SSH and GPG agents, D-Bus,
 Wayland, sudo. So nothing jailed can push, publish or sign: commit inside, review and push outside.
-All jailed programs share [jail.slice](home/.config/systemd/user/jail.slice): 22 GiB memory high,
-24 GiB max, 90% of the CPU, 2000 tasks. The prompt says `jail`; deck-terminals reopens jailed
+All jailed programs share [jail.slice](home/.config/systemd/user/jail.slice): CPU weight 20
+(the desktop gets the CPU first) and at most 90% of it, 22 GiB memory high, 24 GiB max, 4 GiB of
+swap, 2000 tasks, and systemd-oomd kills inside it after 20 s stalled on memory over half the time. The prompt says `jail`; deck-terminals reopens jailed
 programs in the jail. A jailed tool logs in once on its own (its login lives in the jail home).
 What a jailed program writes in `~/src` and you later run on the host (build scripts, tests,
 tracked hook files) runs with your rights: read the diff first.
