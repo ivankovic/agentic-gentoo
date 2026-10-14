@@ -268,8 +268,10 @@ The user is mostly in the terminal, so Firefox at every reset is a real pattern.
 2026-10-14 11:13 reset they were opening a Reddit link (a sudden burst of page loading, drawing
 and possibly autoplay video); the screen went black at once, with no freeze first.
 
-**Battery test** (from 2026-10-14 ~11:45): deck on battery, everything else as before, to tell a
-power-path fault from the rest.
+**Battery test** (2026-10-14 11:18–13:51): deck on battery, everything else as before, to tell a
+power-path fault from the rest. No reset in 2.5 h, including load up to 46 W platform and 100 °C
+package. Weak evidence alone: on AC the gaps between resets were 0.5–2 h, and one AC stretch
+(2026-10-13 22:35 to 00:18) also went 1.7 h without one.
 
 **Terminals come back after a crash.** [deck-terminals](usr-local/bin/deck-terminals), run by the
 user service [deck-terminals.service](home/.config/systemd/user/deck-terminals.service), records
