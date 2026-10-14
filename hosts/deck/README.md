@@ -264,6 +264,9 @@ logged ones the GPU was mostly asleep (`gpu_mhz=0`, uncore about 0.1 W): no vide
 drawing, and no i915 message (GPU hang, reset, fault) in any boot since 2026-10-09. Firefox runs
 with its defaults: WebRender on the GPU, video decoded through VA-API (`iHD`). GPU: i915, Raptor
 Lake-P, GuC 70.49.4, HuC 7.9.3, DMC 2.20.
+The user is mostly in the terminal, so Firefox at every reset is a real pattern. At the
+2026-10-14 11:13 reset they were opening a Reddit link (a sudden burst of page loading, drawing
+and possibly autoplay video); the screen went black at once, with no freeze first.
 
 **Terminals come back after a crash.** [deck-terminals](usr-local/bin/deck-terminals), run by the
 user service [deck-terminals.service](home/.config/systemd/user/deck-terminals.service), records
