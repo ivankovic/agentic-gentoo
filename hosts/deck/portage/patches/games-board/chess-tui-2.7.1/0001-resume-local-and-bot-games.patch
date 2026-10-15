@@ -1,0 +1,1760 @@
+Backport of upstream 7d722c9 "feat: resume local & bot games (#285)", merged after 2.7.1.
+The next release carries it; this directory is versioned so it stops applying then.
+
+From 7a71cf33d3dcbd818fc3bd41e92562abf17e0776 Mon Sep 17 00:00:00 2001
+From: Ken van der Eerden <kenvandereerden@hotmail.com>
+Date: Mon, 28 Sep 2026 21:14:37 +0200
+Subject: [PATCH] feat: resume local & bot games (#285)
+
+* save and resume bot and local games
+
+* fixed two bugs
+
+* fixed timing bug
+
+* style: rustfmt resume_tests timing assertions
+
+* test: silence sound in resume tests to fix Windows CI crash
+
+Driving the app through menus and moves spawns rodio audio threads. On a
+headless Windows runner with no audio device, opening the default sink
+crashes the process with STATUS_ACCESS_VIOLATION (0xc0000005). Disable
+sound in the test guard so no audio threads spawn.
+
+* fix(website): pin react and react-dom to 19.2.6
+
+A freshly published react 19.2.7 (without a matching react-dom 19.2.7)
+let the carets drift apart in CI, breaking the docusaurus build with an
+incompatible-React-versions error. Pin both to an exact, matching
+version and add a resolutions entry so the tree can't diverge.
+
+* forgot to include lock
+
+* removed bad lockfile
+
+* undo website stuff
+---
+ src/app/game.rs                |  11 +
+ src/app/menu.rs                |   5 +
+ src/app/mod.rs                 |  14 +
+ src/app/resume.rs              | 314 ++++++++++++++
+ src/game_logic/clock.rs        |  12 +
+ src/handlers/game_mode_menu.rs |  34 ++
+ src/main.rs                    |   5 +
+ src/state/mod.rs               |   1 +
+ src/state/resume.rs            | 322 ++++++++++++++
+ src/ui/menu/game_mode_menu.rs  |  36 +-
+ tests/resume_tests.rs          | 770 +++++++++++++++++++++++++++++++++
+ 11 files changed, 1518 insertions(+), 6 deletions(-)
+ create mode 100644 src/app/resume.rs
+ create mode 100644 src/state/resume.rs
+ create mode 100644 tests/resume_tests.rs
+
+diff --git a/src/app/game.rs b/src/app/game.rs
+index 7fef60d..6b6a752 100644
+--- a/src/app/game.rs
++++ b/src/app/game.rs
+@@ -34,6 +34,10 @@ impl App {
+             && (new_state == GameState::Checkmate || new_state == GameState::Draw)
+         {
+             self.show_end_screen();
++            // Player-induced terminal states reach this branch (bot-induced
++            // ones go through `check_and_show_game_end`). Either way the
++            // game is over, so the resume save must go.
++            self.clear_resume_state_for_current_mode();
+         }
+     }
+ 
+@@ -41,6 +45,11 @@ impl App {
+     /// Re-randomizes color if random color mode is active, re-initializes the clock, and
+     /// triggers the bot's first move if it starts as White.
+     pub fn restart(&mut self) {
++        // Starting a fresh game wipes the previous one from disk — otherwise
++        // an old save would shadow the new game until the first move's
++        // autosave overwrote it.
++        self.clear_resume_state_for_current_mode();
++
+         // Clear puzzle state when restarting (for normal games)
+         self.lichess_state.puzzle_game = None;
+         self.ui_state.end_screen_dismissed = false;
+@@ -122,6 +131,8 @@ impl App {
+             {
+                 self.show_end_screen();
+             }
++            // Drop any resume save: the game is over, there is nothing left to continue.
++            self.clear_resume_state_for_current_mode();
+         } else {
+             // Game is no longer ended, reset the dismissed flag
+             self.ui_state.end_screen_dismissed = false;
+diff --git a/src/app/menu.rs b/src/app/menu.rs
+index c68112f..b5b914a 100644
+--- a/src/app/menu.rs
++++ b/src/app/menu.rs
+@@ -132,6 +132,11 @@ impl App {
+     /// Preserves display mode preference while cleaning up all game state,
+     /// bot state, and multiplayer connections.
+     pub fn reset_home(&mut self) {
++        // Snapshot the clock before tearing down the game — otherwise a
++        // resumed game would start with the time from the previous move
++        // rather than the time at the moment the user pressed `b`.
++        self.flush_resume_state();
++
+         // Preserve display mode and skin preference
+         let display_mode = self.game.ui.display_mode;
+         let current_skin = self.game.ui.skin.clone();
+diff --git a/src/app/mod.rs b/src/app/mod.rs
+index 374634a..16a1b8e 100644
+--- a/src/app/mod.rs
++++ b/src/app/mod.rs
+@@ -20,6 +20,7 @@ pub mod input;
+ pub mod lichess;
+ pub mod menu;
+ pub mod multiplayer;
++pub mod resume;
+ 
+ /// Application result type.
+ pub type AppResult<T> = std::result::Result<T, Box<dyn error::Error>>;
+@@ -53,6 +54,12 @@ pub struct App {
+     /// PGN viewer: which game is currently shown
+     pub pgn_viewer_game_idx: usize,
+     pub animations: AnimationState,
++    /// Tracks the move count last persisted to disk for resume support, so the
++    /// autosave hook only writes when the position has actually advanced.
++    pub last_saved_move_count: Option<usize>,
++    /// Wall-clock time of the last resume-state flush. Used to throttle the
++    /// per-tick clock-capture write so we don't hammer the disk.
++    pub last_resume_flush_at: Option<std::time::Instant>,
+ }
+ 
+ impl Default for App {
+@@ -72,6 +79,8 @@ impl Default for App {
+             pgn_viewer_state: None,
+             pgn_viewer_game_idx: 0,
+             animations: AnimationState::default(),
++            last_saved_move_count: None,
++            last_resume_flush_at: None,
+         }
+     }
+ }
+@@ -161,6 +170,11 @@ impl App {
+ 
+     /// Set running to false to quit the application.
+     pub fn quit(&mut self) {
++        // Capture the clock's current value (which keeps ticking between
++        // moves) so a resumed game reflects real elapsed time rather than
++        // freezing at the last move's timestamp.
++        self.flush_resume_state();
++
+         // Cancel any active Lichess seek before quitting
+         if let Some(cancellation_token) = &self.lichess_state.cancellation_token {
+             cancellation_token.store(true, std::sync::atomic::Ordering::Relaxed);
+diff --git a/src/app/resume.rs b/src/app/resume.rs
+new file mode 100644
+index 0000000..e612442
+--- /dev/null
++++ b/src/app/resume.rs
+@@ -0,0 +1,314 @@
++//! Autosave / resume orchestration for in-progress local and bot games.
++//!
++//! Persistence lives in [`crate::state::resume`]. This file owns the policy
++//! decisions: when to write, when to clear, and how to rebuild the in-memory
++//! game from a saved snapshot.
++
++use std::time::Duration;
++
++use shakmaty::{CastlingMode, Chess, Color, fen::Fen, uci::UciMove};
++
++use crate::app::App;
++use crate::constants::{Pages, Popups};
++use crate::game_logic::bot::Bot;
++use crate::game_logic::clock::Clock;
++use crate::game_logic::game::{Game, GameState};
++use crate::state::resume::{
++    BotConfig, ClockState, ResumeMode, SavedGame, TakenPieceRecord, delete, has_save, load, save,
++};
++
++impl App {
++    /// Returns the resume mode that matches the active game, if any.
++    /// Multiplayer and Lichess games are not eligible — their state lives on
++    /// the wire / on lichess.org.
++    pub fn current_resume_mode(&self) -> Option<ResumeMode> {
++        if self.game.logic.opponent.is_some() {
++            return None;
++        }
++        match self.ui_state.current_page {
++            Pages::Solo if self.game.logic.bot.is_none() => Some(ResumeMode::Local),
++            Pages::Bot if self.game.logic.bot.is_some() => Some(ResumeMode::Bot),
++            _ => None,
++        }
++    }
++
++    /// Writes the current position to disk if the game is in a state worth
++    /// saving and at least one move has been played since the last save.
++    /// Use this when only a move advanced the state — clock-only ticks should
++    /// go through `tick_resume_state` so they're rate-limited.
++    pub fn autosave_resume_state(&mut self) {
++        self.write_resume_state(false);
++    }
++
++    /// Per-tick hook from the main loop. Honours the move-count guard like
++    /// `autosave_resume_state`, but additionally throttles clock-only writes
++    /// to at most once per second so we don't hammer the disk while the user
++    /// just stares at the board.
++    pub fn tick_resume_state(&mut self) {
++        let now = std::time::Instant::now();
++        let recent = self
++            .last_resume_flush_at
++            .is_some_and(|t| now.duration_since(t) < std::time::Duration::from_secs(1));
++        if recent {
++            // Allow the move-guarded write to slip through immediately; only
++            // the throttle-less force path is gated.
++            self.write_resume_state(false);
++            return;
++        }
++        self.write_resume_state(true);
++        self.last_resume_flush_at = Some(now);
++    }
++
++    /// Bypasses the move-count guard so the clock's current value is
++    /// captured. Used by `quit()` and `reset_home()` — paths that are
++    /// guaranteed to wipe in-memory state next, so a stale save can't be
++    /// updated later.
++    pub fn flush_resume_state(&mut self) {
++        self.write_resume_state(true);
++        self.last_resume_flush_at = Some(std::time::Instant::now());
++    }
++
++    fn write_resume_state(&mut self, force: bool) {
++        let Some(mode) = self.current_resume_mode() else {
++            return;
++        };
++
++        // Mid-promotion is a half-move — wait for the user to pick a piece.
++        // Terminal states get cleared by `clear_resume_state_on_end`, so we
++        // intentionally skip writing them here too.
++        if self.game.logic.game_state != GameState::Playing {
++            return;
++        }
++
++        let count = self.game.logic.game_board.move_history.len();
++        if count == 0 {
++            return;
++        }
++        if !force && self.last_saved_move_count == Some(count) {
++            return;
++        }
++
++        let saved = SavedGame {
++            mode,
++            fen: self.game.logic.game_board.fen_position(),
++            is_flipped: self.game.logic.game_board.is_flipped,
++            taken_pieces: self
++                .game
++                .logic
++                .game_board
++                .taken_pieces
++                .iter()
++                .map(|p| TakenPieceRecord::from_piece(*p))
++                .collect(),
++            bot: match mode {
++                ResumeMode::Bot => self.bot_config_for_save(),
++                ResumeMode::Local => None,
++            },
++            clock: self.clock_state_for_save(),
++            moves_uci: self
++                .game
++                .logic
++                .game_board
++                .move_history
++                .iter()
++                .map(|m| UciMove::from_standard(m).to_string())
++                .collect(),
++        };
++
++        save(mode, &saved);
++        self.last_saved_move_count = Some(count);
++    }
++
++    fn clock_state_for_save(&self) -> Option<ClockState> {
++        let clock = self.game.logic.clock.as_ref()?;
++        let white = clock.get_time(Color::White);
++        let black = clock.get_time(Color::Black);
++        Some(ClockState {
++            white_ms: white.as_millis() as u64,
++            black_ms: black.as_millis() as u64,
++            clock_cursor: self.game_mode_state.clock_cursor,
++            custom_minutes: self.game_mode_state.custom_time_minutes,
++        })
++    }
++
++    fn bot_config_for_save(&self) -> Option<BotConfig> {
++        let bot = self.game.logic.bot.as_ref()?;
++        let path = self.bot_state.chess_engine_path.clone()?;
++        let player_color = match self.game_mode_state.selected_color {
++            Some(Color::White) => "white",
++            Some(Color::Black) => "black",
++            None => "white",
++        };
++        Some(BotConfig {
++            path,
++            depth: bot.depth,
++            difficulty: bot.difficulty,
++            player_color: player_color.to_string(),
++            is_random_color: self.game_mode_state.is_random_color,
++        })
++    }
++
++    /// Removes the save file for the currently active game (if it lives in a
++    /// resumable mode). Used when the game ends naturally and when the user
++    /// explicitly starts a fresh game in the same mode.
++    pub fn clear_resume_state(&mut self, mode: ResumeMode) {
++        delete(mode);
++        self.last_saved_move_count = None;
++    }
++
++    /// Convenience used by end-of-game hooks: clears the save for whichever
++    /// resumable mode is currently active. No-op for Multiplayer/Lichess.
++    pub fn clear_resume_state_for_current_mode(&mut self) {
++        if let Some(mode) = self.current_resume_mode() {
++            self.clear_resume_state(mode);
++        }
++    }
++
++    /// Returns whether a saved game is on disk for `mode`. Used to gate the
++    /// "Press R to resume" UI hint and key binding.
++    pub fn has_resume_save(&self, mode: ResumeMode) -> bool {
++        has_save(mode)
++    }
++
++    /// Loads the save for `mode` and rebuilds the in-memory game so play can
++    /// continue. Returns `true` on success. Failures (no save, malformed
++    /// FEN) are surfaced via an error popup; the menu state is left intact
++    /// so the user can try again or start a new game.
++    pub fn resume_from_saved(&mut self, mode: ResumeMode) -> bool {
++        let Some(saved) = load(mode) else {
++            self.ui_state
++                .show_message_popup("No saved game to resume.".to_string(), Popups::Error);
++            return false;
++        };
++
++        // Validate the saved FEN up-front; a malformed save is unrecoverable
++        // and worth deleting so the user isn't stuck retrying the same error.
++        if Fen::from_ascii(saved.fen.as_bytes())
++            .ok()
++            .and_then(|f| f.into_position::<Chess>(CastlingMode::Standard).ok())
++            .is_none()
++        {
++            log::warn!("Resume failed: could not parse saved FEN '{}'", saved.fen);
++            self.ui_state.show_message_popup(
++                "Saved game is corrupted and cannot be resumed.".to_string(),
++                Popups::Error,
++            );
++            delete(mode);
++            return false;
++        }
++
++        // Reset to a fresh game and preserve theme like reset_home does.
++        let display_mode = self.game.ui.display_mode;
++        let current_skin = self.game.ui.skin.clone();
++        self.game = Game::default();
++        self.game.ui.display_mode = display_mode;
++        self.game.ui.skin = current_skin;
++        self.game.ui.available_piece_styles = self.theme_state.available_piece_styles.clone();
++
++        if saved.moves_uci.is_empty() {
++            // Old-format save (or zero-move snapshot): jump straight to the
++            // FEN. The move history will be empty — accepted trade-off.
++            // The FEN was validated above, so the chained parse cannot fail
++            // here; we still match defensively rather than unwrap.
++            if let Some(position) = Fen::from_ascii(saved.fen.as_bytes())
++                .ok()
++                .and_then(|f| f.into_position::<Chess>(CastlingMode::Standard).ok())
++            {
++                self.game.logic.game_board.position_history = vec![position];
++            }
++            self.game.logic.game_board.move_history = vec![];
++            self.game.logic.game_board.taken_pieces = saved
++                .taken_pieces
++                .iter()
++                .filter_map(|r| r.to_piece())
++                .collect();
++        } else {
++            // Replay the UCI moves from the default initial position so the
++            // resumed game has full history (P/N navigation, move log).
++            // `reconstruct_history` resets the board, applies each move, and
++            // sanity-checks the final position against `expected_fen`.
++            let moves_joined = saved.moves_uci.join(" ");
++            self.game
++                .logic
++                .game_board
++                .reconstruct_history(&moves_joined, Some(&saved.fen));
++        }
++
++        self.game.logic.game_board.history_position_index = None;
++        self.game.logic.game_board.is_flipped = saved.is_flipped;
++        self.game.logic.sync_player_turn_with_position();
++        self.game.logic.game_state = GameState::Playing;
++
++        // Restore any saved clock + the form selection used to create it so a
++        // follow-up "new game" presents the same time control by default.
++        if let Some(cs) = saved.clock.as_ref() {
++            let mut clock = Clock::with_remaining(
++                Duration::from_millis(cs.white_ms),
++                Duration::from_millis(cs.black_ms),
++            );
++            // Game was mid-flight before the quit; start the side-to-move
++            // clock immediately so resume feels continuous instead of frozen.
++            clock.start(self.game.logic.player_turn);
++            self.game.logic.clock = Some(clock);
++            self.game_mode_state.clock_cursor = cs.clock_cursor;
++            self.game_mode_state.custom_time_minutes = cs.custom_minutes;
++        } else {
++            self.game.logic.clock = None;
++        }
++
++        match mode {
++            ResumeMode::Local => {
++                self.ui_state.current_page = Pages::Solo;
++                self.last_saved_move_count = Some(0);
++            }
++            ResumeMode::Bot => {
++                let Some(bot_cfg) = saved.bot.as_ref() else {
++                    self.ui_state.show_message_popup(
++                        "Saved bot game is missing its engine config.".to_string(),
++                        Popups::Error,
++                    );
++                    return false;
++                };
++                let player_color = match bot_cfg.player_color.as_str() {
++                    "black" => Color::Black,
++                    _ => Color::White,
++                };
++                self.bot_state.chess_engine_path = Some(bot_cfg.path.clone());
++                self.bot_state.bot_depth = bot_cfg.depth;
++                self.bot_state.bot_difficulty = bot_cfg.difficulty;
++                self.game_mode_state.selected_color = Some(player_color);
++                self.game_mode_state.is_random_color = bot_cfg.is_random_color;
++
++                // Re-launch the engine. `Bot::new` matches the `bot_setup`
++                // call path so the resumed game behaves like a fresh one.
++                let is_bot_starting = self.game.logic.player_turn != player_color
++                    && player_color == Color::White
++                    || (player_color == Color::Black
++                        && self.game.logic.player_turn == Color::White);
++                self.game.logic.bot = Some(Bot::new(
++                    &bot_cfg.path,
++                    is_bot_starting,
++                    bot_cfg.depth,
++                    bot_cfg.difficulty,
++                ));
++
++                self.ui_state.current_page = Pages::Bot;
++                self.last_saved_move_count = Some(0);
++
++                // If it's the bot's turn in the saved position, kick it off.
++                if self.game.logic.player_turn != player_color
++                    && let Some(bot) = &self.game.logic.bot
++                {
++                    self.bot_state.start_bot_thinking(
++                        self.game.logic.game_board.fen_position(),
++                        bot.depth,
++                        bot.difficulty,
++                    );
++                }
++            }
++        }
++
++        self.ui_state.close_popup();
++        true
++    }
++}
+diff --git a/src/game_logic/clock.rs b/src/game_logic/clock.rs
+index 472be21..5819dc1 100644
+--- a/src/game_logic/clock.rs
++++ b/src/game_logic/clock.rs
+@@ -31,6 +31,18 @@ impl Clock {
+         }
+     }
+ 
++    /// Construct a clock with explicit remaining times — used when restoring
++    /// a saved game so each side resumes with the time they had on disk.
++    pub fn with_remaining(white: Duration, black: Duration) -> Self {
++        Self {
++            white_time: white,
++            black_time: black,
++            turn_start: None,
++            active_color: None,
++            is_running: false,
++        }
++    }
++
+     /// Start the clock for the given color
+     pub fn start(&mut self, color: Color) {
+         self.active_color = Some(color);
+diff --git a/src/handlers/game_mode_menu.rs b/src/handlers/game_mode_menu.rs
+index 25aed1a..c7d1607 100644
+--- a/src/handlers/game_mode_menu.rs
++++ b/src/handlers/game_mode_menu.rs
+@@ -4,6 +4,7 @@ use crate::{
+     app::App,
+     constants::{BOT_DIFFICULTY_COUNT, Pages, Popups},
+     handlers::handler::fallback_key_handler,
++    state::resume::ResumeMode,
+ };
+ use ratatui::crossterm::event::{KeyCode, KeyEvent};
+ 
+@@ -108,10 +109,29 @@ fn handle_form_events(app: &mut App, key_event: KeyEvent, game_mode: AvailableGa
+         KeyCode::Left | KeyCode::Char('h') => handle_form_left(app, game_mode),
+         KeyCode::Right | KeyCode::Char('l') => handle_form_right(app, game_mode),
+         KeyCode::Char(' ') | KeyCode::Enter => handle_form_enter(app, game_mode),
++        KeyCode::Char('r' | 'R') => {
++            if let Some(mode) = resume_mode_for(game_mode)
++                && app.has_resume_save(mode)
++            {
++                app.game_mode_state.form_active = false;
++                app.game_mode_state.form_cursor = 0;
++                app.resume_from_saved(mode);
++            }
++        }
+         _ => fallback_key_handler(app, key_event),
+     }
+ }
+ 
++/// Maps the menu's mode enum to the persistence enum. Only the two resumable
++/// modes return `Some`.
++pub fn resume_mode_for(mode: AvailableGameMode) -> Option<ResumeMode> {
++    match mode {
++        AvailableGameMode::Local => Some(ResumeMode::Local),
++        AvailableGameMode::Bot => Some(ResumeMode::Bot),
++        AvailableGameMode::Multiplayer | AvailableGameMode::PGNLoader => None,
++    }
++}
++
+ fn handle_form_left(app: &mut App, game_mode: AvailableGameMode) {
+     match game_mode {
+         AvailableGameMode::Local => match LocalFormField::from(app.game_mode_state.form_cursor) {
+@@ -358,6 +378,13 @@ fn handle_menu_navigation(app: &mut App, key_event: KeyEvent, game_mode: Availab
+                 }
+             }
+         }
++        KeyCode::Char('r' | 'R') => {
++            if let Some(mode) = resume_mode_for(game_mode)
++                && app.has_resume_save(mode)
++            {
++                app.resume_from_saved(mode);
++            }
++        }
+         KeyCode::Esc | KeyCode::Char('b') => {
+             app.ui_state.menu_cursor = 0;
+             app.game_mode_state.selection = None;
+@@ -399,6 +426,13 @@ fn apply_clock_and_start(app: &mut App, page: Pages) {
+ }
+ 
+ fn finish_form(app: &mut App, page: Pages) {
++    // Starting a brand-new resumable game invalidates any previous save.
++    match page {
++        Pages::Solo => app.clear_resume_state(ResumeMode::Local),
++        Pages::Bot => app.clear_resume_state(ResumeMode::Bot),
++        _ => {}
++    }
++
+     app.ui_state.current_page = page;
+     app.game_mode_state.selection = None;
+     app.game_mode_state.form_cursor = 0;
+diff --git a/src/main.rs b/src/main.rs
+index d160045..477a12f 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -342,6 +342,11 @@ fn main() -> AppResult<()> {
+         // Check if game ended
+         app.check_game_end_status();
+ 
++        // Persist local/bot games each loop iteration. A move always
++        // triggers a write; clock-only changes are throttled to ~1 Hz inside
++        // so we don't hit the disk on every animation frame.
++        app.tick_resume_state();
++
+         // Check if hosting player received game start signal from background thread
+         if let Some(ref game_start_rx) = app.multiplayer_state.game_start_rx
+             && let Ok(()) = game_start_rx.try_recv()
+diff --git a/src/state/mod.rs b/src/state/mod.rs
+index 9570ad2..ce63255 100644
+--- a/src/state/mod.rs
++++ b/src/state/mod.rs
+@@ -4,5 +4,6 @@ pub mod bot_state;
+ pub mod game_mode_state;
+ pub mod lichess_state;
+ pub mod multiplayer_state;
++pub mod resume;
+ pub mod theme_state;
+ pub mod ui_state;
+diff --git a/src/state/resume.rs b/src/state/resume.rs
+new file mode 100644
+index 0000000..fda650a
+--- /dev/null
++++ b/src/state/resume.rs
+@@ -0,0 +1,322 @@
++//! On-disk persistence of an in-progress local or bot game so the user can
++//! quit and pick up where they left off.
++//!
++//! The save file lives next to `config.toml` in the user's config dir and is
++//! a small JSON document. We deliberately keep the schema minimal — only what
++//! is required to reconstruct a playable position. Move history and clock
++//! state are not preserved; on resume the game continues without history
++//! navigation or a time control.
++
++use std::fs;
++use std::path::PathBuf;
++
++use serde::{Deserialize, Serialize};
++use shakmaty::{Color, Piece, Role};
++
++use crate::constants::config_dir;
++
++/// Which game mode a saved game belongs to. Each mode has its own file.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++pub enum ResumeMode {
++    /// Two-player local game (Pages::Solo with no bot/opponent).
++    Local,
++    /// Game against the bot engine (Pages::Bot).
++    Bot,
++}
++
++impl ResumeMode {
++    fn filename(self) -> &'static str {
++        match self {
++            ResumeMode::Local => "resume_local.json",
++            ResumeMode::Bot => "resume_bot.json",
++        }
++    }
++}
++
++/// Serializable form of a captured piece — shakmaty's `Color` and `Role`
++/// don't derive `Serialize`, so we store them as short string tags.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct TakenPieceRecord {
++    pub color: String,
++    pub role: String,
++}
++
++impl TakenPieceRecord {
++    pub fn from_piece(p: Piece) -> Self {
++        Self {
++            color: color_tag(p.color).to_string(),
++            role: role_tag(p.role).to_string(),
++        }
++    }
++
++    pub fn to_piece(&self) -> Option<Piece> {
++        Some(Piece {
++            color: color_from_tag(&self.color)?,
++            role: role_from_tag(&self.role)?,
++        })
++    }
++}
++
++fn color_tag(c: Color) -> &'static str {
++    match c {
++        Color::White => "white",
++        Color::Black => "black",
++    }
++}
++
++fn color_from_tag(s: &str) -> Option<Color> {
++    match s {
++        "white" => Some(Color::White),
++        "black" => Some(Color::Black),
++        _ => None,
++    }
++}
++
++fn role_tag(r: Role) -> &'static str {
++    match r {
++        Role::Pawn => "pawn",
++        Role::Knight => "knight",
++        Role::Bishop => "bishop",
++        Role::Rook => "rook",
++        Role::Queen => "queen",
++        Role::King => "king",
++    }
++}
++
++fn role_from_tag(s: &str) -> Option<Role> {
++    match s {
++        "pawn" => Some(Role::Pawn),
++        "knight" => Some(Role::Knight),
++        "bishop" => Some(Role::Bishop),
++        "rook" => Some(Role::Rook),
++        "queen" => Some(Role::Queen),
++        "king" => Some(Role::King),
++        _ => None,
++    }
++}
++
++/// Bot configuration captured alongside a bot-mode save so the engine can be
++/// re-launched with the same settings.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct BotConfig {
++    pub path: String,
++    pub depth: u8,
++    pub difficulty: Option<u8>,
++    /// "white" / "black" — the colour the human player chose.
++    pub player_color: String,
++    pub is_random_color: bool,
++}
++
++/// Clock state captured so each side resumes with the time they had on disk.
++/// `cursor` and `custom_minutes` mirror `GameModeState` so the menu form is
++/// pre-populated identically when starting follow-up games.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct ClockState {
++    pub white_ms: u64,
++    pub black_ms: u64,
++    pub clock_cursor: u8,
++    pub custom_minutes: u16,
++}
++
++/// One on-disk save. Created after every move that mutates the position.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct SavedGame {
++    pub mode: ResumeMode,
++    /// FEN of the current position. Used as a sanity check after replaying
++    /// `moves_uci`; if the move list is empty we fall back to using this FEN
++    /// directly as the resumed position.
++    pub fen: String,
++    /// Whose perspective the board was being shown from.
++    pub is_flipped: bool,
++    pub taken_pieces: Vec<TakenPieceRecord>,
++    /// Bot-only — `None` for `ResumeMode::Local`.
++    pub bot: Option<BotConfig>,
++    /// Present whenever the game was started with a time control.
++    #[serde(default)]
++    pub clock: Option<ClockState>,
++    /// Every move played so far, encoded as UCI. Restoring these lets the
++    /// resumed game replay history (P/N navigation, full move log).
++    #[serde(default)]
++    pub moves_uci: Vec<String>,
++}
++
++/// Returns the path the save file for `mode` would live at, or `None` if the
++/// platform's config directory cannot be determined. We do not create the
++/// directory here — callers should rely on the chess-tui subdirectory already
++/// existing (it is created on startup in `main.rs`).
++///
++/// The `CHESS_TUI_RESUME_DIR` env var overrides the location entirely. It
++/// exists so the integration tests can redirect persistence into a tempdir
++/// without polluting the user's real config directory.
++pub fn save_path(mode: ResumeMode) -> Option<PathBuf> {
++    if let Ok(custom) = std::env::var("CHESS_TUI_RESUME_DIR") {
++        let dir = PathBuf::from(custom);
++        return Some(dir.join(mode.filename()));
++    }
++    let dir = config_dir().ok()?;
++    Some(dir.join("chess-tui").join(mode.filename()))
++}
++
++/// Returns `true` if a save file exists on disk for `mode`. Errors (missing
++/// config dir, IO problems) are treated as "no save".
++pub fn has_save(mode: ResumeMode) -> bool {
++    save_path(mode).map(|p| p.is_file()).unwrap_or(false)
++}
++
++/// Reads and parses the save for `mode`. Any failure (missing file, malformed
++/// JSON) returns `None`; we never want a corrupt save to prevent the app from
++/// starting a new game.
++pub fn load(mode: ResumeMode) -> Option<SavedGame> {
++    let path = save_path(mode)?;
++    let raw = fs::read_to_string(&path).ok()?;
++    match serde_json::from_str::<SavedGame>(&raw) {
++        Ok(saved) if saved.mode == mode => Some(saved),
++        Ok(_) => {
++            log::warn!(
++                "Resume file {} contains a different mode than expected; ignoring",
++                path.display()
++            );
++            None
++        }
++        Err(e) => {
++            log::warn!("Failed to parse resume file {}: {}", path.display(), e);
++            None
++        }
++    }
++}
++
++/// Best-effort write. IO/serialisation failures are logged but never bubble
++/// up — losing a save is annoying, but never worth interrupting gameplay.
++pub fn save(mode: ResumeMode, game: &SavedGame) {
++    let Some(path) = save_path(mode) else {
++        log::warn!("Cannot persist resume save: no config directory");
++        return;
++    };
++    let json = match serde_json::to_string_pretty(game) {
++        Ok(s) => s,
++        Err(e) => {
++            log::warn!("Failed to serialise resume save: {}", e);
++            return;
++        }
++    };
++    if let Err(e) = fs::write(&path, json) {
++        log::warn!("Failed to write resume save {}: {}", path.display(), e);
++    }
++}
++
++/// Best-effort delete. Missing-file is treated as success.
++pub fn delete(mode: ResumeMode) {
++    let Some(path) = save_path(mode) else {
++        return;
++    };
++    match fs::remove_file(&path) {
++        Ok(()) => {}
++        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
++        Err(e) => log::warn!("Failed to delete resume save {}: {}", path.display(), e),
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn taken_piece_roundtrip() {
++        for color in [Color::White, Color::Black] {
++            for role in [
++                Role::Pawn,
++                Role::Knight,
++                Role::Bishop,
++                Role::Rook,
++                Role::Queen,
++                Role::King,
++            ] {
++                let p = Piece { color, role };
++                let record = TakenPieceRecord::from_piece(p);
++                assert_eq!(record.to_piece(), Some(p));
++            }
++        }
++    }
++
++    #[test]
++    fn taken_piece_invalid_tag_returns_none() {
++        let record = TakenPieceRecord {
++            color: "purple".into(),
++            role: "dragon".into(),
++        };
++        assert_eq!(record.to_piece(), None);
++    }
++
++    #[test]
++    fn saved_game_json_roundtrip_local() {
++        let original = SavedGame {
++            mode: ResumeMode::Local,
++            fen: "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1".into(),
++            is_flipped: false,
++            taken_pieces: vec![],
++            bot: None,
++            clock: Some(ClockState {
++                white_ms: 600_000,
++                black_ms: 594_500,
++                clock_cursor: 3,
++                custom_minutes: 10,
++            }),
++            moves_uci: vec!["e2e4".into()],
++        };
++        let json = serde_json::to_string(&original).expect("serialise");
++        let parsed: SavedGame = serde_json::from_str(&json).expect("parse");
++        assert_eq!(parsed, original);
++    }
++
++    #[test]
++    fn saved_game_json_roundtrip_bot() {
++        let original = SavedGame {
++            mode: ResumeMode::Bot,
++            fen: "8/8/8/8/8/8/8/4k2K w - - 0 1".into(),
++            is_flipped: true,
++            taken_pieces: vec![TakenPieceRecord {
++                color: "white".into(),
++                role: "pawn".into(),
++            }],
++            bot: Some(BotConfig {
++                path: "/usr/local/bin/stockfish".into(),
++                depth: 12,
++                difficulty: Some(3),
++                player_color: "black".into(),
++                is_random_color: false,
++            }),
++            clock: None,
++            moves_uci: vec![],
++        };
++        let json = serde_json::to_string(&original).expect("serialise");
++        let parsed: SavedGame = serde_json::from_str(&json).expect("parse");
++        assert_eq!(parsed, original);
++    }
++
++    #[test]
++    fn saved_game_clock_field_is_backward_compatible() {
++        // Older save files predate the `clock` field. They must still load
++        // cleanly with `clock: None` so users coming from an earlier version
++        // don't lose their resume state.
++        let legacy_json = r#"{
++            "mode": "Local",
++            "fen": "8/8/8/8/8/8/8/4k2K w - - 0 1",
++            "is_flipped": false,
++            "taken_pieces": [],
++            "bot": null
++        }"#;
++        let parsed: SavedGame = serde_json::from_str(legacy_json).expect("parse legacy");
++        assert!(parsed.clock.is_none());
++    }
++
++    #[test]
++    fn save_path_uses_per_mode_filename() {
++        // Don't assert the leading path (depends on the host) — just confirm
++        // the two modes do not collide and that the filenames are stable.
++        let local = save_path(ResumeMode::Local).expect("config dir resolves on this platform");
++        let bot = save_path(ResumeMode::Bot).expect("config dir resolves on this platform");
++        assert_ne!(local, bot);
++        assert!(local.ends_with("resume_local.json"));
++        assert!(bot.ends_with("resume_bot.json"));
++    }
++}
+diff --git a/src/ui/menu/game_mode_menu.rs b/src/ui/menu/game_mode_menu.rs
+index ade142c..b675580 100644
+--- a/src/ui/menu/game_mode_menu.rs
++++ b/src/ui/menu/game_mode_menu.rs
+@@ -430,13 +430,24 @@ fn build_local_detail_lines(app: &App) -> Vec<Line<'static>> {
+         Line::from("Perfect for practicing chess alone or"),
+         Line::from("playing with your friend on a single computer."),
+         Line::from(""),
+-        Line::from(vec![Span::styled(
+-            "Time Control:",
++    ];
++
++    if app.has_resume_save(crate::state::resume::ResumeMode::Local) {
++        lines.push(Line::from(vec![Span::styled(
++            "Saved game available — press R to resume",
+             Style::default()
+-                .fg(Color::Cyan)
++                .fg(Color::Green)
+                 .add_modifier(Modifier::BOLD),
+-        )]),
+-    ];
++        )]));
++        lines.push(Line::from(""));
++    }
++
++    lines.push(Line::from(vec![Span::styled(
++        "Time Control:",
++        Style::default()
++            .fg(Color::Cyan)
++            .add_modifier(Modifier::BOLD),
++    )]));
+ 
+     let current_time_control = app.game_mode_state.get_time_control_name();
+     let time_label = if let Some(seconds) = app.game_mode_state.get_time_control_seconds() {
+@@ -539,6 +550,19 @@ fn build_bot_detail_lines(app: &App) -> Vec<Line<'static>> {
+         Line::from("Challenge a chess engine"),
+         Line::from("and improve your skills."),
+         Line::from(""),
++    ];
++
++    if app.has_resume_save(crate::state::resume::ResumeMode::Bot) {
++        lines.push(Line::from(vec![Span::styled(
++            "Saved game available — press R to resume",
++            Style::default()
++                .fg(Color::Green)
++                .add_modifier(Modifier::BOLD),
++        )]));
++        lines.push(Line::from(""));
++    }
++
++    lines.extend([
+         Line::from(vec![Span::styled(
+             "Features:",
+             Style::default()
+@@ -550,7 +574,7 @@ fn build_bot_detail_lines(app: &App) -> Vec<Line<'static>> {
+         Line::from("  • UCI engine support"),
+         Line::from("  • Play offline."),
+         Line::from(""),
+-    ];
++    ]);
+ 
+     if let Some(ref path) = app.bot_state.chess_engine_path {
+         let display_path = if path.len() > 25 {
+diff --git a/tests/resume_tests.rs b/tests/resume_tests.rs
+new file mode 100644
+index 0000000..0a8328b
+--- /dev/null
++++ b/tests/resume_tests.rs
+@@ -0,0 +1,770 @@
++//! End-to-end checks for the bot/local game resume feature.
++//!
++//! Persistence uses the `CHESS_TUI_RESUME_DIR` env var override so tests can
++//! redirect saves into a tempdir. The env var is process-global, so these
++//! tests share a Mutex to serialise their access.
++
++use std::path::PathBuf;
++use std::sync::Mutex;
++
++use chess_tui::{
++    app::{App, AppResult},
++    constants::Pages,
++    game_logic::game::GameState,
++    handlers::handler::handle_key_events,
++    state::resume::{ClockState, ResumeMode, SavedGame, has_save, save, save_path},
++};
++use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
++use tempfile::TempDir;
++
++static ENV_LOCK: Mutex<()> = Mutex::new(());
++
++/// RAII guard: redirects resume persistence into a tempdir for the lifetime
++/// of one test. Restores the previous env var on drop so neighbouring tests
++/// in the same process aren't affected.
++struct ResumeDirGuard {
++    _tempdir: TempDir,
++    _lock: std::sync::MutexGuard<'static, ()>,
++    previous: Option<String>,
++}
++
++impl ResumeDirGuard {
++    fn new() -> Self {
++        let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
++        // Driving the app through menus and moves triggers sound effects, each
++        // of which spawns a rodio audio thread. On a headless CI runner with no
++        // audio device (notably Windows) opening the default sink can crash the
++        // process with an access violation, so silence sound for every test.
++        chess_tui::sound::set_sound_enabled(false);
++        let previous = std::env::var("CHESS_TUI_RESUME_DIR").ok();
++        let tempdir = tempfile::tempdir().expect("tempdir");
++        // SAFETY: env vars are global; the lock above serialises access.
++        unsafe {
++            std::env::set_var("CHESS_TUI_RESUME_DIR", tempdir.path());
++        }
++        Self {
++            _tempdir: tempdir,
++            _lock: lock,
++            previous,
++        }
++    }
++}
++
++impl Drop for ResumeDirGuard {
++    fn drop(&mut self) {
++        // SAFETY: see `new` — env vars are global, mutex is held.
++        unsafe {
++            match &self.previous {
++                Some(v) => std::env::set_var("CHESS_TUI_RESUME_DIR", v),
++                None => std::env::remove_var("CHESS_TUI_RESUME_DIR"),
++            }
++        }
++    }
++}
++
++fn key(code: KeyCode) -> KeyEvent {
++    KeyEvent {
++        code,
++        modifiers: KeyModifiers::empty(),
++        kind: KeyEventKind::Press,
++        state: ratatui::crossterm::event::KeyEventState::empty(),
++    }
++}
++
++fn send(app: &mut App, keys: &[KeyCode]) -> AppResult<()> {
++    for &k in keys {
++        handle_key_events(key(k), app)?;
++    }
++    Ok(())
++}
++
++/// Starts a fresh local game with no time control. Bot mode is hard to drive
++/// in tests (it spawns the engine binary), so all integration coverage uses
++/// local-mode persistence.
++fn start_local_game(app: &mut App) -> AppResult<()> {
++    send(
++        app,
++        &[
++            KeyCode::Enter, // Play Game -> GameModeMenu
++            KeyCode::Enter, // Select 'Local' -> form
++            KeyCode::Enter, // Submit form -> Pages::Solo
++        ],
++    )
++}
++
++/// Plays e2-e4 via the cursor. Leaves the app on Pages::Solo with one move
++/// in history.
++fn play_e2e4(app: &mut App) -> AppResult<()> {
++    send(app, &[KeyCode::Down, KeyCode::Down])?; // cursor -> e2
++    send(app, &[KeyCode::Enter])?; // select e2 pawn
++    send(app, &[KeyCode::Up, KeyCode::Up])?; // cursor -> e4
++    send(app, &[KeyCode::Enter])?; // move
++    Ok(())
++}
++
++fn resolved_save_path(mode: ResumeMode) -> PathBuf {
++    save_path(mode).expect("env var override resolves a path")
++}
++
++#[test]
++fn autosave_writes_after_first_move() -> AppResult<()> {
++    let _guard = ResumeDirGuard::new();
++
++    let mut app = App::default();
++    start_local_game(&mut app)?;
++
++    assert!(
++        !has_save(ResumeMode::Local),
++        "No save expected before any move"
++    );
++
++    play_e2e4(&mut app)?;
++    app.autosave_resume_state();
++
++    let path = resolved_save_path(ResumeMode::Local);
++    assert!(path.is_file(), "Autosave should produce {}", path.display());
++    let body = std::fs::read_to_string(&path)?;
++    let saved: SavedGame = serde_json::from_str(&body)?;
++    assert_eq!(saved.mode, ResumeMode::Local);
++    assert!(
++        saved.fen.starts_with("rnbqkbnr/pppppppp/8/8/4P3/"),
++        "FEN should describe the position after e4: {}",
++        saved.fen
++    );
++    assert!(saved.bot.is_none(), "Local saves must not carry bot config");
++    Ok(())
++}
++
++#[test]
++fn autosave_is_skipped_before_any_move() -> AppResult<()> {
++    let _guard = ResumeDirGuard::new();
++
++    let mut app = App::default();
++    start_local_game(&mut app)?;
++    app.autosave_resume_state();
++
++    assert!(
++        !has_save(ResumeMode::Local),
++        "Fresh game should not produce a save"
++    );
++    Ok(())
++}
++
++#[test]
++fn resume_from_saved_rebuilds_position() -> AppResult<()> {
++    let _guard = ResumeDirGuard::new();
++
++    // Hand-craft a save mid-game: black has just played 1...e5.
++    let saved = SavedGame {
++        mode: ResumeMode::Local,
++        fen: "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2".into(),
++        is_flipped: false,
++        taken_pieces: vec![],
++        bot: None,
++        clock: None,
++        moves_uci: vec!["e2e4".into(), "e7e5".into()],
++    };
++    save(ResumeMode::Local, &saved);
++
++    let mut app = App::default();
++    assert!(app.resume_from_saved(ResumeMode::Local));
++
++    assert_eq!(app.ui_state.current_page, Pages::Solo);
++    assert_eq!(app.game.logic.game_state, GameState::Playing);
++    assert_eq!(
++        app.game.logic.player_turn,
++        shakmaty::Color::White,
++        "Saved FEN says it is White to move",
++    );
++    let fen_now = app.game.logic.game_board.fen_position();
++    assert!(
++        fen_now.starts_with("rnbqkbnr/pppp1ppp/8/4p3/4P3/"),
++        "Resumed FEN should match the save: {}",
++        fen_now
++    );
++    Ok(())
++}
++
++#[test]
++fn resume_from_missing_save_shows_error() -> AppResult<()> {
++    let _guard = ResumeDirGuard::new();
++    let mut app = App::default();
++
++    assert!(!app.resume_from_saved(ResumeMode::Local));
++    assert_eq!(
++        app.ui_state.current_popup,
++        Some(chess_tui::constants::Popups::Error),
++        "An error popup should explain the missing save",
++    );
++    Ok(())
++}
++
++#[test]
++fn reaching_game_end_clears_save() -> AppResult<()> {
++    let _guard = ResumeDirGuard::new();
++
++    let mut app = App::default();
++    start_local_game(&mut app)?;
++    play_e2e4(&mut app)?;
++    app.autosave_resume_state();
++    assert!(has_save(ResumeMode::Local), "Sanity: save should exist");
++
++    // Force a terminal state. `check_and_show_game_end` first recomputes the
++    // game state from the position (which is still playable, so it would
++    // overwrite our forced value) — set it back, then re-enter the function
++    // by going through the path it shares with the main loop. To keep the
++    // test simple, call the deletion helper directly: that is what the
++    // end-of-game hook does.
++    app.game.logic.game_state = GameState::Checkmate;
++    app.clear_resume_state_for_current_mode();
++
++    assert!(
++        !has_save(ResumeMode::Local),
++        "Save should be deleted after a terminal state",
++    );
++    Ok(())
++}
++
++#[test]
++fn starting_new_game_clears_existing_save() -> AppResult<()> {
++    let _guard = ResumeDirGuard::new();
++
++    // Pre-existing save from an earlier session.
++    let saved = SavedGame {
++        mode: ResumeMode::Local,
++        fen: "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2".into(),
++        is_flipped: false,
++        taken_pieces: vec![],
++        bot: None,
++        clock: None,
++        moves_uci: vec!["e2e4".into(), "e7e5".into()],
++    };
++    save(ResumeMode::Local, &saved);
++    assert!(has_save(ResumeMode::Local));
++
++    let mut app = App::default();
++    start_local_game(&mut app)?;
++
++    assert!(
++        !has_save(ResumeMode::Local),
++        "Submitting the Local form should wipe a stale save",
++    );
++    Ok(())
++}
++
++#[test]
++fn pressing_r_in_local_form_resumes() -> AppResult<()> {
++    let _guard = ResumeDirGuard::new();
++
++    let saved = SavedGame {
++        mode: ResumeMode::Local,
++        fen: "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2".into(),
++        is_flipped: false,
++        taken_pieces: vec![],
++        bot: None,
++        clock: None,
++        moves_uci: vec!["e2e4".into(), "e7e5".into()],
++    };
++    save(ResumeMode::Local, &saved);
++
++    let mut app = App::default();
++    // Drive into the Local form (one Enter past the Local menu entry).
++    send(
++        &mut app,
++        &[
++            KeyCode::Enter, // Play Game -> GameModeMenu
++            KeyCode::Enter, // Select Local -> form_active = true
++        ],
++    )?;
++    assert!(app.game_mode_state.form_active);
++
++    send(&mut app, &[KeyCode::Char('r')])?;
++
++    assert_eq!(app.ui_state.current_page, Pages::Solo);
++    assert!(
++        !app.game_mode_state.form_active,
++        "Form should close on resume"
++    );
++    let fen_now = app.game.logic.game_board.fen_position();
++    assert!(
++        fen_now.starts_with("rnbqkbnr/pppp1ppp/8/4p3/4P3/"),
++        "Resumed position should match save: {}",
++        fen_now,
++    );
++    Ok(())
++}
++
++#[test]
++fn resume_restores_saved_clock_state() -> AppResult<()> {
++    let _guard = ResumeDirGuard::new();
++
++    let saved = SavedGame {
++        mode: ResumeMode::Local,
++        fen: "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2".into(),
++        is_flipped: false,
++        taken_pieces: vec![],
++        bot: None,
++        clock: Some(ClockState {
++            white_ms: 123_456,
++            black_ms: 234_567,
++            clock_cursor: 4,
++            custom_minutes: 7,
++        }),
++        moves_uci: vec!["e2e4".into(), "e7e5".into()],
++    };
++    save(ResumeMode::Local, &saved);
++
++    let mut app = App::default();
++    assert!(app.resume_from_saved(ResumeMode::Local));
++
++    let clock = app.game.logic.clock.as_ref().expect("clock restored");
++    // White to move (FEN said so), so the white clock is now ticking down.
++    // The black side is paused at the exact saved value.
++    let white_remaining = clock.get_time(shakmaty::Color::White).as_millis() as u64;
++    assert!(
++        white_remaining <= 123_456,
++        "white clock should be running, got {white_remaining}"
++    );
++    assert_eq!(
++        clock.get_time(shakmaty::Color::Black).as_millis() as u64,
++        234_567
++    );
++    assert!(clock.is_running, "clock must resume in the running state");
++    assert_eq!(clock.active_color, Some(shakmaty::Color::White));
++    assert_eq!(app.game_mode_state.clock_cursor, 4);
++    assert_eq!(app.game_mode_state.custom_time_minutes, 7);
++    Ok(())
++}
++
++#[test]
++fn flush_captures_clock_between_moves() -> AppResult<()> {
++    // Make a move with a running clock, then wait without making another
++    // move. A forced flush (the path the main loop and `quit()` use) must
++    // persist the ticked-down value rather than freezing at the last move.
++    let _guard = ResumeDirGuard::new();
++
++    let mut app = App::default();
++    start_local_game(&mut app)?;
++    // Attach a clock that the game would normally get from the time-control
++    // form. After the first move the clock starts for whoever is to move.
++    app.game.logic.clock = Some(chess_tui::game_logic::clock::Clock::new(600));
++    play_e2e4(&mut app)?;
++    app.autosave_resume_state();
++    let after_move: SavedGame = serde_json::from_str(&std::fs::read_to_string(
++        resolved_save_path(ResumeMode::Local),
++    )?)?;
++    let baseline_black_ms = after_move.clock.as_ref().expect("clock saved").black_ms;
++
++    // Let the black clock tick a hair, then force-flush.
++    std::thread::sleep(std::time::Duration::from_millis(50));
++    app.flush_resume_state();
++
++    let after_flush: SavedGame = serde_json::from_str(&std::fs::read_to_string(
++        resolved_save_path(ResumeMode::Local),
++    )?)?;
++    let later_black_ms = after_flush.clock.as_ref().expect("clock saved").black_ms;
++    assert!(
++        later_black_ms + 10 <= baseline_black_ms,
++        "force flush should capture elapsed time: was {baseline_black_ms}, now {later_black_ms}",
++    );
++    Ok(())
++}
++
++#[test]
++fn resume_rebuilds_full_move_history() -> AppResult<()> {
++    // Autosave should round-trip the entire move list, not just the current
++    // position, so P/N navigation and the move log survive a resume.
++    let _guard = ResumeDirGuard::new();
++
++    let mut app = App::default();
++    start_local_game(&mut app)?;
++    play_e2e4(&mut app)?;
++    app.autosave_resume_state();
++
++    // Build a brand-new app to simulate quitting and relaunching.
++    let mut fresh = App::default();
++    assert!(fresh.resume_from_saved(ResumeMode::Local));
++
++    assert_eq!(
++        fresh.game.logic.game_board.move_history.len(),
++        1,
++        "history must come back with the move we played"
++    );
++    assert_eq!(
++        fresh.game.logic.game_board.position_history.len(),
++        2,
++        "position_history must include the initial position plus one after e4",
++    );
++    Ok(())
++}
++
++#[test]
++fn pressing_r_in_menu_navigation_resumes() -> AppResult<()> {
++    // R should work as soon as the cursor lands on Local — the user shouldn't
++    // have to press Enter into the form first just to find the resume key.
++    let _guard = ResumeDirGuard::new();
++
++    let saved = SavedGame {
++        mode: ResumeMode::Local,
++        fen: "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2".into(),
++        is_flipped: false,
++        taken_pieces: vec![],
++        bot: None,
++        clock: None,
++        moves_uci: vec!["e2e4".into(), "e7e5".into()],
++    };
++    save(ResumeMode::Local, &saved);
++
++    let mut app = App::default();
++    send(&mut app, &[KeyCode::Enter])?; // Home -> GameModeMenu, cursor on Local
++    assert!(!app.game_mode_state.form_active);
++
++    send(&mut app, &[KeyCode::Char('r')])?;
++
++    assert_eq!(app.ui_state.current_page, Pages::Solo);
++    let fen_now = app.game.logic.game_board.fen_position();
++    assert!(
++        fen_now.starts_with("rnbqkbnr/pppp1ppp/8/4p3/4P3/"),
++        "Resumed position should match save: {}",
++        fen_now,
++    );
++    Ok(())
++}
++
++#[test]
++fn move_count_guard_prevents_duplicate_writes() -> AppResult<()> {
++    // Calling autosave twice without a move in between must not rewrite the
++    // file. Otherwise the per-tick path would churn the disk for no reason.
++    let _guard = ResumeDirGuard::new();
++    let mut app = App::default();
++    start_local_game(&mut app)?;
++    play_e2e4(&mut app)?;
++
++    app.autosave_resume_state();
++    let path = resolved_save_path(ResumeMode::Local);
++    let mtime_first = std::fs::metadata(&path)?.modified()?;
++
++    std::thread::sleep(std::time::Duration::from_millis(30));
++    app.autosave_resume_state(); // No new move — should be a no-op.
++
++    let mtime_second = std::fs::metadata(&path)?.modified()?;
++    assert_eq!(
++        mtime_first, mtime_second,
++        "Second autosave with same move count must not rewrite the file"
++    );
++    Ok(())
++}
++
++#[test]
++fn resume_restores_flip_and_taken_pieces() -> AppResult<()> {
++    let _guard = ResumeDirGuard::new();
++
++    use chess_tui::state::resume::TakenPieceRecord;
++    let saved = SavedGame {
++        mode: ResumeMode::Local,
++        fen: "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2".into(),
++        is_flipped: true,
++        taken_pieces: vec![
++            TakenPieceRecord {
++                color: "black".into(),
++                role: "pawn".into(),
++            },
++            TakenPieceRecord {
++                color: "white".into(),
++                role: "knight".into(),
++            },
++        ],
++        bot: None,
++        clock: None,
++        moves_uci: vec![],
++    };
++    save(ResumeMode::Local, &saved);
++
++    let mut app = App::default();
++    assert!(app.resume_from_saved(ResumeMode::Local));
++    assert!(
++        app.game.logic.game_board.is_flipped,
++        "Board orientation should be restored"
++    );
++    assert_eq!(
++        app.game.logic.game_board.taken_pieces.len(),
++        2,
++        "Captured pieces should be restored when moves_uci is empty (legacy path)"
++    );
++    Ok(())
++}
++
++#[test]
++fn legacy_save_without_moves_uses_fen_directly() -> AppResult<()> {
++    // Saves written by an older version don't carry `moves_uci`. They must
++    // still load — falling back to the FEN-only restore path.
++    let _guard = ResumeDirGuard::new();
++    let saved = SavedGame {
++        mode: ResumeMode::Local,
++        fen: "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2".into(),
++        is_flipped: false,
++        taken_pieces: vec![],
++        bot: None,
++        clock: None,
++        moves_uci: vec![],
++    };
++    save(ResumeMode::Local, &saved);
++
++    let mut app = App::default();
++    assert!(app.resume_from_saved(ResumeMode::Local));
++    assert!(
++        app.game.logic.game_board.move_history.is_empty(),
++        "Legacy saves can't rebuild history; that's the accepted trade-off",
++    );
++    let fen_now = app.game.logic.game_board.fen_position();
++    assert!(fen_now.starts_with("rnbqkbnr/pppp1ppp/8/4p3/4P3/"));
++    Ok(())
++}
++
++#[test]
++fn corrupt_fen_in_save_deletes_file_and_errors() -> AppResult<()> {
++    let _guard = ResumeDirGuard::new();
++    let bad = SavedGame {
++        mode: ResumeMode::Local,
++        fen: "this is not a fen".into(),
++        is_flipped: false,
++        taken_pieces: vec![],
++        bot: None,
++        clock: None,
++        moves_uci: vec![],
++    };
++    save(ResumeMode::Local, &bad);
++    assert!(has_save(ResumeMode::Local));
++
++    let mut app = App::default();
++    assert!(!app.resume_from_saved(ResumeMode::Local));
++    assert_eq!(
++        app.ui_state.current_popup,
++        Some(chess_tui::constants::Popups::Error),
++        "User should be told the save is corrupt",
++    );
++    assert!(
++        !has_save(ResumeMode::Local),
++        "Corrupt saves should be deleted so the prompt stops re-appearing",
++    );
++    Ok(())
++}
++
++#[test]
++fn home_page_does_not_persist() -> AppResult<()> {
++    // The autosave hook fires every tick; it must be a no-op when not in a
++    // resumable mode. Otherwise navigating menus would create stray files.
++    let _guard = ResumeDirGuard::new();
++    let mut app = App::default();
++    app.tick_resume_state();
++    app.autosave_resume_state();
++    app.flush_resume_state();
++    assert!(
++        !has_save(ResumeMode::Local) && !has_save(ResumeMode::Bot),
++        "Home page must not write any resume files",
++    );
++    Ok(())
++}
++
++#[test]
++fn r_with_no_save_is_inert() -> AppResult<()> {
++    // Pressing R on a mode without a save must NOT advance into the game.
++    let _guard = ResumeDirGuard::new();
++    let mut app = App::default();
++    send(&mut app, &[KeyCode::Enter])?; // Home -> GameModeMenu, Local highlighted
++    send(&mut app, &[KeyCode::Char('r')])?;
++
++    assert_eq!(
++        app.ui_state.current_page,
++        Pages::GameModeMenu,
++        "R without a save must stay on the menu",
++    );
++    Ok(())
++}
++
++#[test]
++fn quit_flushes_clock_state() -> AppResult<()> {
++    let _guard = ResumeDirGuard::new();
++    let mut app = App::default();
++    start_local_game(&mut app)?;
++    app.game.logic.clock = Some(chess_tui::game_logic::clock::Clock::new(600));
++    play_e2e4(&mut app)?;
++    app.autosave_resume_state();
++    // Assert on the persisted clock value rather than the file mtime: on
++    // Windows the filesystem last-write timestamp resolution is coarse, so two
++    // writes 50ms apart can share a timestamp and a `mtime > baseline` check
++    // flakes. The ticked-down clock is what we actually care about anyway.
++    let before: SavedGame = serde_json::from_str(&std::fs::read_to_string(resolved_save_path(
++        ResumeMode::Local,
++    ))?)?;
++    let baseline_black_ms = before.clock.as_ref().expect("clock saved").black_ms;
++
++    std::thread::sleep(std::time::Duration::from_millis(50));
++    app.quit();
++
++    let after: SavedGame = serde_json::from_str(&std::fs::read_to_string(resolved_save_path(
++        ResumeMode::Local,
++    ))?)?;
++    let later_black_ms = after.clock.as_ref().expect("clock saved").black_ms;
++    assert!(
++        later_black_ms + 10 <= baseline_black_ms,
++        "quit() must rewrite the save so the clock reflects real elapsed time: was {baseline_black_ms}, now {later_black_ms}",
++    );
++    assert!(!app.running, "quit() should still toggle the running flag");
++    Ok(())
++}
++
++#[test]
++fn reset_home_flushes_then_preserves_save() -> AppResult<()> {
++    // Going back to home via `b` must persist the latest clock value AND
++    // leave the file intact so the user can resume later.
++    let _guard = ResumeDirGuard::new();
++    let mut app = App::default();
++    start_local_game(&mut app)?;
++    app.game.logic.clock = Some(chess_tui::game_logic::clock::Clock::new(600));
++    play_e2e4(&mut app)?;
++    app.autosave_resume_state();
++    // Content-based assertion, not file mtime — see `quit_flushes_clock_state`
++    // for why mtime comparisons flake on Windows.
++    let before: SavedGame = serde_json::from_str(&std::fs::read_to_string(resolved_save_path(
++        ResumeMode::Local,
++    ))?)?;
++    let baseline_black_ms = before.clock.as_ref().expect("clock saved").black_ms;
++
++    std::thread::sleep(std::time::Duration::from_millis(50));
++    app.reset_home();
++
++    let after: SavedGame = serde_json::from_str(&std::fs::read_to_string(resolved_save_path(
++        ResumeMode::Local,
++    ))?)?;
++    let later_black_ms = after.clock.as_ref().expect("clock saved").black_ms;
++    assert!(
++        later_black_ms + 10 <= baseline_black_ms,
++        "reset_home should flush the ticked clock before tearing down state: was {baseline_black_ms}, now {later_black_ms}",
++    );
++    assert!(
++        has_save(ResumeMode::Local),
++        "Going home should not delete the save — the user may want to resume",
++    );
++    Ok(())
++}
++
++#[test]
++fn tick_throttles_clock_only_writes() -> AppResult<()> {
++    // Two ticks back-to-back without a move in between must not double-write.
++    // The first one passes the throttle (no prior flush); the second is
++    // suppressed by the 1 Hz throttle, and it has no move-count delta to
++    // bypass it.
++    let _guard = ResumeDirGuard::new();
++    let mut app = App::default();
++    start_local_game(&mut app)?;
++    app.game.logic.clock = Some(chess_tui::game_logic::clock::Clock::new(600));
++    play_e2e4(&mut app)?;
++
++    app.tick_resume_state();
++    let after_first = std::fs::metadata(resolved_save_path(ResumeMode::Local))?.modified()?;
++    std::thread::sleep(std::time::Duration::from_millis(30));
++    app.tick_resume_state();
++    let after_second = std::fs::metadata(resolved_save_path(ResumeMode::Local))?.modified()?;
++
++    assert_eq!(
++        after_first, after_second,
++        "Throttled tick should not rewrite within 1 second",
++    );
++    Ok(())
++}
++
++#[test]
++fn player_checkmate_via_check_game_end_status_clears_save() -> AppResult<()> {
++    // The main loop calls `check_game_end_status` after every event. Moves
++    // that produce checkmate land there (not `check_and_show_game_end`), so
++    // it must also drop the save.
++    let _guard = ResumeDirGuard::new();
++
++    // Fool's mate position: White's king is checkmated, Black just played.
++    let mate_fen = "rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3";
++    let saved = SavedGame {
++        mode: ResumeMode::Local,
++        fen: mate_fen.into(),
++        is_flipped: false,
++        taken_pieces: vec![],
++        bot: None,
++        clock: None,
++        moves_uci: vec![],
++    };
++    save(ResumeMode::Local, &saved);
++
++    let mut app = App::default();
++    assert!(app.resume_from_saved(ResumeMode::Local));
++    // Save came back when the user landed on the resumed position. The act
++    // of recognising checkmate is what should wipe it.
++    assert!(has_save(ResumeMode::Local));
++
++    app.check_game_end_status();
++
++    assert_eq!(app.game.logic.game_state, GameState::Checkmate);
++    assert!(
++        !has_save(ResumeMode::Local),
++        "check_game_end_status must clear the save on a fresh terminal state",
++    );
++    Ok(())
++}
++
++#[test]
++fn restart_clears_save_so_old_state_does_not_shadow_new_game() -> AppResult<()> {
++    let _guard = ResumeDirGuard::new();
++
++    let mut app = App::default();
++    start_local_game(&mut app)?;
++    play_e2e4(&mut app)?;
++    app.autosave_resume_state();
++    assert!(has_save(ResumeMode::Local), "Sanity: save written");
++
++    app.restart();
++
++    assert!(
++        !has_save(ResumeMode::Local),
++        "In-game restart must clear the previous save",
++    );
++    Ok(())
++}
++
++#[test]
++fn clock_runout_clears_save_via_tick() -> AppResult<()> {
++    // `tick()` is the entry point for time-loss detection. When white runs
++    // out of time it should mark the game as checkmate (for the winner) and
++    // — crucially — drop the save.
++    let _guard = ResumeDirGuard::new();
++
++    let mut app = App::default();
++    start_local_game(&mut app)?;
++    // A 0-second clock reports time-up immediately, which the tick handler
++    // uses to declare the other side the winner.
++    app.game.logic.clock = Some(chess_tui::game_logic::clock::Clock::new(0));
++    play_e2e4(&mut app)?;
++    app.autosave_resume_state();
++    assert!(has_save(ResumeMode::Local));
++
++    app.tick();
++
++    assert_eq!(app.game.logic.game_state, GameState::Checkmate);
++    assert!(
++        !has_save(ResumeMode::Local),
++        "Clock-runout path must also clear the resume save",
++    );
++    Ok(())
++}
++
++#[test]
++fn current_resume_mode_identifies_local_game() -> AppResult<()> {
++    let _guard = ResumeDirGuard::new();
++
++    let mut app = App::default();
++    assert!(
++        app.current_resume_mode().is_none(),
++        "Home page is not a resumable mode"
++    );
++    start_local_game(&mut app)?;
++    assert_eq!(app.current_resume_mode(), Some(ResumeMode::Local));
++    Ok(())
++}
+-- 
+2.55.0
+

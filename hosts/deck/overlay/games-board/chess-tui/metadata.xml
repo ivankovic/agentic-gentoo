@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+	<maintainer type="person">
+		<email>marko@ivankovic.me</email>
+		<name>Marko Ivankovic</name>
+	</maintainer>
+	<use>
+		<flag name="sound">Move and capture sounds through rodio (ALSA)</flag>
+	</use>
+	<upstream>
+		<bugs-to>https://github.com/thomas-mauran/chess-tui/issues</bugs-to>
+		<remote-id type="github">thomas-mauran/chess-tui</remote-id>
+	</upstream>
+</pkgmetadata>
