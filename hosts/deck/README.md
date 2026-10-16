@@ -286,6 +286,11 @@ The user was in Firefox, on Gmail: Firefox at all six.
 used as usual. Resets stopping for a day or two of that points at i915/the media engine (a kernel
 bug report, or Lenovo); resets carrying on clear Firefox's GPU use. Undo: delete `user.js`, reset
 both prefs in about:config. `about:support` → Graphics shows "Compositing: WebRender (Software)".
+Interim (2026-10-16 12:19): 37 h up without a reset, through daily Firefox use and full-core
+builds. That is three times the longest gap since the resets sped up on 2026-10-13 (about 12 h),
+but not yet past the gaps before it (about 2 days), so not conclusive. The cost shows in
+deck-usaged: Firefox drawing on the CPU took a quarter to half of all CPU time (pixman in the
+profile), often above one core.
 
 **Terminals come back after a crash.** [deck-terminals](usr-local/bin/deck-terminals), run by the
 user service [deck-terminals.service](home/.config/systemd/user/deck-terminals.service), records
