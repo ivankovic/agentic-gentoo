@@ -148,6 +148,7 @@ struct Daemon {
     /// Samples per hour, per package whose code ran (library or program), per process key.
     libs: HashMap<(i64, u32, Key), u64>,
     unresolved: u64,
+    jit_guess: u64,
 }
 
 impl Daemon {
@@ -418,9 +419,14 @@ impl Daemon {
     fn profile(&mut self, samples: &mut Vec<profile::Sample>) {
         let hour = unix_now() / 3600 * 3600;
         for s in samples.drain(..) {
-            let Some(key) = self.procs.get(&s.pid).map(|p| p.key) else {
-                self.unresolved += 1;
-                continue;
+            // PID 0 is the kernel's idle loop, before a CPU sleeps (or while it polls).
+            let key = match self.procs.get(&s.pid) {
+                Some(p) => p.key,
+                None if s.pid == 0 => (self.intern("kernel:idle"), Ctx::Kernel),
+                None => {
+                    self.unresolved += 1;
+                    continue;
+                }
             };
             let lib = if s.kernel {
                 let i = self.modules.partition_point(|m| m.1 <= s.ip);
@@ -435,9 +441,11 @@ impl Daemon {
                 match self.code_at(s.pid, s.ip) {
                     Some(SELF) => key.0,
                     Some(l) => l,
+                    // Mapped after the last reading of the maps: nearly always fresh JIT code
+                    // (Firefox, Bun), so the process's own; counted apart.
                     None => {
-                        self.unresolved += 1;
-                        continue;
+                        self.jit_guess += 1;
+                        key.0
                     }
                 }
             };
@@ -692,6 +700,7 @@ impl Daemon {
         }
         let _ = store.meta("lost_event_batches", &self.lost.to_string());
         let _ = store.meta("profile_unresolved_samples", &self.unresolved.to_string());
+        let _ = store.meta("profile_unmapped_as_own_samples", &self.jit_guess.to_string());
     }
 }
 
@@ -772,6 +781,7 @@ fn main() -> Result<()> {
         maps: HashMap::new(),
         libs: HashMap::new(),
         unresolved: 0,
+        jit_guess: 0,
     };
     d.sweep(true, true);
     d.read_cgroups();
