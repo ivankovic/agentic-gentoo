@@ -493,6 +493,10 @@ lists every installed package by origin and the local patches each carries.
 rejected, backport…), one timestamped event per change; `deck` edits it, as do `deck mark` and
 hand edits.
 
+`deck-usaged` ([deck-usaged.service](etc/systemd/system/deck-usaged.service)) records CPU and
+memory per package per hour, with bursts, into `/var/lib/deck/usage.db`; `deck usage` and
+`deck usage --spikes` read it. How it counts: [tools/deck](../../tools/deck/README.md).
+
 ## Local overlay
 
 [overlay/](overlay/) is the source of the `local` repository. It is deployed root-owned with

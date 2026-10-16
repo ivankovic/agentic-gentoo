@@ -9,7 +9,9 @@ publish = false
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive", "env"] }
+libc = "0.2"
 ratatui = "0.30"
+rusqlite = "0.40"
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"
 

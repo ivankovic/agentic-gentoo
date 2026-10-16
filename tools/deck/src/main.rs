@@ -5,6 +5,7 @@ mod model;
 mod patches;
 mod track;
 mod tui;
+mod usage;
 mod vdb;
 
 use anyhow::Result;
@@ -50,14 +51,34 @@ enum Cmd {
     },
     /// Set the upstream project a patch is meant for
     Upstream { id: String, url: String },
+    /// Print CPU and memory use per package, as deck-usaged recorded it, tab-separated
+    Usage {
+        /// How far back, in days
+        #[arg(long, default_value_t = 1.0)]
+        days: f64,
+        /// List the bursts of CPU instead of the totals
+        #[arg(long)]
+        spikes: bool,
+        #[arg(long, env = "DECK_USAGE_DB", default_value = usage::DEFAULT_DB)]
+        db: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
+    // Die quietly on a closed pipe (`deck usage | head`), as command-line tools do.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     let cli = Cli::parse();
     let host_dir = match cli.host_dir {
         Some(d) => d,
         None => default_host_dir()?,
     };
+    if let Some(Cmd::Usage { days, spikes, db }) = &cli.cmd {
+        return if *spikes {
+            usage::print_spikes(db, *days)
+        } else {
+            usage::print_totals(db, *days)
+        };
+    }
     let mut m = Model::load(host_dir)?;
     match cli.cmd {
         None => tui::run(m),
@@ -102,5 +123,6 @@ fn main() -> Result<()> {
         }
         Some(Cmd::Mark { id, state, url, note }) => m.record(&id, state, url, note),
         Some(Cmd::Upstream { id, url }) => m.set_upstream(&id, url),
+        Some(Cmd::Usage { .. }) => unreachable!(),
     }
 }
