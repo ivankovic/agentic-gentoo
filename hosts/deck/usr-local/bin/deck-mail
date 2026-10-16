@@ -8,7 +8,9 @@
   deck-mail send     aerc's outgoing command: msmtpq, which queues what can't go out now
   deck-mail bills [--dry-run]
                      copy the PDFs of bills into the family archive on Nextcloud (WebDAV),
-                     filed by date; the rules are in ~/.config/deck-mail/bills. `sync` runs it.
+                     filed by date; the rules are in ~/.config/deck-mail/bills, and what each
+                     PDF is called (or that it's left out) in ~/.config/deck-mail/bill-names.
+                     --dry-run lists every PDF and its name. `sync` runs it.
   deck-mail top [N] [query]
                      the N (50) most frequent senders, sender domains and subjects, with the
                      newest message's month: what to clean up. The query defaults to
@@ -45,6 +47,7 @@ import imaplib
 import json
 import os
 import pathlib
+import re
 import shlex
 import subprocess
 import sys
@@ -55,6 +58,7 @@ CONFIG = pathlib.Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config")
 STATE = pathlib.Path(os.environ.get("XDG_STATE_HOME") or HOME / ".local/state") / "deck-mail"
 ACCOUNTS = CONFIG / "deck-mail/accounts"
 BILLS = CONFIG / "deck-mail/bills"
+BILL_NAMES = CONFIG / "deck-mail/bill-names"
 MAIL = HOME / "Mail"
 ISYNCRC = CONFIG / "isyncrc"
 MSMTPQ = "/usr/share/msmtp/msmtpq"
@@ -407,8 +411,9 @@ url     https://cloud.example.org          # the Nextcloud server
 user    you                                # its login
 pass    nextcloud/deck                     # the `pass` entry holding a Nextcloud app password
 folder  Family Archive                     # where in Nextcloud
-# Where in the folder, from: {year} {month} {date} (YYYY-MM-DD) {sender} {subject} {file}
-layout  {year}/{date} {sender} - {file}
+# Where in the folder, from: {year} {month} {date} (YYYY-MM-DD) {sender} {subject} {file}, and
+# {name}, the name bill-names gives the PDF ("{sender} - {file}" while there is no bill-names)
+layout  {year}/{date} {name}
 local   ~/Documents/Bills                  # a copy on deck, same layout
 # Bills: any of these notmuch searches, one a line, on mail with a PDF. In aerc, Bb makes any
 # message a bill (tag `bill`), Bn keeps one out (tag `notbill`).
@@ -419,7 +424,7 @@ BILL_KEYS = ("url", "user", "pass", "folder", "layout", "local")
 
 
 def bills_config(upload=True):
-    conf, rules = {"layout": "{year}/{date} {sender} - {file}"}, []
+    conf, rules = {"layout": "{year}/{date} {name}"}, []
     for line in BILLS.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
@@ -436,6 +441,34 @@ def bills_config(upload=True):
     return conf, rules
 
 
+def bill_names():
+    """bill-names' lines as (sender regex, file regex, name): the first that matches a PDF names
+    it, "-" leaves it out. None while there is no bill-names: every PDF goes, as sender - file."""
+    if not BILL_NAMES.exists():
+        return None
+    names = []
+    for n, line in enumerate(BILL_NAMES.read_text().splitlines(), 1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split(" | ")]
+        if len(parts) != 3:
+            raise SystemExit(f"deck-mail: {BILL_NAMES}:{n}: not sender | file | name")
+        try:
+            names.append((re.compile(parts[0], re.I), re.compile(parts[1], re.I), parts[2]))
+        except re.error as e:
+            raise SystemExit(f"deck-mail: {BILL_NAMES}:{n}: {e}")
+    return names
+
+
+def bill_name(names, sender, fname):
+    """The PDF's name, "-" for one left out, None for one no line names."""
+    for s, f, name in names:
+        m = f.search(fname)
+        if m and s.search(sender):
+            return "-" if name == "-" else re.sub(r"\{(\d+)\}", lambda g: m.group(int(g[1])) or "", name)
+    return None
+
+
 def safe(s, limit=80):
     """A file name's worth of text: no slashes or control characters, short."""
     s = "".join(c if c.isprintable() and c not in '/\\:*?"<>|' else " " for c in s)
@@ -443,7 +476,8 @@ def safe(s, limit=80):
 
 
 def bill_pdfs(path):
-    """The message's date, sender name, subject, and its PDFs as (file name, bytes)."""
+    """The message's date, sender name, sender name and address, subject, and its PDFs as
+    (file name, bytes)."""
     import datetime
     import email
     import email.policy
@@ -464,7 +498,7 @@ def bill_pdfs(path):
             if data and data.startswith(b"%PDF"):
                 fname = safe(fname.removesuffix(".pdf").removesuffix(".PDF") or "attachment")
                 pdfs.append((fname + ".pdf", data))
-    return date, safe(sender, 40), safe(str(msg["Subject"] or "")), pdfs
+    return date, safe(sender, 40), f"{name} <{addr}>", safe(str(msg["Subject"] or "")), pdfs
 
 
 def webdav(conf, password):
@@ -509,13 +543,17 @@ def webdav(conf, password):
 
 def bills(dry_run, quiet=False):
     """Copies bills' PDFs to Nextcloud, once each: a message done is tagged `bill-archived`, and
-    a PDF already sent (the same bytes, from another message) is not sent again."""
+    a PDF already sent (the same bytes, from another message) is not sent again. With bill-names,
+    only the PDFs it names go; a message with a PDF it doesn't know waits, untagged, for a line."""
     import hashlib
     conf, rules = bills_config(upload=not dry_run)
+    names = bill_names()
     wanted = " or ".join(f"({r})" for r in rules)
     query = (f"(tag:bill or (({wanted}) and not tag:sent))" if wanted else "tag:bill")
-    query += " and (mimetype:application/pdf or attachment:pdf) and not tag:notbill and not tag:bill-archived"
-    ids = subprocess.run(["notmuch", "search", "--output=messages", query],
+    # Bills deleted from the mailbox still go: Gmail empties the Bin after 30 days.
+    query += (" and (mimetype:application/pdf or attachment:pdf) and not tag:notbill"
+              " and not tag:bill-archived and not tag:spam")
+    ids = subprocess.run(["notmuch", "search", "--exclude=false", "--output=messages", query],
                          capture_output=True, text=True, check=True).stdout.split()
     if not ids:
         return 0
@@ -533,15 +571,27 @@ def bills(dry_run, quiet=False):
             print(f"deck-mail: bills: no folder {conf['folder']!r} in Nextcloud for {conf['user']}")
             return 1
     local = pathlib.Path(os.path.expanduser(conf["local"])) if conf.get("local") else None
-    sent = 0
+    sent, left_out, unknown = 0, [], []
     for mid in ids:
         files = subprocess.run(["notmuch", "search", "--output=files", "--exclude=false", mid],
                                capture_output=True, text=True, check=True).stdout.split("\n")
-        date, sender, subject, pdfs = bill_pdfs(files[0])
+        date, sender, from_, subject, pdfs = bill_pdfs(files[0])
+        named = {}
+        for fname, _ in pdfs:
+            named[fname] = (bill_name(names, from_, fname.removesuffix(".pdf"))
+                            if names is not None else f"{sender} - {fname}")
+        missing = [f for f, n in named.items() if n is None]
+        if missing:
+            unknown += [f"{date:%Y-%m-%d}\t{from_}\t{f}\t{subject}" for f in missing]
+            continue
         for fname, data in pdfs:
+            if named[fname] == "-":
+                left_out.append(f"{date:%Y-%m-%d}\t{from_}\t{fname}\t{subject}")
+                continue
             digest = hashlib.sha256(data).hexdigest()
             rel = conf["layout"].format(year=f"{date:%Y}", month=f"{date:%m}", date=f"{date:%Y-%m-%d}",
-                                        sender=sender, subject=subject, file=fname)
+                                        sender=sender, subject=subject, file=fname,
+                                        name=named[fname])
             rel = "/".join(safe(p, 120) for p in rel.split("/"))
             if not rel.lower().endswith(".pdf"):
                 rel += ".pdf"
@@ -562,9 +612,16 @@ def bills(dry_run, quiet=False):
             sent += 1
         if not dry_run:
             subprocess.run(["notmuch", "tag", "+bill-archived", "--", mid], check=True)
-    if not quiet or sent:
+    if dry_run:
+        for title, rows in (("left out", left_out), ("no name in bill-names: held back", unknown)):
+            if rows:
+                print(f"\n# {title} ({len(rows)})")
+                print("\n".join(rows))
+    if not quiet or sent or unknown:
         print(f"deck-mail: bills: {len(ids)} messages, {sent} PDFs "
-              + ("would go to Nextcloud" if dry_run else "copied to Nextcloud"))
+              + ("would go to Nextcloud" if dry_run else "copied to Nextcloud")
+              + f", {len(left_out)} left out"
+              + (f", {len(unknown)} with no name in {BILL_NAMES} held back" if unknown else ""))
     return 0
 
 
