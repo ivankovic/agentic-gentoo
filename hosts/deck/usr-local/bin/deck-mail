@@ -11,6 +11,8 @@
                      is in ~/.config/deck-mail/archive, and what each PDF is called and in which
                      folder, or that it's left out, in ~/.config/deck-mail/archive-names.
                      --dry-run lists every PDF and its name. `sync` runs it.
+  deck-mail review    a TUI over those PDFs: which go to Nextcloud, in which folder, as what;
+                     which are left out; and which mail to delete. It writes archive-names.
   deck-mail top [N] [query]
                      the N (50) most frequent senders, sender domains and subjects, with the
                      newest message's month: what to clean up. The query defaults to
@@ -625,6 +627,352 @@ def archive(dry_run, quiet=False):
     return 0
 
 
+CATEGORIES = ("Računi", "Kuća", "Djeca", "Zdravlje", "Financije", "Porezi", "Osiguranja", "Auto",
+              "Putovanja", "Posao", "Obrazovanje", "Dokumenti")
+REVIEW_START = "# --- Chosen in deck-mail review: first, so they win over the lines below"
+REVIEW_END = "# --- end of review choices"
+
+
+def review_load():
+    """Every PDF archive would look at, once each: its messages, what archive-names says now."""
+    import hashlib
+    query = ("(mimetype:application/pdf or attachment:pdf)"
+             " and not tag:spam and not tag:noarchive and not tag:archived")
+    out = subprocess.run(["notmuch", "show", "--format=json", "--body=false", "--entire-thread=false",
+                          "--exclude=false", query], capture_output=True, text=True, check=True).stdout
+
+    def walk(node):  # notmuch show: threads of [message, replies] pairs
+        if isinstance(node, dict):
+            if node.get("match"):
+                yield node
+        elif isinstance(node, list):
+            for n in node:
+                yield from walk(n)
+
+    names, rows, by_digest, deleted = archive_names(), [], {}, set()
+    for m in walk(json.loads(out)):
+        if "deleted" in m.get("tags", []):
+            deleted.add(m["id"])
+        files = m["filename"] if isinstance(m["filename"], list) else [m["filename"]]
+        date, sender, from_, subject, pdfs = mail_pdfs(files[0])
+        for fname, data in pdfs:
+            digest = hashlib.sha256(data).hexdigest()
+            if digest in by_digest:
+                by_digest[digest]["mids"].append(m["id"])
+                continue
+            row = {"digest": digest, "date": date, "from": from_, "sender": sender,
+                   "subject": subject, "file": fname, "mids": [m["id"]], "path": files[0],
+                   "choice": archive_name(names, from_, fname.removesuffix(".pdf"), digest)}
+            by_digest[digest] = row
+            rows.append(row)
+    rows.sort(key=lambda r: r["date"], reverse=True)
+    return rows, deleted
+
+
+def review_overrides():
+    """The review section of archive-names as {sha256 prefix: (category, name)}."""
+    text = ARCHIVE_NAMES.read_text() if ARCHIVE_NAMES.exists() else ""
+    if REVIEW_START not in text:
+        return {}
+    section = text.split(REVIEW_START, 1)[1].split(REVIEW_END, 1)[0]
+    chosen = {}
+    for line in section.splitlines():
+        parts = [p.strip() for p in line.split(" | ")]
+        if len(parts) == 4 and parts[0].startswith("sha256:"):
+            chosen[parts[0].removeprefix("sha256:")] = (parts[2], parts[3])
+    return chosen
+
+
+def review_save(chosen):
+    """Writes the review section at the top of archive-names, the rest as it was."""
+    text = ARCHIVE_NAMES.read_text() if ARCHIVE_NAMES.exists() else ""
+    if REVIEW_START in text:
+        before, rest = text.split(REVIEW_START, 1)
+        text = before + rest.split(REVIEW_END, 1)[1].lstrip("\n")
+    lines = text.splitlines()
+    at = next((i for i, l in enumerate(lines) if l.strip() and not l.startswith("#")), len(lines))
+    section = [REVIEW_START]
+    section += [f"sha256:{d} | . | {c} | {n}" for d, (c, n) in chosen.items()]
+    section += [REVIEW_END, ""]
+    tmp = ARCHIVE_NAMES.with_suffix(".tmp")
+    tmp.write_text("\n".join(lines[:at] + section + lines[at:]) + "\n")
+    tmp.replace(ARCHIVE_NAMES)
+
+
+def review():
+    """A TUI over every PDF archive would send: choose which go to Nextcloud, as what, and which
+    mail to delete."""
+    import curses
+    import locale
+    import shutil
+    import tempfile
+    locale.setlocale(locale.LC_ALL, "")  # curses draws UTF-8 (č, ć, š) only with the locale set
+    print("deck-mail: reading the PDFs in mail…", file=sys.stderr)
+    rows, deleted = review_load()
+    chosen = review_overrides()
+    key = lambda r: r["digest"][:16]
+    for r in rows:
+        if key(r) in chosen:
+            r["choice"] = chosen[key(r)]
+    os.environ.setdefault("ESCDELAY", "25")  # Esc cancels at once, not after a second
+    tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="deck-mail-review-",
+                                           dir=os.environ.get("XDG_RUNTIME_DIR")))
+    texts = {}
+
+    def pdf_file(r):
+        p = tmpdir / f"{key(r)}.pdf"
+        if not p.exists():
+            for fname, data in mail_pdfs(r["path"])[4]:
+                if fname == r["file"]:
+                    p.write_bytes(data)
+                    break
+        return p
+
+    def preview(r):
+        if key(r) not in texts:
+            t = subprocess.run(["mutool", "draw", "-q", "-F", "txt", "-o", "-", str(pdf_file(r)), "1"],
+                               capture_output=True, text=True, errors="replace").stdout
+            texts[key(r)] = [l.strip() for l in t.splitlines() if l.strip()]
+        return texts[key(r)]
+
+    def choose(r, choice):
+        r["choice"] = choice
+        chosen[key(r)] = choice
+        review_save(chosen)
+
+    def set_deleted(r, on):
+        subprocess.run(["notmuch", "tag", "+deleted" if on else "-deleted", "--", *r["mids"]],
+                       check=True)
+        (deleted.update if on else deleted.difference_update)(r["mids"])
+
+    def run(scr):
+        curses.curs_set(0)
+        curses.use_default_colors()
+        for i, c in enumerate((curses.COLOR_GREEN, curses.COLOR_YELLOW, curses.COLOR_RED,
+                               curses.COLOR_CYAN), 1):
+            curses.init_pair(i, c, -1)
+        GREEN, YELLOW, RED, CYAN = (curses.color_pair(i) for i in range(1, 5))
+        views = ("all", "transfer", "left out", "no name", "delete")
+        state = {"cur": 0, "top": 0, "view": 0, "filter": "", "msg": ""}
+
+        def status(r):
+            c = r["choice"]
+            return "?" if c is None else ("·" if c == ("-", "-") else "✓")
+
+        def visible():
+            v, f = views[state["view"]], state["filter"].lower()
+            out = []
+            for r in rows:
+                s = status(r)
+                if v == "transfer" and s != "✓" or v == "left out" and s != "·" \
+                        or v == "no name" and s != "?" \
+                        or v == "delete" and not deleted.intersection(r["mids"]):
+                    continue
+                if f and f not in " ".join([r["from"], r["subject"], r["file"],
+                                            *(r["choice"] or ())]).lower():
+                    continue
+                out.append(r)
+            return out
+
+        def put(y, x, s, attr=0):
+            h, w = scr.getmaxyx()
+            if 0 <= y < h and x < w:
+                scr.addnstr(y, x, s, max(0, w - x - (1 if y == h - 1 else 0)), attr)
+
+        def ask(prompt, initial=""):
+            """A one-line editor on the bottom line: Enter accepts, Esc cancels (None)."""
+            curses.curs_set(1)
+            buf, pos = list(initial), len(initial)
+            while True:
+                h, w = scr.getmaxyx()
+                scr.move(h - 1, 0)
+                scr.clrtoeol()
+                text = prompt + "".join(buf)
+                start = max(0, len(prompt) + pos - w + 2)
+                put(h - 1, 0, text[start:], curses.A_BOLD)
+                scr.move(h - 1, min(w - 1, len(prompt) + pos - start))
+                ch = scr.get_wch()
+                if ch in ("\n", "\r", curses.KEY_ENTER):
+                    curses.curs_set(0)
+                    return "".join(buf).strip()
+                if ch == "\x1b":
+                    curses.curs_set(0)
+                    return None
+                if ch in (curses.KEY_BACKSPACE, "\x7f", "\b"):
+                    if pos:
+                        del buf[pos - 1]
+                        pos -= 1
+                elif ch == curses.KEY_DC:
+                    if pos < len(buf):
+                        del buf[pos]
+                elif ch == curses.KEY_LEFT:
+                    pos = max(0, pos - 1)
+                elif ch == curses.KEY_RIGHT:
+                    pos = min(len(buf), pos + 1)
+                elif ch in (curses.KEY_HOME, "\x01"):
+                    pos = 0
+                elif ch in (curses.KEY_END, "\x05"):
+                    pos = len(buf)
+                elif ch == "\x15":  # ^U
+                    buf, pos = [], 0
+                elif isinstance(ch, str) and ch.isprintable():
+                    buf.insert(pos, ch)
+                    pos += 1
+
+        def pick_category(current):
+            options = [f"{i + 1 if i < 9 else '0-='[i - 9]} {c}" for i, c in enumerate(CATEGORIES)]
+            h, w = scr.getmaxyx()
+            line = "  ".join(options)
+            scr.move(h - 1, 0)
+            scr.clrtoeol()
+            put(h - 1, 0, "Category: " + line + "  (Esc: cancel)", curses.A_BOLD)
+            while True:
+                ch = scr.get_wch()
+                if ch in ("\x1b", "q"):
+                    return None
+                if not isinstance(ch, str):
+                    continue
+                if ch in "123456789":
+                    return CATEGORIES[int(ch) - 1]
+                if ch in "0-=":
+                    return CATEGORIES[9 + "0-=".index(ch)]
+                if ch in ("\n", "\r") and current in CATEGORIES:
+                    return current
+
+        def transfer(r, rename=False, recategorise=False):
+            c = r["choice"]
+            cat, name = c if c and c != ("-", "-") else (None, None)
+            if cat is None or recategorise:
+                cat = pick_category(cat)
+                if cat is None:
+                    return
+            if name is None or rename:
+                guess = name or f"{r['sender']} - {r['file'].removesuffix('.pdf')}"
+                name = ask("Name: ", guess)
+                if not name:
+                    return
+            choose(r, (cat, safe(name, 90)))
+
+        def draw(vis):
+            scr.erase()
+            h, w = scr.getmaxyx()
+            list_h = max(3, h - 11)
+            cur = state["cur"] = max(0, min(state["cur"], len(vis) - 1))
+            if cur < state["top"]:
+                state["top"] = cur
+            if cur >= state["top"] + list_h:
+                state["top"] = cur - list_h + 1
+            n = {s: sum(status(r) == s for r in rows) for s in "✓·?"}
+            head = (f" {n['✓']} to Nextcloud  {n['·']} left out  {n['?']} no name  "
+                    f"{len({m for m in deleted})} mail to delete   view: {views[state['view']]}"
+                    + (f"   filter: {state['filter']}" if state["filter"] else "")
+                    + f"   {cur + 1 if vis else 0}/{len(vis)}")
+            put(0, 0, head.ljust(w), curses.A_REVERSE)
+            for i, r in enumerate(vis[state["top"]:state["top"] + list_h]):
+                y, s = i + 1, status(r)
+                attr = {"✓": GREEN, "·": curses.A_DIM, "?": YELLOW}[s]
+                if state["top"] + i == cur:
+                    attr |= curses.A_REVERSE
+                c = r["choice"]
+                cat = c[0] if c and c != ("-", "-") else ""
+                name = c[1] if c and c != ("-", "-") else f"({r['sender']}: {r['file']})"
+                dele = "D" if deleted.intersection(r["mids"]) else " "
+                put(y, 0, f"{s}{dele} {r['date']:%Y-%m-%d} {cat:<11.11} {name}".ljust(w), attr)
+                if dele == "D":
+                    put(y, 1, "D", attr | RED | curses.A_BOLD)
+            if vis:
+                r = vis[cur]
+                y = list_h + 1
+                put(y, 0, "─" * w, curses.A_DIM)
+                put(y + 1, 0, f"From:    {r['from']}", CYAN)
+                put(y + 2, 0, f"Subject: {r['subject']}")
+                put(y + 3, 0, f"File:    {r['file']}    sha256:{key(r)}"
+                    + (f"    in {len(r['mids'])} messages" if len(r["mids"]) > 1 else ""))
+                for j, line in enumerate(preview(r)[:h - y - 6]):
+                    put(y + 4 + j, 2, line, curses.A_DIM)
+            help_ = ("j/k move  t transfer  x leave out  space toggle  c category  e rename  "
+                     "d delete mail  o open  / filter  v view  T/X all shown  q quit")
+            put(h - 1, 0, (state["msg"] or help_)[:w - 1], curses.A_BOLD if state["msg"] else curses.A_DIM)
+            state["msg"] = ""
+            scr.refresh()
+            return list_h
+
+        while True:
+            vis = visible()
+            list_h = draw(vis)
+            ch = scr.get_wch()
+            r = vis[state["cur"]] if vis else None
+            if ch in ("q", "Q"):
+                return
+            elif ch in ("j", curses.KEY_DOWN):
+                state["cur"] += 1
+            elif ch in ("k", curses.KEY_UP):
+                state["cur"] -= 1
+            elif ch in (curses.KEY_NPAGE, "\x06"):
+                state["cur"] += list_h
+            elif ch in (curses.KEY_PPAGE, "\x02"):
+                state["cur"] -= list_h
+            elif ch in ("g", curses.KEY_HOME):
+                state["cur"] = 0
+            elif ch in ("G", curses.KEY_END):
+                state["cur"] = len(vis) - 1
+            elif ch == "v":
+                state["view"] = (state["view"] + 1) % len(views)
+                state["cur"] = state["top"] = 0
+            elif ch == "/":
+                f = ask("Filter: ", state["filter"])
+                if f is not None:
+                    state["filter"], state["cur"], state["top"] = f, 0, 0
+            elif ch == "\x1b":
+                state["filter"] = ""
+            elif r is None:
+                continue
+            elif ch == "t":
+                transfer(r)
+                state["cur"] += 1
+            elif ch == "x":
+                choose(r, ("-", "-"))
+                state["cur"] += 1
+            elif ch == " ":
+                if status(r) == "✓":
+                    choose(r, ("-", "-"))
+                else:
+                    transfer(r)
+            elif ch == "c":
+                transfer(r, recategorise=True)
+            elif ch in ("e", "r"):
+                transfer(r, rename=True)
+            elif ch == "d":
+                set_deleted(r, not deleted.intersection(r["mids"]))
+                state["cur"] += 1
+            elif ch == "o":
+                subprocess.Popen(["xdg-open", str(pdf_file(r))], stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+            elif ch in ("T", "X"):
+                what = "to Nextcloud, as named now" if ch == "T" else "left out"
+                todo = [x for x in vis if ch == "X" or x["choice"] not in (None, ("-", "-"))]
+                if ch == "T" and len(todo) < len(vis):
+                    what += f" ({len(vis) - len(todo)} with no name skipped)"
+                if ask(f"All {len(todo)} shown {what}? [y/N] ") in ("y", "Y"):
+                    for x in todo:
+                        if ch == "X":
+                            x["choice"] = ("-", "-")
+                        chosen[key(x)] = x["choice"]
+                    review_save(chosen)
+                    state["msg"] = f"{len(todo)} changed"
+
+    try:
+        curses.wrapper(run)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    left = sum(r["choice"] is None for r in rows)
+    print(f"deck-mail: review: choices are in {ARCHIVE_NAMES}"
+          + (f"; {left} PDFs still have no name" if left else "")
+          + ". deck-mail archive --dry-run shows what will go; sync sends it and deletes the mail.")
+    return 0
+
+
 def top(args):
     """Prints the most frequent senders, sender domains and subjects among the query's messages."""
     import collections
@@ -681,6 +1029,8 @@ def main():
             print(f"deck-mail: wrote an example {ARCHIVE}: fill it in, then deck-mail archive --dry-run")
             return 1
         return archive(dry_run="--dry-run" in cmd)
+    if cmd == ["review"]:
+        return review()
     if cmd[:1] == ["top"]:
         return top(cmd[1:])
     print(__doc__.split("\n\n", 2)[1], file=sys.stderr)
