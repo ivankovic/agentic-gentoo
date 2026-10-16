@@ -1,0 +1,17 @@
+# Time actively spent in each program: its window focused, the user not idle. Reads niri's event
+# stream and Wayland's idle notifications; writes $XDG_STATE_HOME/deck/focus.db.
+[Unit]
+Description=Per-program active time (deck)
+Documentation=https://github.com/ivankovic/agentic-gentoo/tree/main/tools/deck
+PartOf=graphical-session.target
+After=graphical-session.target
+Requisite=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/deck-focusd
+Restart=on-failure
+RestartSec=10
+Nice=10
+
+[Install]
+WantedBy=graphical-session.target

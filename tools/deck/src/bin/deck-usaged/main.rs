@@ -7,13 +7,14 @@
 //! Totals go to SQLite each minute; `deck usage` reads them.
 
 mod netlink;
-mod pkgmap;
-mod procfs;
+mod profile;
 mod store;
 
 use anyhow::Result;
+use deck::pkgmap::{self, PkgMap, is_interpreter};
+use deck::procfs;
 use netlink::{ProcConnector, ProcEvent, Taskstats, ThreadExit};
-use pkgmap::PkgMap;
+use profile::Profiler;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,6 +36,10 @@ const SPIKE_MIN_US: u64 = 1_000_000;
 /// re-read; in between only those in cgroups whose CPU total moved.
 const FULL_EVERY: u64 = 10;
 const NO_CG: u32 = u32::MAX;
+/// Profiler samples per second per CPU: a prime, so it doesn't beat with periodic work.
+const PROFILE_HZ: u64 = 49;
+/// A mapping of anonymous executable memory (JIT): credited to the process's own package.
+const SELF: u32 = u32::MAX;
 
 /// Who a process runs for. Build and jail pass from parent to child, and build.slice is a build;
 /// the rest come from the process's cgroup.
@@ -60,6 +65,9 @@ impl Ctx {
         }
     }
 }
+
+/// A process's executable mappings: start, end, package label (or SELF).
+type ExecMaps = Vec<(u64, u64, u32)>;
 
 /// Package label (an index into `labels`) and context.
 type Key = (u32, Ctx);
@@ -112,15 +120,6 @@ fn family(comm: &str) -> String {
         .to_string()
 }
 
-fn is_interpreter(exe: &str) -> bool {
-    let base = exe.rsplit('/').next().unwrap_or(exe);
-    let base = base.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
-    matches!(
-        base,
-        "python" | "perl" | "ruby" | "bash" | "sh" | "dash" | "zsh" | "lua" | "luajit" | "node" | "tclsh"
-    )
-}
-
 struct Daemon {
     map: PkgMap,
     labels: Vec<String>,
@@ -128,7 +127,7 @@ struct Daemon {
     procs: HashMap<i32, Proc>,
     /// Recently finalized processes, so a late exit report doesn't bring them back.
     gone: HashMap<i32, Instant>,
-    my_mnt: Option<u64>,
+    host_mnt: Option<u64>,
     cgroups: Vec<String>,
     cg_ix: HashMap<String, u32>,
     /// Per cgroup: its CPU total at the last reading, and whether it moved since the one before.
@@ -142,6 +141,13 @@ struct Daemon {
     bursts: HashMap<Key, Burst>,
     spikes: Vec<Spike>,
     lost: u64,
+    /// Kernel modules' address ranges, for samples in the kernel.
+    modules: Vec<(u64, u64, String)>,
+    /// Per process: its executable mappings with their package labels, and when they were read.
+    maps: HashMap<i32, (ExecMaps, Instant)>,
+    /// Samples per hour, per package whose code ran (library or program), per process key.
+    libs: HashMap<(i64, u32, Key), u64>,
+    unresolved: u64,
 }
 
 impl Daemon {
@@ -197,12 +203,14 @@ impl Daemon {
     /// The package a process belongs to: its script's for an interpreter running one, else its
     /// program's. Also returns the program path.
     fn package(&self, pid: i32, comm: &str) -> (String, Option<String>) {
-        let Some(exe) = procfs::exe(pid) else {
+        let Some((exe, deleted)) = procfs::exe_deleted(pid) else {
             return (format!("unknown:{comm}"), None);
         };
-        // In another mount namespace the path may name a different file (a container's).
-        let foreign = self.my_mnt.is_some() && procfs::mnt_ns(pid) != self.my_mnt;
-        let same_file = !foreign || procfs::exe_is(pid, &exe);
+        // In another mount namespace than the host's (PID 1's; the daemon has a private one) the
+        // path may name a different file: a container's. A program updated since it started has
+        // no file to compare and is taken by its path.
+        let foreign = self.host_mnt.is_some() && procfs::mnt_ns(pid) != self.host_mnt;
+        let same_file = !foreign || deleted || procfs::exe_is(pid, &exe);
         let mut label = match (self.map.lookup(&exe), same_file) {
             (Some(cp), true) => cp.to_string(),
             (_, false) => {
@@ -220,31 +228,14 @@ impl Daemon {
         (label, Some(exe))
     }
 
-    /// The first of the first few arguments that is a file: what an interpreter is running.
+    /// The package of the script an interpreter runs, if it runs one.
     fn script(&self, pid: i32) -> Option<String> {
-        for a in procfs::cmdline(pid).iter().skip(1).take(4) {
-            if a.starts_with('-') {
-                continue;
-            }
-            let path = if a.starts_with('/') {
-                format!("/proc/{pid}/root{a}")
-            } else {
-                format!("/proc/{pid}/cwd/{a}")
-            };
-            let Ok(real) = std::fs::canonicalize(&path) else {
-                continue;
-            };
-            if !real.is_file() {
-                continue;
-            }
-            let real = real.to_string_lossy();
-            return Some(
-                self.map
-                    .lookup(&real)
-                    .map_or_else(|| pkgmap::unowned(&real), str::to_string),
-            );
-        }
-        None
+        let real = procfs::script_path(pid)?;
+        Some(
+            self.map
+                .lookup(&real)
+                .map_or_else(|| pkgmap::unowned(&real), str::to_string),
+        )
     }
 
     fn context(&self, pid: i32, label: &str, exe: Option<&str>, cg: &str) -> Ctx {
@@ -289,6 +280,10 @@ impl Daemon {
         let Some((key, cg)) = self.procs.get(&parent).map(|p| (p.key, p.cg)) else {
             return;
         };
+        // A kernel thread is named after it starts and never execs: the next reading names it.
+        if key.1 == Ctx::Kernel {
+            return;
+        }
         if let Some(old) = self.procs.remove(&child) {
             self.finalize(child, old);
         }
@@ -380,7 +375,78 @@ impl Daemon {
         p.hiwater_kb = p.hiwater_kb.max(r.hiwater_kb);
     }
 
+    /// The package whose code is at `ip` in process `pid`; SELF for JIT code.
+    fn code_at(&mut self, pid: i32, ip: u64) -> Option<u32> {
+        let find = |m: &ExecMaps| {
+            let i = m.partition_point(|r| r.1 <= ip);
+            m.get(i).filter(|r| r.0 <= ip).map(|r| r.2)
+        };
+        if let Some((m, _)) = self.maps.get(&pid)
+            && let Some(l) = find(m)
+        {
+            return Some(l);
+        }
+        // Not mapped when last read: read again, at most once a second per process.
+        if self
+            .maps
+            .get(&pid)
+            .is_some_and(|(_, at)| at.elapsed() < Duration::from_secs(1))
+        {
+            return None;
+        }
+        let mut m = Vec::new();
+        for (a, b, path) in profile::exec_maps(pid) {
+            let label = if path.is_empty() || path.starts_with("[anon") || path.starts_with("/memfd:") {
+                SELF
+            } else if path.starts_with('[') {
+                // [vdso], [vsyscall]: the kernel's code in user space.
+                self.intern("kernel")
+            } else {
+                let l = self
+                    .map
+                    .lookup(&path)
+                    .map_or_else(|| pkgmap::unowned(&path), str::to_string);
+                self.intern(&l)
+            };
+            m.push((a, b, label));
+        }
+        let found = find(&m);
+        self.maps.insert(pid, (m, Instant::now()));
+        found
+    }
+
+    fn profile(&mut self, samples: &mut Vec<profile::Sample>) {
+        let hour = unix_now() / 3600 * 3600;
+        for s in samples.drain(..) {
+            let Some(key) = self.procs.get(&s.pid).map(|p| p.key) else {
+                self.unresolved += 1;
+                continue;
+            };
+            let lib = if s.kernel {
+                let i = self.modules.partition_point(|m| m.1 <= s.ip);
+                match self.modules.get(i).filter(|m| m.0 <= s.ip) {
+                    Some(m) => {
+                        let l = format!("kmod:{}", m.2);
+                        self.intern(&l)
+                    }
+                    None => self.intern("kernel"),
+                }
+            } else {
+                match self.code_at(s.pid, s.ip) {
+                    Some(SELF) => key.0,
+                    Some(l) => l,
+                    None => {
+                        self.unresolved += 1;
+                        continue;
+                    }
+                }
+            };
+            *self.libs.entry((hour, lib, key)).or_default() += 1;
+        }
+    }
+
     fn finalize(&mut self, pid: i32, p: Proc) {
+        self.maps.remove(&pid);
         // The exit reports add up its whole life; credit what the readings missed. For a process
         // older than the daemon they include time before the baseline, so they are not used.
         if p.born_here {
@@ -607,14 +673,25 @@ impl Daemon {
             .hourly
             .iter()
             .map(|((h, (pkg, ctx)), a)| (*h, self.labels[*pkg as usize].as_str(), ctx.label(), a));
-        match store.flush(rows, &self.spikes) {
+        let libs = self.libs.iter().map(|((h, lib, (prog, ctx)), n)| {
+            (
+                *h,
+                self.labels[*lib as usize].as_str(),
+                self.labels[*prog as usize].as_str(),
+                ctx.label(),
+                *n,
+            )
+        });
+        match store.flush(rows, libs, &self.spikes) {
             Ok(()) => {
                 self.hourly.clear();
+                self.libs.clear();
                 self.spikes.clear();
             }
             Err(e) => eprintln!("deck-usaged: writing the database failed, keeping the totals: {e:#}"),
         }
         let _ = store.meta("lost_event_batches", &self.lost.to_string());
+        let _ = store.meta("profile_unresolved_samples", &self.unresolved.to_string());
     }
 }
 
@@ -649,6 +726,18 @@ fn main() -> Result<()> {
         .map_err(|e| eprintln!("deck-usaged: no exit reports: {e}"))
         .ok();
 
+    let mut prof = match Profiler::open(PROFILE_HZ) {
+        Ok(p) => {
+            eprintln!("deck-usaged: profiling {} CPUs at {PROFILE_HZ} Hz", p.cpus());
+            Some(p)
+        }
+        Err(e) => {
+            eprintln!("deck-usaged: no profiler: {e}");
+            None
+        }
+    };
+    let mut samples = Vec::new();
+
     let t = Instant::now();
     let map = PkgMap::build();
     eprintln!(
@@ -659,6 +748,7 @@ fn main() -> Result<()> {
 
     let mut store = Store::open(&db)?;
     store.meta("started", &unix_now().to_string())?;
+    store.meta("profile_hz", &prof.as_ref().map_or(0, |p| p.freq).to_string())?;
 
     let mut d = Daemon {
         map,
@@ -666,7 +756,7 @@ fn main() -> Result<()> {
         label_ix: HashMap::new(),
         procs: HashMap::new(),
         gone: HashMap::new(),
-        my_mnt: procfs::mnt_ns(me),
+        host_mnt: procfs::mnt_ns(1),
         cgroups: Vec::new(),
         cg_ix: HashMap::new(),
         cg_usage: Vec::new(),
@@ -678,6 +768,10 @@ fn main() -> Result<()> {
         bursts: HashMap::new(),
         spikes: Vec::new(),
         lost: 0,
+        modules: profile::modules(),
+        maps: HashMap::new(),
+        libs: HashMap::new(),
+        unresolved: 0,
     };
     d.sweep(true, true);
     d.read_cgroups();
@@ -732,6 +826,10 @@ fn main() -> Result<()> {
         if now >= next_tick {
             d.sweep(n % FULL_EVERY == FULL_EVERY - 1, false);
             d.end_tick((now - last_tick).as_micros() as u64);
+            if let Some(p) = prof.as_mut() {
+                p.drain(&mut samples);
+                d.profile(&mut samples);
+            }
             last_tick = now;
             n += 1;
             if n.is_multiple_of(PEAK_EVERY) {
@@ -741,7 +839,11 @@ fn main() -> Result<()> {
                 d.pss();
             }
             if n.is_multiple_of(FLUSH_EVERY) {
+                if let Some(p) = prof.as_ref() {
+                    let _ = store.meta("profile_lost_samples", &p.lost.to_string());
+                }
                 d.flush(&mut store);
+                d.modules = profile::modules();
                 if d.map.stale() {
                     d.map = PkgMap::build();
                     eprintln!(

@@ -487,15 +487,16 @@ generate the gitleaks ebuild below).
 
 ## Packages and patches
 
-`deck` ([tools/deck](../../tools/deck/), installed with `cargo install --path tools/deck --locked`)
-lists every installed package by origin and the local patches each carries.
+`deck` ([tools/deck](../../tools/deck/)) lists every installed package by origin and the local patches each carries.
 [upstream.toml](upstream.toml) records where each patch stands upstream (sent, in review,
 rejected, backport…), one timestamped event per change; `deck` edits it, as do `deck mark` and
 hand edits.
 
-`deck-usaged` ([deck-usaged.service](etc/systemd/system/deck-usaged.service)) records CPU and
-memory per package per hour, with bursts, into `/var/lib/deck/usage.db`; `deck usage` and
-`deck usage --spikes` read it. How it counts: [tools/deck](../../tools/deck/README.md).
+`deck` and its services come from the overlay's `app-portage/deck` (live, built from this
+clone). `deck-usaged` (root) records CPU, memory and a CPU profile per package per hour, with
+bursts, into `/var/lib/deck/usage.db`; `deck-focusd` (user) records active time per program into
+`~/.local/state/deck/focus.db`. `deck usage` and deck's Usage tab read both. How they count:
+[tools/deck](../../tools/deck/README.md).
 
 ## Local overlay
 
@@ -508,6 +509,7 @@ memory per package per hour, with bursts, into `/var/lib/deck/usage.db`; `deck u
 | `dev-util/omnidiff` | `9999` (installed, in world) | Live: clones `main`, crates from Cargo.lock at unpack; `**` keyword. Rebuild with `emerge @live-rebuild` |
 | | `0.2.0` | Upstream's release ebuild from omnidiff's `packaging/gentoo`, unchanged (still says `RUST_MIN_VER=1.88.0`; Cargo.toml needs 1.92) |
 | `dev-util/gitleaks` | `8.30.1` (in world) | Secret scanner; `.githooks/scan-secrets` runs it when installed. Go modules via `EGO_SUM` from upstream's `go.sum` (deprecated in ::gentoo, but needs no hosted dependency tarball; QA notice at unpack). `~amd64` keyword. [portage/mirrors](portage/mirrors) pins Go downloads to proxy.golang.org: goproxy.io served HTML pages for 76 of the 426 modules, which went into the first Manifest. Regenerating the Manifest: check every distfile against upstream's `go.sum` h1 hashes first |
+| `app-portage/deck` | `9999` (in world) | This repository's [tools/deck](../../tools/deck/): the `deck` TUI, `deck-usaged` (system service) and `deck-focusd` (user service). Live: git-r3 clones this repository, pointed at the local clone by [env/deck-local-source.conf](portage/env/deck-local-source.conf), so committed work builds before it is pushed; crates from Cargo.lock at unpack. `**` keyword; CC-BY-NC-ND-4.0 accepted for it alone |
 | `games-board/chess-tui` | `2.7.1` (in world) | Terminal chess (Rust, ratatui): two players, against a UCI engine (`games-board/stockfish`, in world; `chess-tui -e /usr/bin/stockfish` once, the path is remembered) or on Lichess. [portage/patches/games-board/chess-tui-2.7.1/](portage/patches/games-board/chess-tui-2.7.1/) backports upstream 7d722c9, which saves local and bot games on quit and offers *R to resume* in the menu; it is newer than 2.7.1, and the versioned directory stops it applying to the next release. CRATES and licenses from `pycargoebuild -C -i` on the tag (it needs Portage's Python modules: a venv with `--system-site-packages`); every crate checked against Cargo.lock's sha256. `sound` USE (default on) pulls ALSA. `~amd64` keyword |
 
 Built with Portage's Rust (rust-bin), not rustup. Installs the binary, man page and

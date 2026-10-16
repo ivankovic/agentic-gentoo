@@ -1,8 +1,9 @@
-//! The interactive view: a package list and a patch list, with a detail pane under each.
+//! The interactive view: packages, patches and usage, with a detail pane under each.
 
 use crate::model::{Model, date};
 use crate::patches::Kind;
 use crate::track::State;
+use crate::usage::{self, Usage, pct};
 use crate::vdb::{Filter, Origin};
 use anyhow::Result;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -13,11 +14,75 @@ use ratatui::widgets::{
     Block, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState, Tabs, Wrap,
 };
 use ratatui::{DefaultTerminal, Frame};
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 #[derive(Clone, Copy, PartialEq)]
 enum View {
     Packages,
     Patches,
+    Usage,
+}
+
+/// The order of the package and usage lists.
+#[derive(Clone, Copy, PartialEq)]
+enum Sort {
+    Name,
+    Cpu,
+    Active,
+    Memory,
+}
+
+impl Sort {
+    fn label(self) -> &'static str {
+        match self {
+            Sort::Name => "name",
+            Sort::Cpu => "CPU",
+            Sort::Active => "active time",
+            Sort::Memory => "peak memory",
+        }
+    }
+
+    fn next(self) -> Sort {
+        match self {
+            Sort::Name => Sort::Cpu,
+            Sort::Cpu => Sort::Active,
+            Sort::Active => Sort::Memory,
+            Sort::Memory => Sort::Name,
+        }
+    }
+
+    fn key(self, r: Option<&usage::Row>) -> i64 {
+        let Some(r) = r else { return 0 };
+        match self {
+            Sort::Name => 0,
+            Sort::Cpu => r.cpu_us,
+            Sort::Active => r.active_s,
+            Sort::Memory => r.rss_peak_kb,
+        }
+    }
+}
+
+const PERIODS: [f64; 3] = [1.0, 7.0, 30.0];
+
+/// The usage detail of one label: whose code it ran, who ran its code, its latest spikes.
+type Detail = (String, Vec<(String, i64)>, Vec<(String, i64)>, Vec<usage::Spike>);
+
+fn dur(secs: i64) -> String {
+    match secs {
+        0 => String::new(),
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m", s / 60),
+        s => format!("{}h{:02}m", s / 3600, s % 3600 / 60),
+    }
+}
+
+fn mib(kb: i64) -> String {
+    if kb == 0 {
+        String::new()
+    } else {
+        format!("{:.0}", kb as f64 / 1024.0)
+    }
 }
 
 /// What happens when a text prompt is confirmed.
@@ -50,6 +115,16 @@ struct App {
     mode: Mode,
     status: String,
     quit: bool,
+    usage_db: PathBuf,
+    usage: Option<Usage>,
+    usage_err: String,
+    /// Label → index into usage.rows.
+    usage_ix: HashMap<String, usize>,
+    usage_rows: Vec<usize>,
+    usage_tab: TableState,
+    period: usize,
+    sort: Sort,
+    detail: Option<Detail>,
 }
 
 pub fn run(m: Model) -> Result<()> {
@@ -65,7 +140,18 @@ pub fn run(m: Model) -> Result<()> {
         mode: Mode::Normal,
         status: String::new(),
         quit: false,
+        usage_db: std::env::var_os("DECK_USAGE_DB")
+            .map_or_else(|| PathBuf::from(deck::USAGE_DB), PathBuf::from),
+        usage: None,
+        usage_err: String::new(),
+        usage_ix: HashMap::new(),
+        usage_rows: vec![],
+        usage_tab: TableState::default().with_selected(0),
+        period: 1,
+        sort: Sort::Name,
+        detail: None,
     };
+    app.load_usage();
     app.refilter();
     let mut terminal = ratatui::init();
     let res = app.run(&mut terminal);
@@ -131,6 +217,32 @@ impl App {
         Ok(())
     }
 
+    fn load_usage(&mut self) {
+        self.detail = None;
+        match usage::load(&self.usage_db, PERIODS[self.period]) {
+            Ok(u) => {
+                self.usage_ix = u
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| (r.label.clone(), i))
+                    .collect();
+                self.usage = Some(u);
+                self.usage_err.clear();
+            }
+            Err(e) => {
+                self.usage = None;
+                self.usage_ix.clear();
+                self.usage_err = format!("{e:#}");
+            }
+        }
+    }
+
+    fn usage_of(&self, label: &str) -> Option<&usage::Row> {
+        let u = self.usage.as_ref()?;
+        self.usage_ix.get(label).map(|&i| &u.rows[i])
+    }
+
     fn refilter(&mut self) {
         let q = self.query.to_lowercase();
         self.pkg_rows = (0..self.m.pkgs.len())
@@ -139,11 +251,47 @@ impl App {
                 self.filter.keep(p, self.m.patch_counts[i] > 0) && p.atom().to_lowercase().contains(&q)
             })
             .collect();
+        if self.sort != Sort::Name {
+            let keys: Vec<i64> = self
+                .m
+                .pkgs
+                .iter()
+                .map(|p| self.sort.key(self.usage_of(&p.cp())))
+                .collect();
+            self.pkg_rows
+                .sort_by(|&a, &b| keys[b].cmp(&keys[a]).then(a.cmp(&b)));
+        }
         self.patch_rows = (0..self.m.rows.len())
             .filter(|&i| self.m.rows[i].id.to_lowercase().contains(&q))
             .collect();
+        self.usage_rows = match &self.usage {
+            Some(u) => {
+                let mut v: Vec<usize> = (0..u.rows.len())
+                    .filter(|&i| u.rows[i].label.to_lowercase().contains(&q))
+                    .collect();
+                match self.sort {
+                    Sort::Name => v.sort_by(|&a, &b| u.rows[a].label.cmp(&u.rows[b].label)),
+                    s => v.sort_by(|&a, &b| {
+                        s.key(Some(&u.rows[b]))
+                            .cmp(&s.key(Some(&u.rows[a])))
+                            .then(a.cmp(&b))
+                    }),
+                }
+                v
+            }
+            None => vec![],
+        };
         step(&mut self.pkg_tab, self.pkg_rows.len(), 0);
         step(&mut self.patch_tab, self.patch_rows.len(), 0);
+        step(&mut self.usage_tab, self.usage_rows.len(), 0);
+    }
+
+    fn selected_usage(&self) -> Option<&usage::Row> {
+        let u = self.usage.as_ref()?;
+        self.usage_tab
+            .selected()
+            .and_then(|i| self.usage_rows.get(i))
+            .map(|&i| &u.rows[i])
     }
 
     fn selected_patch(&self) -> Option<usize> {
@@ -162,6 +310,7 @@ impl App {
         match Model::load(self.m.host_dir.clone()) {
             Ok(m) => {
                 self.m = m;
+                self.load_usage();
                 self.refilter();
                 self.status = "reloaded".into();
             }
@@ -266,19 +415,50 @@ impl App {
         let (tab, len) = match self.view {
             View::Packages => (&mut self.pkg_tab, self.pkg_rows.len()),
             View::Patches => (&mut self.patch_tab, self.patch_rows.len()),
+            View::Usage => (&mut self.usage_tab, self.usage_rows.len()),
         };
         self.status.clear();
         match k.code {
             KeyCode::Char('q') => self.quit = true,
-            KeyCode::Tab | KeyCode::BackTab => {
-                self.view = if self.view == View::Packages {
-                    View::Patches
-                } else {
-                    View::Packages
+            KeyCode::Tab => {
+                self.view = match self.view {
+                    View::Packages => View::Patches,
+                    View::Patches => View::Usage,
+                    View::Usage => View::Packages,
+                }
+            }
+            KeyCode::BackTab => {
+                self.view = match self.view {
+                    View::Packages => View::Usage,
+                    View::Patches => View::Packages,
+                    View::Usage => View::Patches,
                 }
             }
             KeyCode::Char('1') => self.view = View::Packages,
             KeyCode::Char('2') => self.view = View::Patches,
+            KeyCode::Char('3') => self.view = View::Usage,
+            KeyCode::Char('s') if self.view != View::Patches => {
+                self.sort = self.sort.next();
+                self.refilter();
+                self.status = format!("sorted by {}", self.sort.label());
+            }
+            KeyCode::Char('p') if self.view != View::Patches => {
+                self.period = (self.period + 1) % PERIODS.len();
+                self.load_usage();
+                self.refilter();
+                self.status = format!("usage over the last {} days", PERIODS[self.period]);
+            }
+            KeyCode::Enter if self.view == View::Usage => {
+                if let Some(r) = self.selected_usage()
+                    && r.label.contains('/')
+                    && !r.label.contains(':')
+                {
+                    self.query = r.label.clone();
+                    self.filter = Filter::All;
+                    self.view = View::Packages;
+                    self.refilter();
+                }
+            }
             KeyCode::Down | KeyCode::Char('j') => step(tab, len, 1),
             KeyCode::Up | KeyCode::Char('k') => step(tab, len, -1),
             KeyCode::PageDown | KeyCode::Char('d') => step(tab, len, 15),
@@ -344,10 +524,14 @@ impl App {
         ])
         .areas(f.area());
 
-        let [tabs, summary] = Layout::horizontal([Constraint::Length(26), Constraint::Fill(1)]).areas(top);
+        let [tabs, summary] = Layout::horizontal([Constraint::Length(36), Constraint::Fill(1)]).areas(top);
         f.render_widget(
-            Tabs::new(["1 Packages", "2 Patches"])
-                .select(if self.view == View::Packages { 0 } else { 1 })
+            Tabs::new(["1 Packages", "2 Patches", "3 Usage"])
+                .select(match self.view {
+                    View::Packages => 0,
+                    View::Patches => 1,
+                    View::Usage => 2,
+                })
                 .highlight_style(Style::new().bold().reversed()),
             tabs,
         );
@@ -356,6 +540,7 @@ impl App {
         match self.view {
             View::Packages => self.draw_packages(f, body, detail),
             View::Patches => self.draw_patches(f, body, detail),
+            View::Usage => self.draw_usage(f, body, detail),
         }
 
         let footer = match &self.mode {
@@ -363,8 +548,9 @@ impl App {
             _ if !self.status.is_empty() => Line::from(self.status.clone()).yellow(),
             _ => Line::from(match self.view {
                 View::Packages => {
-                    "q quit · Tab view · j/k move · / search · f/F filter · Enter patches · r reload"
+                    "q quit · Tab view · j/k move · / search · f/F filter · s sort · p period · Enter patches · r reload"
                 }
+                View::Usage => "q quit · Tab view · j/k move · / search · s sort · p period · Enter package · r reload",
                 View::Patches => {
                     "q quit · Tab view · j/k move · / search · m change state · U upstream · r reload"
                 }
@@ -442,6 +628,9 @@ impl App {
         if what == "Packages" {
             t += &format!(" · filter: {}", self.filter.label());
         }
+        if what != "Patches" {
+            t += &format!(" · {} days · sort: {}", PERIODS[self.period], self.sort.label());
+        }
         if !self.query.is_empty() {
             t += &format!(" · /{}", self.query);
         }
@@ -464,6 +653,11 @@ impl App {
                 Cell::from(if p.world { "★" } else { "" }),
                 Cell::from(if n > 0 { n.to_string() } else { String::new() }).yellow(),
                 Cell::from(date(p.build_time)).dark_gray(),
+                Cell::from(match (self.usage_of(&p.cp()), &self.usage) {
+                    (Some(r), Some(u)) if r.cpu_us > 0 => format!("{:.1}%", pct(r.cpu_us, u.total_cpu_us)),
+                    _ => String::new(),
+                }),
+                Cell::from(self.usage_of(&p.cp()).map_or(String::new(), |r| dur(r.active_s))),
             ])
         });
         let table = Table::new(
@@ -476,9 +670,16 @@ impl App {
                 Constraint::Length(5),
                 Constraint::Length(7),
                 Constraint::Length(10),
+                Constraint::Length(6),
+                Constraint::Length(6),
             ],
         )
-        .header(Row::new(["Package", "Origin", "Repo", "Eco", "World", "Patches", "Built"]).bold())
+        .header(
+            Row::new([
+                "Package", "Origin", "Repo", "Eco", "World", "Patches", "Built", "CPU", "Active",
+            ])
+            .bold(),
+        )
         .block(Block::bordered().title(self.title("Packages", self.pkg_rows.len(), self.m.pkgs.len())))
         .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED));
         f.render_stateful_widget(table, body, &mut self.pkg_tab);
@@ -508,6 +709,20 @@ impl App {
                 format!("{}   {:.1} MiB", date(p.build_time), p.size as f64 / 1048576.0),
             ));
             lines.push(kv("homepage", p.homepage.clone()));
+            if let (Some(r), Some(u)) = (self.usage_of(&p.cp()), &self.usage) {
+                lines.push(kv(
+                    "usage",
+                    format!(
+                        "CPU {} ({:.1}%) · code {:.1}% · active {} · peak {} MiB · {} spikes   (3 for more)",
+                        dur(r.cpu_us / 1_000_000),
+                        pct(r.cpu_us, u.total_cpu_us),
+                        pct(r.code_samples, u.total_samples),
+                        dur(r.active_s),
+                        mib(r.rss_peak_kb),
+                        r.spikes
+                    ),
+                ));
+            }
             for r in self
                 .m
                 .rows
@@ -621,6 +836,139 @@ impl App {
                 }
                 _ => lines.push(Line::from("not tracked yet — m to record its state").dark_gray()),
             }
+        }
+        f.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .block(Block::bordered()),
+            detail,
+        );
+    }
+
+    fn draw_usage(&mut self, f: &mut Frame, body: Rect, detail: Rect) {
+        let Some(u) = &self.usage else {
+            f.render_widget(
+                Paragraph::new(vec![
+                    Line::from("No usage data.").bold(),
+                    Line::from(self.usage_err.clone()),
+                    Line::from(""),
+                    Line::from("deck-usaged records CPU and memory (a root service), deck-focusd active time (a user service)."),
+                ])
+                .wrap(Wrap { trim: false })
+                .block(Block::bordered().title(" Usage ")),
+                body,
+            );
+            return;
+        };
+        let rows = self.usage_rows.iter().map(|&i| {
+            let r = &u.rows[i];
+            let installed = r.label.contains('/') && !r.label.contains(':');
+            Row::new(vec![
+                Cell::from(r.label.clone()).fg(if installed { Color::Reset } else { Color::Cyan }),
+                Cell::from(dur(r.cpu_us / 1_000_000)),
+                Cell::from(format!("{:.1}%", pct(r.cpu_us, u.total_cpu_us))),
+                Cell::from(if r.code_samples > 0 {
+                    format!("{:.1}%", pct(r.code_samples, u.total_samples))
+                } else {
+                    String::new()
+                }),
+                Cell::from(dur(r.active_s)),
+                Cell::from(mib(r.rss_peak_kb)),
+                Cell::from(mib(r.pss_avg_kb)),
+                Cell::from(dur(r.hot_s)),
+                Cell::from(if r.spikes > 0 {
+                    r.spikes.to_string()
+                } else {
+                    String::new()
+                })
+                .yellow(),
+                Cell::from(r.ctx.first().map_or(String::new(), |c| c.0.clone())).dark_gray(),
+            ])
+        });
+        let mut title = self.title("Usage", self.usage_rows.len(), u.rows.len());
+        if let Some(t) = u.started {
+            title += &format!("· recording since {} ", usage::when(t));
+        }
+        if !u.focus {
+            title += "· no active time (deck-focusd) ";
+        }
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Fill(1),
+                Constraint::Length(7),
+                Constraint::Length(6),
+                Constraint::Length(6),
+                Constraint::Length(7),
+                Constraint::Length(6),
+                Constraint::Length(6),
+                Constraint::Length(7),
+                Constraint::Length(6),
+                Constraint::Length(6),
+            ],
+        )
+        .header(
+            Row::new([
+                "Package or program",
+                "CPU",
+                "Share",
+                "Code",
+                "Active",
+                "Peak",
+                "PSS",
+                ">1 core",
+                "Spikes",
+                "Ctx",
+            ])
+            .bold(),
+        )
+        .block(Block::bordered().title(title))
+        .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED));
+        f.render_stateful_widget(table, body, &mut self.usage_tab);
+
+        let Some(r) = self.selected_usage().cloned() else {
+            f.render_widget(Block::bordered(), detail);
+            return;
+        };
+        if self.detail.as_ref().is_none_or(|d| d.0 != r.label) {
+            let days = PERIODS[self.period];
+            let (runs, ran_by) = usage::code(&self.usage_db, days, &r.label).unwrap_or_default();
+            let spikes = usage::spikes(&self.usage_db, days, Some(&r.label)).unwrap_or_default();
+            self.detail = Some((r.label.clone(), runs, ran_by, spikes));
+        }
+        let (_, runs, ran_by, spikes) = self.detail.as_ref().unwrap();
+        let share = |v: &Vec<(String, i64)>| {
+            let total: i64 = v.iter().map(|x| x.1).sum();
+            v.iter()
+                .take(5)
+                .map(|(l, n)| format!("{l} {:.0}%", pct(*n, total)))
+                .collect::<Vec<_>>()
+                .join(" · ")
+        };
+        let mut lines = vec![
+            Line::from(r.label.clone()).bold(),
+            kv("contexts", usage::ctx_summary(&r) + "  (CPU seconds)"),
+            kv("launches", format!("{}   alive {}", r.launches, dur(r.alive_s))),
+        ];
+        if !runs.is_empty() {
+            lines.push(kv("runs code", share(runs)));
+        }
+        if !ran_by.is_empty() {
+            lines.push(kv("code run by", share(ran_by)));
+        }
+        for s in spikes.iter().take(5) {
+            lines.push(kv(
+                "spike",
+                format!(
+                    "{}  {}s  {:.1} CPU-s  peak {:.1} cores  {} MiB  {}",
+                    usage::when(s.start),
+                    s.secs,
+                    s.cpu_us as f64 / 1e6,
+                    s.peak_cores,
+                    mib(s.rss_peak_kb),
+                    s.ctx
+                ),
+            ));
         }
         f.render_widget(
             Paragraph::new(lines)

@@ -59,7 +59,10 @@ enum Cmd {
         /// List the bursts of CPU instead of the totals
         #[arg(long)]
         spikes: bool,
-        #[arg(long, env = "DECK_USAGE_DB", default_value = usage::DEFAULT_DB)]
+        /// One package (or label such as user:claude): whose code it ran, who ran its code, its spikes
+        #[arg(long)]
+        pkg: Option<String>,
+        #[arg(long, env = "DECK_USAGE_DB", default_value = deck::USAGE_DB)]
         db: PathBuf,
     },
 }
@@ -72,11 +75,21 @@ fn main() -> Result<()> {
         Some(d) => d,
         None => default_host_dir()?,
     };
-    if let Some(Cmd::Usage { days, spikes, db }) = &cli.cmd {
-        return if *spikes {
-            usage::print_spikes(db, *days)
-        } else {
-            usage::print_totals(db, *days)
+    if let Some(Cmd::Usage {
+        days,
+        spikes,
+        pkg,
+        db,
+    }) = &cli.cmd
+    {
+        return match (pkg, spikes) {
+            (Some(p), _) => {
+                usage::print_code(db, *days, p)?;
+                println!("# spikes");
+                usage::print_spikes(db, *days, Some(p))
+            }
+            (None, true) => usage::print_spikes(db, *days, None),
+            (None, false) => usage::print_totals(db, *days),
         };
     }
     let mut m = Model::load(host_dir)?;

@@ -1,20 +1,19 @@
-# CPU and memory use per package, for `deck usage`. Built from tools/deck and installed with
-#   sudo install -o root -g root -m 0755 tools/deck/target/release/deck-usaged /usr/local/sbin/
+# CPU, memory and profile per package, for `deck usage` and deck's Usage tab.
 [Unit]
 Description=Per-package CPU and memory accounting (deck)
 Documentation=https://github.com/ivankovic/agentic-gentoo/tree/main/tools/deck
 
 [Service]
-ExecStart=/usr/local/sbin/deck-usaged
+ExecStart=/usr/sbin/deck-usaged
 StateDirectory=deck
 Nice=10
 IOSchedulingClass=idle
 MemoryMax=256M
 
-# Reading other users' processes (exe, smaps_rollup) and resetting their peak memory
+# Reading other users' processes (exe, maps, smaps_rollup) and resetting their peak memory
 # (clear_refs) takes ptrace access and DAC override; the kernel's process events and exit
-# reports take CAP_NET_ADMIN. Nothing else.
-CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_NET_ADMIN
+# reports take CAP_NET_ADMIN; the profiler's CPU-cycle sampling takes CAP_PERFMON.
+CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_NET_ADMIN CAP_PERFMON
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
@@ -24,7 +23,6 @@ ProtectKernelLogs=yes
 ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
-PrivateNetwork=no
 RestrictAddressFamilies=AF_NETLINK AF_UNIX
 RestrictNamespaces=yes
 RestrictRealtime=yes
@@ -32,7 +30,7 @@ RestrictSUIDSGID=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
-SystemCallFilter=@system-service
+SystemCallFilter=@system-service perf_event_open
 
 [Install]
 WantedBy=multi-user.target

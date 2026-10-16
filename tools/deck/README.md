@@ -3,14 +3,18 @@
 What is installed on a Gentoo machine, where each package came from, which carry local patches,
 and where each patch stands upstream. A TUI, plus tab-separated output for scripts and agents.
 
+Installed through Portage, from the local overlay's live ebuild `app-portage/deck`: on deck,
+`portage/env/deck-local-source.conf` points it at this clone, so `emerge app-portage/deck` builds
+what is committed here, pushed or not.
+
 ```sh
-cargo install --path tools/deck --locked --bin deck   # → ~/.cargo/bin/deck
-deck                                       # the TUI
+deck                                       # the TUI: packages, patches, usage
 deck packages [--filter here|compiled|patched|overlay|…]
 deck patches
 deck mark <category/package/file> <state> [--url URL] [--note TEXT]
 deck upstream <category/package/file> <URL>
-deck usage [--days N] [--spikes]           # CPU and memory per package, from deck-usaged
+deck usage [--days N] [--spikes]           # CPU, memory, active time per package
+deck usage --pkg <label>                   # whose code it ran, who ran its code, its spikes
 ```
 
 It reads the host's directory, `~/src/agentic-gentoo/hosts/$(hostname)` unless `--host-dir` or
@@ -63,27 +67,28 @@ The first five count as open.
 
 | Key | |
 |---|---|
-| `Tab`, `1`, `2` | packages / patches |
+| `Tab`, `1`, `2`, `3` | packages / patches / usage |
 | `j` `k` `d` `u` `g` `G` | move, page, top, bottom (arrows, PgUp/PgDn, Home/End too) |
 | `/`, `Esc` | search by name, clear it |
 | `f` `F` | next / previous package filter |
-| `Enter` | on a patched package: its patches; on a patch: change its state |
+| `Enter` | on a patched package: its patches; on a patch: change its state; on usage: the package |
+| `s` | sort packages and usage by name, CPU, active time, peak memory |
+| `p` | usage over the last 1, 7 or 30 days |
 | `m` | change a patch's state: pick it, then URL and note (both optional) |
 | `U` | set the patch's upstream project |
 | `r` | reload |
 | `q` | quit |
 
-## Usage accounting: deck-usaged
+## Usage accounting: deck-usaged and deck-focusd
 
-A root service (`hosts/deck/etc/systemd/system/deck-usaged.service`) that records CPU and memory
-per package into `/var/lib/deck/usage.db`, hour by hour; `deck usage` reads it. It is the second
-binary in this crate and must be root-owned, so it is not installed with cargo:
+Two services record usage; `deck usage` and the Usage tab merge them per package.
 
-```sh
-cargo build --release --manifest-path tools/deck/Cargo.toml
-sudo install -o root -g root -m 0755 tools/deck/target/release/deck-usaged /usr/local/sbin/
-./deploy.sh deck apply && sudo systemctl daemon-reload && sudo systemctl enable --now deck-usaged
-```
+- `deck-usaged` ([systemd/deck-usaged.service](systemd/deck-usaged.service)), a root service:
+  CPU, memory and a CPU profile per package, hour by hour, into `/var/lib/deck/usage.db`.
+  `systemctl enable --now deck-usaged`.
+- `deck-focusd` ([systemd/deck-focusd.service](systemd/deck-focusd.service)), a user service in
+  the graphical session: time each program was actively used, into
+  `$XDG_STATE_HOME/deck/focus.db`. `systemctl --user enable --now deck-focusd`.
 
 **CPU.** Each process's CPU counter (`/proc/<pid>/stat`, all threads) is read once a second
 and the increase credited to its package. Only processes in cgroups whose CPU total moved are
@@ -109,14 +114,32 @@ through `clear_refs`), summed per package: the peak catches a spike however shor
 PSS (`smaps_rollup`), which splits shared pages fairly, for the steady state. Exit reports add
 the peak of processes that never got a reading.
 
+**Whose code ran: the profiler.** 49 times a second, each busy CPU records where it is
+executing, counted in CPU cycles so an idle CPU takes no samples and is not woken (one counter
+unit for the P-cores and one for the E-cores). The address is looked up in the process's
+executable mappings, so time spent in a library is credited to the library's package: mesa,
+glibc, ffmpeg's libraries, as well as the program's. JIT code counts as the program's; kernel
+addresses as `kernel` or `kmod:<module>` (i915, btrfs, iwlwifi). The `libs` table keeps samples
+per library, program and context; `Code` in the Usage tab is a package's share of all samples.
+
+**Active time.** `deck-focusd` follows niri's event stream for the focused window and its
+process. In a terminal it takes the terminal's foreground program (aerc, nvim, chess-tui), and
+follows wrappers that start one program and wait for it (a script such as `jail`, bwrap), so a
+jailed Claude Code counts as `user:claude`, not bash. Wayland's idle notification (ext-idle-notify)
+fires after 60 s without input; those 60 s are dropped too, so active time is time with input at
+most a minute apart. An idle inhibitor (a playing video) keeps the session active. It records the
+program's path; `deck` maps paths to packages as deck-usaged does. `deck-focusd --windows` shows
+what each open window counts as.
+
 **Spikes.** Seconds are sorted by how much CPU the package used in them (up to 5% of a core,
 25%, one core, two, more). A burst starts at half a core, ends after 3 s under a tenth, and is
 kept in `spikes` with its length, CPU, peak cores and peak memory if it used a CPU-second.
 
-**Cost.** About 0.3% of one core with the machine busy, less idle; 30 MiB of memory, most of it
-the file map.
+**Cost.** deck-usaged: about 0.3% of one core with the machine busy, less idle; 30 MiB of
+memory, most of it the file map. It counts itself, as `app-portage/deck`.
 
 Tables (`sqlite3 -readonly /var/lib/deck/usage.db .schema`): `usage` (hour, package, context:
-CPU, seconds alive, launches, peak RSS, PSS, seconds per CPU band), `spikes`, `meta` (start
-time, netlink batches lost to overflow). The data stays on the machine; nothing in it goes to
+CPU, seconds alive, launches, peak RSS, PSS, seconds per CPU band), `spikes`, `libs` (profiler
+samples), `meta` (start time, netlink batches and samples lost). `focus.db`: `active` (hour,
+program path, window app id, seconds). The data stays on the machine; nothing in it goes to
 git.

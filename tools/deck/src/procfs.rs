@@ -6,6 +6,11 @@ use std::os::unix::fs::MetadataExt;
 pub struct Stat {
     pub comm: String,
     pub ppid: i32,
+    pub pgrp: i32,
+    /// The controlling terminal, 0 for none.
+    pub tty: i32,
+    /// The terminal's foreground process group.
+    pub tpgid: i32,
     pub kernel_thread: bool,
     /// User plus system time of all threads, live and exited, in clock ticks.
     pub ticks: u64,
@@ -26,6 +31,9 @@ pub fn stat(pid: i32) -> Option<Stat> {
     Some(Stat {
         comm,
         ppid: f.get(1)?.parse().ok()?,
+        pgrp: f.get(2)?.parse().ok()?,
+        tty: f.get(4)?.parse().ok()?,
+        tpgid: f.get(5)?.parse().ok()?,
         kernel_thread: num(6)? & PF_KTHREAD != 0,
         ticks: num(11)? + num(12)?,
         start: num(19)?,
@@ -43,9 +51,17 @@ pub fn pids() -> Vec<i32> {
 
 /// The program's path, as the process's own mount namespace sees it.
 pub fn exe(pid: i32) -> Option<String> {
+    exe_deleted(pid).map(|(p, _)| p)
+}
+
+/// The program's path, and whether the file was deleted or replaced since it started (an update).
+pub fn exe_deleted(pid: i32) -> Option<(String, bool)> {
     let p = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
     let p = p.to_string_lossy();
-    Some(p.strip_suffix(" (deleted)").unwrap_or(&p).to_string())
+    Some(match p.strip_suffix(" (deleted)") {
+        Some(p) => (p.to_string(), true),
+        None => (p.to_string(), false),
+    })
 }
 
 pub fn cmdline(pid: i32) -> Vec<String> {
@@ -105,4 +121,35 @@ pub fn pss_kb(pid: i32) -> Option<u64> {
         &fs::read_to_string(format!("/proc/{pid}/smaps_rollup")).ok()?,
         "Pss:",
     )
+}
+
+/// The process's children (CONFIG_PROC_CHILDREN), through its main thread.
+pub fn children(pid: i32) -> Vec<i32> {
+    fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
+        .unwrap_or_default()
+        .split_whitespace()
+        .filter_map(|c| c.parse().ok())
+        .collect()
+}
+
+/// What an interpreter runs: the first of its first few arguments that is a file, resolved in the
+/// process's own view (its root and working directory).
+pub fn script_path(pid: i32) -> Option<String> {
+    for a in cmdline(pid).iter().skip(1).take(4) {
+        if a.starts_with('-') {
+            continue;
+        }
+        let path = if a.starts_with('/') {
+            format!("/proc/{pid}/root{a}")
+        } else {
+            format!("/proc/{pid}/cwd/{a}")
+        };
+        let Ok(real) = fs::canonicalize(&path) else {
+            continue;
+        };
+        if real.is_file() {
+            return Some(real.to_string_lossy().into_owned());
+        }
+    }
+    None
 }

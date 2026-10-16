@@ -31,6 +31,15 @@ CREATE TABLE IF NOT EXISTS spikes (
     rss_peak_kb INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS spikes_start ON spikes (start);
+-- The profiler: samples of where code ran, 49 a second per busy CPU, counted in cycles.
+CREATE TABLE IF NOT EXISTS libs (
+    hour    INTEGER NOT NULL,
+    lib     TEXT    NOT NULL,  -- whose code ran: a library's or program's package, kernel, kmod:<name>
+    prog    TEXT    NOT NULL,  -- the process's package
+    ctx     TEXT    NOT NULL,
+    samples INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (hour, lib, prog, ctx)
+);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ";
 
@@ -82,6 +91,7 @@ impl Store {
     pub fn flush<'a>(
         &mut self,
         rows: impl Iterator<Item = (i64, &'a str, &'a str, &'a Agg)>,
+        libs: impl Iterator<Item = (i64, &'a str, &'a str, &'a str, u64)>,
         spikes: &[Spike],
     ) -> Result<()> {
         let tx = self.db.transaction()?;
@@ -116,6 +126,13 @@ impl Store {
                     s[3],
                     s[4]
                 ])?;
+            }
+            let mut lib = tx.prepare_cached(
+                "INSERT INTO libs (hour, lib, prog, ctx, samples) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT (hour, lib, prog, ctx) DO UPDATE SET samples = samples + excluded.samples",
+            )?;
+            for (hour, l, prog, ctx, n) in libs {
+                lib.execute(params![hour, l, prog, ctx, n as i64])?;
             }
             let mut ins = tx.prepare_cached(
                 "INSERT INTO spikes (start, secs, pkg, ctx, cpu_us, peak_cores, rss_peak_kb)

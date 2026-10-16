@@ -125,6 +125,20 @@ impl PkgMap {
     pub fn len(&self) -> usize {
         self.by_path.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_path.is_empty()
+    }
+}
+
+/// Whether a program runs scripts, so the script names the package rather than the program.
+pub fn is_interpreter(exe: &str) -> bool {
+    let base = exe.rsplit('/').next().unwrap_or(exe);
+    let base = base.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    matches!(
+        base,
+        "python" | "perl" | "ruby" | "bash" | "sh" | "dash" | "zsh" | "lua" | "luajit" | "node" | "tclsh"
+    )
 }
 
 /// A name for a program no package owns.
