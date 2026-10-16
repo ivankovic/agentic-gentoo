@@ -386,7 +386,8 @@ def sync(interactive):
         if r.returncode:
             failed.append(a["name"])
     subprocess.run(["notmuch", "new", *([] if interactive else ["--quiet"])], check=True)
-    if BILLS.exists():
+    # Only once the bills config is filled in: the example's placeholders would fail every sync.
+    if BILLS.exists() and "example" not in BILLS.read_text().split("\n# Bills")[0]:
         try:
             bills(dry_run=False, quiet=not interactive)
         except (OSError, SystemExit, subprocess.CalledProcessError) as e:
