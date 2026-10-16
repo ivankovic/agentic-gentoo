@@ -387,11 +387,13 @@ impl Daemon {
         {
             return Some(l);
         }
-        // Not mapped when last read: read again, at most once a second per process.
+        // Not mapped when last read: read again, at most every 30 s per process. Misses are nearly
+        // all JIT code, counted as the process's own anyway, and Firefox's maps are long: reading
+        // them every second for each of its processes cost more than the rest of the daemon.
         if self
             .maps
             .get(&pid)
-            .is_some_and(|(_, at)| at.elapsed() < Duration::from_secs(1))
+            .is_some_and(|(_, at)| at.elapsed() < Duration::from_secs(30))
         {
             return None;
         }
@@ -428,7 +430,9 @@ impl Daemon {
                     continue;
                 }
             };
-            let lib = if s.kernel {
+            let lib = if s.pid == 0 {
+                key.0
+            } else if s.kernel {
                 let i = self.modules.partition_point(|m| m.1 <= s.ip);
                 match self.modules.get(i).filter(|m| m.0 <= s.ip) {
                     Some(m) => {

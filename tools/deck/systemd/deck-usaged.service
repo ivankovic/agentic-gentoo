@@ -12,8 +12,9 @@ MemoryMax=256M
 
 # Reading other users' processes (exe, maps, smaps_rollup) and resetting their peak memory
 # (clear_refs) takes ptrace access and DAC override; the kernel's process events and exit
-# reports take CAP_NET_ADMIN; the profiler's CPU-cycle sampling takes CAP_PERFMON.
-CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_NET_ADMIN CAP_PERFMON
+# reports take CAP_NET_ADMIN; the profiler's CPU-cycle sampling takes CAP_PERFMON, and the kernel
+# modules' addresses in /proc/modules (to tell i915 from btrfs) take CAP_SYSLOG.
+CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_NET_ADMIN CAP_PERFMON CAP_SYSLOG
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only

@@ -146,7 +146,8 @@ pub fn unowned(path: &str) -> String {
     let file = Path::new(path)
         .file_name()
         .map_or(path.to_string(), |f| f.to_string_lossy().into_owned());
-    if path.starts_with("/usr/local/") {
+    // /usr/local and /etc: this machine's own scripts (deck-mail, deck-vitals).
+    if path.starts_with("/usr/local/") || path.starts_with("/etc/") {
         return format!("local:{file}");
     }
     if let Some(rest) = path
@@ -207,6 +208,7 @@ mod tests {
             "user:rustup:rust-analyzer"
         );
         assert_eq!(unowned("/usr/local/bin/deck-terminals"), "local:deck-terminals");
+        assert_eq!(unowned("/etc/deck-vitals/vitals.py"), "local:vitals.py");
         assert_eq!(unowned("/opt/thing/bin/x"), "unowned:/opt/thing/bin/x");
     }
 
