@@ -561,14 +561,28 @@ def webdav(conf, password):
                 if call("MKCOL", d) not in (201, 405):  # 405: it exists
                     raise OSError(f"Nextcloud: can't create {d}")
                 made.add(d)
+        def same(rel):  # a file already there with these bytes: sent before, its answer lost
+            status, _, body = request("GET", files + urllib.parse.quote(rel))
+            return status == 200 and body == data
+
         stem, n = rel.removesuffix(".pdf"), 1
         while call("HEAD", rel) == 200:
+            if same(rel):
+                return rel
             n += 1
             rel = f"{stem}-{n}.pdf" if conf.get("style") == "hyphens" else f"{stem} ({n}).pdf"
-        status = call("PUT", rel, data)
-        if status not in (201, 204):
-            raise OSError(f"Nextcloud: uploading {rel} failed ({status})")
-        return rel
+        for attempt in range(4):
+            try:
+                status = call("PUT", rel, data)
+            except OSError:  # a timeout or a dropped connection
+                status = None
+            # A gateway timeout often comes after Nextcloud has stored the file.
+            if status in (201, 204) or call("HEAD", rel) == 200 and same(rel):
+                return rel
+            if status is not None and status < 500:
+                break
+            time.sleep(10 * (attempt + 1))
+        raise OSError(f"Nextcloud: uploading {rel} failed ({status})")
 
     def tag(rel, name):
         nonlocal tags
