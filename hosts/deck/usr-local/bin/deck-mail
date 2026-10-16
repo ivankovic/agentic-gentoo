@@ -6,7 +6,7 @@
   deck-mail sync     fetch mail (mbsync), index it (notmuch new), send what's queued
   deck-mail unlock   ask for the GPG passphrase now, so the timer's syncs can read the passwords
   deck-mail send     aerc's outgoing command: msmtpq, which queues what can't go out now
-  deck-mail archive [--dry-run]
+  deck-mail archive [--dry-run] [--limit N]
                      copy mail's PDFs into the family archive on Nextcloud (WebDAV): where it
                      is in ~/.config/deck-mail/archive; what each PDF is called and its
                      category (also a tag in Nextcloud), or that it's left out, in
@@ -417,9 +417,11 @@ folder  Family Archive                     # where in Nextcloud
 # Where in the folder, from: {category} {name} (from archive-names), {year} {month} {day}
 # {date} (YYYY-MM-DD) {sender} {subject} {file}. Each file also gets its category as a tag.
 layout  {year}/{month}/{day}-{category} - {name}
+# File names as they are, or "hyphens": ASCII, words joined by hyphens (17-Kuca-racun-12.pdf)
+style   spaces
 local   ~/Documents/Archive                # a copy on deck, same layout
 """
-ARCHIVE_KEYS = ("url", "user", "pass", "folder", "layout", "local")
+ARCHIVE_KEYS = ("url", "user", "pass", "folder", "layout", "local", "style")
 
 
 def archive_config(upload=True):
@@ -471,6 +473,15 @@ def archive_name(names, sender, fname, digest):
     return None
 
 
+def hyphenated(s):
+    """The archive's own style for a file name: ASCII letters and digits, words joined by
+    hyphens ("Kuća - račun 12/3" → "Kuca-racun-12-3")."""
+    import unicodedata
+    s = s.translate(str.maketrans({"đ": "d", "Đ": "D", "ß": "ss", "ø": "o", "Ø": "O", "ł": "l"}))
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
+    return re.sub(r"[^A-Za-z0-9]+", "-", s).strip("-") or "unnamed"
+
+
 def safe(s, limit=80):
     """A file name's worth of text: no slashes or control characters, short."""
     s = "".join(c if c.isprintable() and c not in '/\\:*?"<>|' else " " for c in s)
@@ -505,7 +516,8 @@ def mail_pdfs(path):
 
 def webdav(conf, password):
     """Nextcloud over WebDAV: call(method, path in the user's files), put(path, data) that
-    creates the folders and never overwrites (a file already there gets " (2)", " (3)"…) and
+    creates the folders and never overwrites (a file already there gets " (2)", " (3)"…, or
+    -2, -3… in the hyphens style) and
     returns the path used, and tag(path, name), which gives the file that Nextcloud tag."""
     import base64
     import urllib.error
@@ -552,7 +564,7 @@ def webdav(conf, password):
         stem, n = rel.removesuffix(".pdf"), 1
         while call("HEAD", rel) == 200:
             n += 1
-            rel = f"{stem} ({n}).pdf"
+            rel = f"{stem}-{n}.pdf" if conf.get("style") == "hyphens" else f"{stem} ({n}).pdf"
         status = call("PUT", rel, data)
         if status not in (201, 204):
             raise OSError(f"Nextcloud: uploading {rel} failed ({status})")
@@ -584,7 +596,7 @@ def webdav(conf, password):
     return call, put, tag
 
 
-def archive(dry_run, quiet=False):
+def archive(dry_run, quiet=False, limit=None):
     """Copies mail's PDFs to Nextcloud, named and filed by archive-names, once each: a message
     done is tagged `archived`, and a PDF already sent (the same bytes, from another message) is
     not sent again. A message with a PDF archive-names doesn't know waits, untagged, for a line.
@@ -627,9 +639,13 @@ def archive(dry_run, quiet=False):
         if missing:
             unknown += missing
             continue
+        if limit is not None and sent >= limit:
+            break
         for fname, data, digest, name in named:
             if digest in seen:
                 continue
+            if limit is not None and sent >= limit:
+                break
             if name == ("-", "-"):
                 left_out.append(row(fname, digest))
                 seen[digest] = None if dry_run else "-"
@@ -639,8 +655,10 @@ def archive(dry_run, quiet=False):
                                         sender=sender, subject=subject, file=fname,
                                         category=name[0], name=name[1])
             rel = "/".join(safe(p, 120) for p in rel.split("/"))
-            if not rel.lower().endswith(".pdf"):
-                rel += ".pdf"
+            rel = rel.removesuffix(".pdf").removesuffix(".PDF")
+            if conf.get("style") == "hyphens":
+                rel = "/".join(hyphenated(p) for p in rel.split("/"))
+            rel += ".pdf"
             if dry_run:
                 print(f"{conf['folder']}/{rel}\t{subject}")
                 seen[digest] = rel  # within this run only: the same PDF twice is listed once
@@ -658,7 +676,7 @@ def archive(dry_run, quiet=False):
                 tag(f"{conf['folder']}/{rel}", name[0])
             except OSError as e:  # the file is there; only its tag is missing
                 print(f"deck-mail: archive: {e}")
-        if not dry_run:
+        if not dry_run and all(d in seen for _, _, d, _ in named):  # --limit can stop halfway
             seen_file.write_text(json.dumps(seen, indent=1))
             subprocess.run(["notmuch", "tag", "+archived", "--", mid], check=True)
     if dry_run:
@@ -1075,7 +1093,8 @@ def main():
             ARCHIVE.write_text(ARCHIVE_EXAMPLE)
             print(f"deck-mail: wrote an example {ARCHIVE}: fill it in, then deck-mail archive --dry-run")
             return 1
-        return archive(dry_run="--dry-run" in cmd)
+        limit = int(cmd[cmd.index("--limit") + 1]) if "--limit" in cmd else None
+        return archive(dry_run="--dry-run" in cmd, limit=limit)
     if cmd == ["review"]:
         return review()
     if cmd[:1] == ["top"]:
