@@ -83,6 +83,10 @@ done < <(find "$src" -mindepth 2 -maxdepth 3 -name .git -type d -prune 2>/dev/nu
 # A clean environment: nothing from the session leaks in (agent sockets, tokens, D-Bus).
 env=(--clearenv --setenv HOME "$HOME" --setenv USER "$USER" --setenv LOGNAME "$USER"
 	--setenv SHELL /bin/bash --setenv JAIL 1
+	# Without an address, D-Bus clients start a private session bus with dbus-launch, and nothing
+	# ever stops it: `gh auth token` (run by Claude Code every 30 minutes) left a dbus-daemon and
+	# a gnome-keyring-daemon behind on each call. An address that can't connect makes them fail.
+	--setenv DBUS_SESSION_BUS_ADDRESS unix:path=/dev/null/no-session-bus
 	--setenv PATH "$HOME/.local/bin:$HOME/go/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin")
 for v in TERM COLORTERM LANG LC_ALL LC_CTYPE LC_MESSAGES TZ EDITOR VISUAL; do
 	[[ -n ${!v-} ]] && env+=(--setenv "$v" "${!v}")
