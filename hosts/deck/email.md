@@ -103,6 +103,26 @@ last year is a candidate. Subjects have Re:/Fwd: removed and numbers shown as `#
 and "Invoice 1240" count together. The sender lines are notmuch searches: `notmuch tag +deleted --
 from:…` (or in aerc, search, select all and `d`) puts them in Gmail's Bin at the next sync.
 
+### Bills to the family archive
+
+`deck-mail bills` copies the PDF attachments of bills into a family-archive folder in Nextcloud over
+WebDAV, filed by date (`{year}/{date} {sender} - {file}`), and keeps a copy in `~/Documents/Bills`.
+`deck-mail sync` runs it after each `notmuch new`, so new bills follow within minutes.
+
+- **What is a bill**: rules in `~/.config/deck-mail/bills` (on deck only: the billers are
+  personal), one notmuch search a line: `from:` for billers whose subjects don't say so,
+  `subject:` for words (invoice, Rechnung, receipt, Quittung, račun…). Only mail with a PDF
+  counts; sent mail doesn't. In aerc, `Bb` makes any message a bill (tag `bill`), `Bn` keeps one
+  out (tag `notbill`).
+- **Once each**: a message done is tagged `bill-archived`; the PDFs sent are remembered by their
+  SHA-256 (`~/.local/state/deck-mail/bills.json`), so the same PDF in two messages or two
+  accounts goes once. Nothing in Nextcloud is overwritten: a name taken gets " (2)".
+- **Credentials**: a Nextcloud app password (Settings → Security → Devices & sessions), in `pass`
+  under the name the config gives (`nextcloud/deck`).
+- `deck-mail bills --dry-run` lists what would go where, without the password or any upload.
+  To send a message again: `notmuch tag -bill-archived -- id:…` and remove its PDF's line from
+  bills.json.
+
 ### Promotions and other bulk mail
 
 All of it comes to disk. To keep it out of the way:

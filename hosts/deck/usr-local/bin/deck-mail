@@ -6,6 +6,9 @@
   deck-mail sync     fetch mail (mbsync), index it (notmuch new), send what's queued
   deck-mail unlock   ask for the GPG passphrase now, so the timer's syncs can read the passwords
   deck-mail send     aerc's outgoing command: msmtpq, which queues what can't go out now
+  deck-mail bills [--dry-run]
+                     copy the PDFs of bills into the family archive on Nextcloud (WebDAV),
+                     filed by date; the rules are in ~/.config/deck-mail/bills. `sync` runs it.
   deck-mail top [N] [query]
                      the N (50) most frequent senders, sender domains and subjects, with the
                      newest message's month: what to clean up. The query defaults to
@@ -51,6 +54,7 @@ HOME = pathlib.Path.home()
 CONFIG = pathlib.Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config")
 STATE = pathlib.Path(os.environ.get("XDG_STATE_HOME") or HOME / ".local/state") / "deck-mail"
 ACCOUNTS = CONFIG / "deck-mail/accounts"
+BILLS = CONFIG / "deck-mail/bills"
 MAIL = HOME / "Mail"
 ISYNCRC = CONFIG / "isyncrc"
 MSMTPQ = "/usr/share/msmtp/msmtpq"
@@ -382,12 +386,184 @@ def sync(interactive):
         if r.returncode:
             failed.append(a["name"])
     subprocess.run(["notmuch", "new", *([] if interactive else ["--quiet"])], check=True)
+    if BILLS.exists():
+        try:
+            bills(dry_run=False, quiet=not interactive)
+        except (OSError, SystemExit, subprocess.CalledProcessError) as e:
+            print(f"deck-mail: bills: {e}")
     if any((STATE / "queue").glob("*.mail")):
         subprocess.run([f"{MSMTPQ}/msmtpq", "--q-mgmt", "-r"], env=dict(env, **QUEUE_ENV))
     if failed:
         print("deck-mail: mbsync failed for " + ", ".join(failed))
         return 1
     (STATE / "synced").touch()
+    return 0
+
+
+BILLS_EXAMPLE = """\
+# deck-mail bills: which mail's PDFs go to the family archive. On deck only, not in the repo.
+url     https://cloud.example.org          # the Nextcloud server
+user    you                                # its login
+pass    nextcloud/deck                     # the `pass` entry holding a Nextcloud app password
+folder  Family Archive                     # where in Nextcloud
+# Where in the folder, from: {year} {month} {date} (YYYY-MM-DD) {sender} {subject} {file}
+layout  {year}/{date} {sender} - {file}
+local   ~/Documents/Bills                  # a copy on deck, same layout
+# Bills: any of these notmuch searches, one a line, on mail with a PDF. In aerc, Bb makes any
+# message a bill (tag `bill`), Bn keeps one out (tag `notbill`).
+from:billing@example.com
+subject:invoice
+"""
+BILL_KEYS = ("url", "user", "pass", "folder", "layout", "local")
+
+
+def bills_config(upload=True):
+    conf, rules = {"layout": "{year}/{date} {sender} - {file}"}, []
+    for line in BILLS.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, _, value = line.partition(" ")
+        if key in BILL_KEYS:
+            conf[key] = value.split(" #")[0].strip()
+        else:
+            rules.append(line)
+    missing = [k for k in (("url", "user", "pass", "folder") if upload else ("folder",))
+               if not conf.get(k) or "example" in conf[k]]
+    if missing:
+        raise SystemExit(f"deck-mail: {BILLS}: missing {', '.join(missing)}")
+    return conf, rules
+
+
+def safe(s, limit=80):
+    """A file name's worth of text: no slashes or control characters, short."""
+    s = "".join(c if c.isprintable() and c not in '/\\:*?"<>|' else " " for c in s)
+    return " ".join(s.split())[:limit].strip(" .") or "unnamed"
+
+
+def bill_pdfs(path):
+    """The message's date, sender name, subject, and its PDFs as (file name, bytes)."""
+    import datetime
+    import email
+    import email.policy
+    import email.utils
+    with open(path, "rb") as f:
+        msg = email.message_from_binary_file(f, policy=email.policy.default)
+    try:
+        date = email.utils.parsedate_to_datetime(str(msg["Date"])).astimezone()
+    except (TypeError, ValueError):
+        date = datetime.datetime.fromtimestamp(os.path.getmtime(path)).astimezone()
+    name, addr = email.utils.parseaddr(str(msg["From"] or ""))
+    sender = name or addr.rpartition("@")[2].removeprefix("email.").removeprefix("mail.")
+    pdfs = []
+    for part in msg.walk():
+        fname = part.get_filename() or ""
+        if part.get_content_type() == "application/pdf" or fname.lower().endswith(".pdf"):
+            data = part.get_payload(decode=True)
+            if data and data.startswith(b"%PDF"):
+                fname = safe(fname.removesuffix(".pdf").removesuffix(".PDF") or "attachment")
+                pdfs.append((fname + ".pdf", data))
+    return date, safe(sender, 40), safe(str(msg["Subject"] or "")), pdfs
+
+
+def webdav(conf, password):
+    """PUT for a path inside the Nextcloud folder: creates the folders, never overwrites (a file
+    already there gets " (2)", " (3)"…). Returns the path used."""
+    import base64
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    base = f"{conf['url'].rstrip('/')}/remote.php/dav/files/{urllib.parse.quote(conf['user'])}/"
+    auth = "Basic " + base64.b64encode(f"{conf['user']}:{password}".encode()).decode()
+    made = set()
+
+    def call(method, rel, data=None):
+        req = urllib.request.Request(base + urllib.parse.quote(rel), data=data, method=method,
+                                     headers={"Authorization": auth})
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                return r.status
+        except urllib.error.HTTPError as e:
+            return e.code
+
+    def put(rel, data):
+        parts = rel.split("/")
+        for i in range(1, len(parts)):
+            d = "/".join(parts[:i])
+            if d not in made:
+                if call("MKCOL", d) not in (201, 405):  # 405: it exists
+                    raise OSError(f"Nextcloud: can't create {d}")
+                made.add(d)
+        stem, n = rel.removesuffix(".pdf"), 1
+        while call("HEAD", rel) == 200:
+            n += 1
+            rel = f"{stem} ({n}).pdf"
+        status = call("PUT", rel, data)
+        if status not in (201, 204):
+            raise OSError(f"Nextcloud: uploading {rel} failed ({status})")
+        return rel
+
+    return call, put
+
+
+def bills(dry_run, quiet=False):
+    """Copies bills' PDFs to Nextcloud, once each: a message done is tagged `bill-archived`, and
+    a PDF already sent (the same bytes, from another message) is not sent again."""
+    import hashlib
+    conf, rules = bills_config(upload=not dry_run)
+    wanted = " or ".join(f"({r})" for r in rules)
+    query = (f"(tag:bill or (({wanted}) and not tag:sent))" if wanted else "tag:bill")
+    query += " and (mimetype:application/pdf or attachment:pdf) and not tag:notbill and not tag:bill-archived"
+    ids = subprocess.run(["notmuch", "search", "--output=messages", query],
+                         capture_output=True, text=True, check=True).stdout.split()
+    if not ids:
+        return 0
+    seen_file = STATE / "bills.json"
+    seen = json.loads(seen_file.read_text()) if seen_file.exists() else {}
+    put = None
+    if not dry_run:
+        env = dict(os.environ, PASSWORD_STORE_GPG_OPTS="--pinentry-mode=error")
+        pw = subprocess.run(["pass", "show", conf["pass"]], capture_output=True, text=True, env=env)
+        if pw.returncode or not pw.stdout.strip():
+            print(f"deck-mail: bills: no password from `pass show {conf['pass']}`")
+            return 1
+        call, put = webdav(conf, pw.stdout.splitlines()[0])
+        if call("PROPFIND", conf["folder"]) != 207:
+            print(f"deck-mail: bills: no folder {conf['folder']!r} in Nextcloud for {conf['user']}")
+            return 1
+    local = pathlib.Path(os.path.expanduser(conf["local"])) if conf.get("local") else None
+    sent = 0
+    for mid in ids:
+        files = subprocess.run(["notmuch", "search", "--output=files", "--exclude=false", mid],
+                               capture_output=True, text=True, check=True).stdout.split("\n")
+        date, sender, subject, pdfs = bill_pdfs(files[0])
+        for fname, data in pdfs:
+            digest = hashlib.sha256(data).hexdigest()
+            rel = conf["layout"].format(year=f"{date:%Y}", month=f"{date:%m}", date=f"{date:%Y-%m-%d}",
+                                        sender=sender, subject=subject, file=fname)
+            rel = "/".join(safe(p, 120) for p in rel.split("/"))
+            if not rel.lower().endswith(".pdf"):
+                rel += ".pdf"
+            if digest in seen:
+                continue
+            if dry_run:
+                print(f"{conf['folder']}/{rel}\t{subject}")
+                seen[digest] = rel  # within this run only: the same PDF twice is listed once
+                sent += 1
+                continue
+            rel = put(f"{conf['folder']}/{rel}", data).removeprefix(conf["folder"] + "/")
+            if local:
+                out = local / rel
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(data)
+            seen[digest] = rel
+            seen_file.write_text(json.dumps(seen, indent=1))
+            sent += 1
+        if not dry_run:
+            subprocess.run(["notmuch", "tag", "+bill-archived", "--", mid], check=True)
+    if not quiet or sent:
+        print(f"deck-mail: bills: {len(ids)} messages, {sent} PDFs "
+              + ("would go to Nextcloud" if dry_run else "copied to Nextcloud"))
     return 0
 
 
@@ -441,6 +617,12 @@ def main():
                   dict(os.environ, **QUEUE_ENV))
     if cmd == ["unlock"]:
         return 0 if unlocked(accounts(), True) else 1
+    if cmd[:1] == ["bills"]:
+        if not BILLS.exists():
+            BILLS.write_text(BILLS_EXAMPLE)
+            print(f"deck-mail: wrote an example {BILLS}: fill it in, then deck-mail bills --dry-run")
+            return 1
+        return bills(dry_run="--dry-run" in cmd)
     if cmd[:1] == ["top"]:
         return top(cmd[1:])
     print(__doc__.split("\n\n", 2)[1], file=sys.stderr)
