@@ -8,6 +8,12 @@ Records of real installs, kept as reference for the installer:
 
 - [hosts/deck](hosts/deck/) — ThinkPad T14s Gen 4: LUKS2 + btrfs, systemd-boot UKI, binhost, niri.
 
+## Tools
+
+- [tools/deck](tools/deck/) — a TUI listing installed packages by origin (binhost, compiled here,
+  prebuilt, noarch), the local patches each carries, and each patch's way upstream, timestamped in
+  the host's `upstream.toml`.
+
 ## Deploying
 
 `./deploy.sh [host]` shows how a host's tracked files differ from this machine; `./deploy.sh

@@ -1,0 +1,13 @@
+# Local patches on their way upstream, kept by deck (tools/deck).
+# One [[patch]] per patch; each [[patch.event]] is a change of state, and the last is the current
+# one. Edit with `deck`, `deck mark` or by hand.
+
+[[patch]]
+id = "games-board/chess-tui/0001-resume-local-and-bot-games.patch"
+upstream = "https://github.com/thomas-mauran/chess-tui"
+
+[[patch.event]]
+at = "2026-10-15T09:50:50+02:00"
+state = "backport"
+url = "https://github.com/thomas-mauran/chess-tui/pull/285"
+note = "upstream 7d722c9 on main, after 2.7.1; drop on the next release"

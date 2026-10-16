@@ -1,0 +1,17 @@
+[package]
+name = "deck"
+version = "0.1.0"
+edition = "2024"
+description = "Installed Gentoo packages, where they came from, local patches and their way upstream"
+publish = false
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+clap = { version = "4", features = ["derive", "env"] }
+ratatui = "0.30"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+
+[profile.release]
+lto = "thin"

@@ -69,3 +69,6 @@ wget-log*
 
 # Python bytecode
 __pycache__/
+
+# Rust build output
+target/

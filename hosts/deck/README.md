@@ -485,6 +485,14 @@ Source checkouts: `~/src/<repo>` holds only my own repositories; anything author
 cloned to `~/3p/<host>/<owner>/<repo>` (e.g. `~/3p/github.com/gitleaks/gitleaks`, used to
 generate the gitleaks ebuild below).
 
+## Packages and patches
+
+`deck` ([tools/deck](../../tools/deck/), installed with `cargo install --path tools/deck --locked`)
+lists every installed package by origin and the local patches each carries.
+[upstream.toml](upstream.toml) records where each patch stands upstream (sent, in review,
+rejected, backport…), one timestamped event per change; `deck` edits it, as do `deck mark` and
+hand edits.
+
 ## Local overlay
 
 [overlay/](overlay/) is the source of the `local` repository. It is deployed root-owned with
