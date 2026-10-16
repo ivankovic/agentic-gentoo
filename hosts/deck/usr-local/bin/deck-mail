@@ -6,6 +6,10 @@
   deck-mail sync     fetch mail (mbsync), index it (notmuch new), send what's queued
   deck-mail unlock   ask for the GPG passphrase now, so the timer's syncs can read the passwords
   deck-mail send     aerc's outgoing command: msmtpq, which queues what can't go out now
+  deck-mail top [N] [query]
+                     the N (50) most frequent senders, sender domains and subjects, with the
+                     newest message's month: what to clean up. The query defaults to
+                     `not tag:sent`; deleted and spam are always left out.
 
 The account list stays out of the repo, which is public: addresses only on deck.
 ~/.config/deck-mail/accounts, one account a line, the first one the default for sending:
@@ -387,6 +391,45 @@ def sync(interactive):
     return 0
 
 
+def top(args):
+    """Prints the most frequent senders, sender domains and subjects among the query's messages."""
+    import collections
+    import email.utils
+    import re
+    n = int(args.pop(0)) if args and args[0].isdigit() else 50
+    out = subprocess.run(["notmuch", "show", "--format=json", "--body=false", "--entire-thread=false",
+                          *(args or ["not", "tag:sent"])], capture_output=True, check=True).stdout
+
+    def messages(x):
+        if isinstance(x, dict):
+            if "headers" in x:
+                yield x
+        elif isinstance(x, list):
+            for y in x:
+                yield from messages(y)
+
+    counts = {k: collections.Counter() for k in ("senders", "sender domains", "subjects")}
+    newest = {}
+    for m in messages(json.loads(out)):
+        h = m["headers"]
+        addr = email.utils.parseaddr(h.get("From", ""))[1].lower()
+        # Re:/Fwd: (and their German, Nordic forms) off, numbers as #: "Invoice 1234" and
+        # "Invoice 1240" are one subject.
+        subject = re.sub(r"^\s*((re|fwd?|aw|wg|sv)(\[\d+\])?:\s*)+", "", h.get("Subject", ""), flags=re.I)
+        subject = re.sub(r"\d+", "#", " ".join(subject.split()))[:80]
+        for kind, key in (("senders", f"from:{addr}"), ("sender domains", f"from:{addr.rpartition('@')[2]}"),
+                          ("subjects", subject)):
+            counts[kind][key] += 1
+            newest[kind, key] = max(newest.get((kind, key), 0), m.get("timestamp", 0))
+    for kind, c in counts.items():
+        print(f"# the {n} most frequent {kind}: messages, newest (month), "
+              + ("subject, numbers as #" if kind == "subjects" else "notmuch search"))
+        for key, k in c.most_common(n):
+            print(f"{k:6}  {time.strftime('%Y-%m', time.localtime(newest[kind, key]))}  {key}")
+        print()
+    return 0
+
+
 def main():
     cmd = sys.argv[1:]
     if cmd == ["config"]:
@@ -398,6 +441,8 @@ def main():
                   dict(os.environ, **QUEUE_ENV))
     if cmd == ["unlock"]:
         return 0 if unlocked(accounts(), True) else 1
+    if cmd[:1] == ["top"]:
+        return top(cmd[1:])
     print(__doc__.split("\n\n", 2)[1], file=sys.stderr)
     return 2
 

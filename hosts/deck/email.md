@@ -94,6 +94,15 @@ From deck (aerc: `d` delete, `a` archive; `home/.config/aerc/binds.conf`):
   `deleted` back as the folders say). A tag changed while a sync runs can still be undone by
   it; do it again.
 
+### Finding what to clean up
+
+`deck-mail top [N] [query]` lists the N (default 50) most frequent senders, sender domains and
+subjects among received mail (`not tag:sent`; deleted and spam left out), each with its message
+count and the month of the newest one: a sender with hundreds of messages and nothing newer than
+last year is a candidate. Subjects have Re:/Fwd: removed and numbers shown as `#`, so "Invoice 1234"
+and "Invoice 1240" count together. The sender lines are notmuch searches: `notmuch tag +deleted --
+from:…` (or in aerc, search, select all and `d`) puts them in Gmail's Bin at the next sync.
+
 ### Promotions and other bulk mail
 
 All of it comes to disk. To keep it out of the way:
