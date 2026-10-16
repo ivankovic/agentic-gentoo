@@ -519,8 +519,10 @@ def webdav(conf, password):
     ns = {"d": "DAV:", "oc": "http://owncloud.org/ns"}
 
     def request(method, path, data=None, headers=None):
+        # Its own User-Agent: bot blocking in front of Nextcloud turns away Python-urllib's.
         req = urllib.request.Request(dav + path, data=data, method=method,
-                                     headers={"Authorization": auth, **(headers or {})})
+                                     headers={"Authorization": auth, "User-Agent": "deck-mail",
+                                              **(headers or {})})
         try:
             with urllib.request.urlopen(req, timeout=120) as r:
                 return r.status, r.headers, r.read()
