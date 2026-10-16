@@ -6,10 +6,10 @@
   deck-mail sync     fetch mail (mbsync), index it (notmuch new), send what's queued
   deck-mail unlock   ask for the GPG passphrase now, so the timer's syncs can read the passwords
   deck-mail send     aerc's outgoing command: msmtpq, which queues what can't go out now
-  deck-mail bills [--dry-run]
-                     copy the PDFs of bills into the family archive on Nextcloud (WebDAV),
-                     filed by date; the rules are in ~/.config/deck-mail/bills, and what each
-                     PDF is called (or that it's left out) in ~/.config/deck-mail/bill-names.
+  deck-mail archive [--dry-run]
+                     copy mail's PDFs into the family archive on Nextcloud (WebDAV): where it
+                     is in ~/.config/deck-mail/archive, and what each PDF is called and in which
+                     folder, or that it's left out, in ~/.config/deck-mail/archive-names.
                      --dry-run lists every PDF and its name. `sync` runs it.
   deck-mail top [N] [query]
                      the N (50) most frequent senders, sender domains and subjects, with the
@@ -57,8 +57,8 @@ HOME = pathlib.Path.home()
 CONFIG = pathlib.Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config")
 STATE = pathlib.Path(os.environ.get("XDG_STATE_HOME") or HOME / ".local/state") / "deck-mail"
 ACCOUNTS = CONFIG / "deck-mail/accounts"
-BILLS = CONFIG / "deck-mail/bills"
-BILL_NAMES = CONFIG / "deck-mail/bill-names"
+ARCHIVE = CONFIG / "deck-mail/archive"
+ARCHIVE_NAMES = CONFIG / "deck-mail/archive-names"
 MAIL = HOME / "Mail"
 ISYNCRC = CONFIG / "isyncrc"
 MSMTPQ = "/usr/share/msmtp/msmtpq"
@@ -390,12 +390,12 @@ def sync(interactive):
         if r.returncode:
             failed.append(a["name"])
     subprocess.run(["notmuch", "new", *([] if interactive else ["--quiet"])], check=True)
-    # Only once the bills config is filled in: the example's placeholders would fail every sync.
-    if BILLS.exists() and "example" not in BILLS.read_text().split("\n# Bills")[0]:
+    # Only once the archive config is filled in: the example's placeholders would fail every sync.
+    if ARCHIVE.exists() and "example" not in ARCHIVE.read_text():
         try:
-            bills(dry_run=False, quiet=not interactive)
+            archive(dry_run=False, quiet=not interactive)
         except (OSError, SystemExit, subprocess.CalledProcessError) as e:
-            print(f"deck-mail: bills: {e}")
+            print(f"deck-mail: archive: {e}")
     if any((STATE / "queue").glob("*.mail")):
         subprocess.run([f"{MSMTPQ}/msmtpq", "--q-mgmt", "-r"], env=dict(env, **QUEUE_ENV))
     if failed:
@@ -405,67 +405,66 @@ def sync(interactive):
     return 0
 
 
-BILLS_EXAMPLE = """\
-# deck-mail bills: which mail's PDFs go to the family archive. On deck only, not in the repo.
+ARCHIVE_EXAMPLE = """\
+# deck-mail archive: where mail's PDFs go in Nextcloud. On deck only, not in the repo.
 url     https://cloud.example.org          # the Nextcloud server
 user    you                                # its login
 pass    nextcloud/deck                     # the `pass` entry holding a Nextcloud app password
 folder  Family Archive                     # where in Nextcloud
-# Where in the folder, from: {year} {month} {date} (YYYY-MM-DD) {sender} {subject} {file}, and
-# {name}, the name bill-names gives the PDF ("{sender} - {file}" while there is no bill-names)
-layout  {year}/{date} {name}
-local   ~/Documents/Bills                  # a copy on deck, same layout
-# Bills: any of these notmuch searches, one a line, on mail with a PDF. In aerc, Bb makes any
-# message a bill (tag `bill`), Bn keeps one out (tag `notbill`).
-from:billing@example.com
-subject:invoice
+# Where in the folder, from: {category} {name} (from archive-names), {year} {month}
+# {date} (YYYY-MM-DD) {sender} {subject} {file}
+layout  {category}/{year}/{date} {name}
+local   ~/Documents/Archive                # a copy on deck, same layout
 """
-BILL_KEYS = ("url", "user", "pass", "folder", "layout", "local")
+ARCHIVE_KEYS = ("url", "user", "pass", "folder", "layout", "local")
 
 
-def bills_config(upload=True):
-    conf, rules = {"layout": "{year}/{date} {name}"}, []
-    for line in BILLS.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        key, _, value = line.partition(" ")
-        if key in BILL_KEYS:
+def archive_config(upload=True):
+    conf = {"layout": "{category}/{year}/{date} {name}"}
+    for line in ARCHIVE.read_text().splitlines():
+        key, _, value = line.strip().partition(" ")
+        if key in ARCHIVE_KEYS:
             conf[key] = value.split(" #")[0].strip()
-        else:
-            rules.append(line)
     missing = [k for k in (("url", "user", "pass", "folder") if upload else ("folder",))
                if not conf.get(k) or "example" in conf[k]]
     if missing:
-        raise SystemExit(f"deck-mail: {BILLS}: missing {', '.join(missing)}")
-    return conf, rules
+        raise SystemExit(f"deck-mail: {ARCHIVE}: missing {', '.join(missing)}")
+    return conf
 
 
-def bill_names():
-    """bill-names' lines as (sender regex, file regex, name): the first that matches a PDF names
-    it, "-" leaves it out. None while there is no bill-names: every PDF goes, as sender - file."""
-    if not BILL_NAMES.exists():
-        return None
+def archive_names():
+    """archive-names' lines as (sender regex or sha256 prefix, file regex, category, name)."""
     names = []
-    for n, line in enumerate(BILL_NAMES.read_text().splitlines(), 1):
+    text = ARCHIVE_NAMES.read_text() if ARCHIVE_NAMES.exists() else ""
+    for n, line in enumerate(text.splitlines(), 1):
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         parts = [p.strip() for p in line.split(" | ")]
-        if len(parts) != 3:
-            raise SystemExit(f"deck-mail: {BILL_NAMES}:{n}: not sender | file | name")
+        if len(parts) != 4:
+            raise SystemExit(f"deck-mail: {ARCHIVE_NAMES}:{n}: not sender | file | category | name")
+        sender, fname, category, name = parts
         try:
-            names.append((re.compile(parts[0], re.I), re.compile(parts[1], re.I), parts[2]))
+            if not sender.startswith("sha256:"):
+                sender = re.compile(sender, re.I)
+            names.append((sender, re.compile(fname, re.I), category, name))
         except re.error as e:
-            raise SystemExit(f"deck-mail: {BILL_NAMES}:{n}: {e}")
+            raise SystemExit(f"deck-mail: {ARCHIVE_NAMES}:{n}: {e}")
     return names
 
 
-def bill_name(names, sender, fname):
-    """The PDF's name, "-" for one left out, None for one no line names."""
-    for s, f, name in names:
+def archive_name(names, sender, fname, digest):
+    """The PDF's (category, name), ("-", "-") for one left out, None for one no line names."""
+    for s, f, category, name in names:
+        if isinstance(s, str):
+            if digest.startswith(s.removeprefix("sha256:")):
+                return (category, name)
+            continue
         m = f.search(fname)
         if m and s.search(sender):
-            return "-" if name == "-" else re.sub(r"\{(\d+)\}", lambda g: m.group(int(g[1])) or "", name)
+            if name == "-":
+                return ("-", "-")
+            fill = lambda t: re.sub(r"\{(\d+)\}", lambda g: m.group(int(g[1])) or "", t)
+            return (fill(category), fill(name))
     return None
 
 
@@ -475,7 +474,7 @@ def safe(s, limit=80):
     return " ".join(s.split())[:limit].strip(" .") or "unnamed"
 
 
-def bill_pdfs(path):
+def mail_pdfs(path):
     """The message's date, sender name, sender name and address, subject, and its PDFs as
     (file name, bytes)."""
     import datetime
@@ -541,62 +540,62 @@ def webdav(conf, password):
     return call, put
 
 
-def bills(dry_run, quiet=False):
-    """Copies bills' PDFs to Nextcloud, once each: a message done is tagged `bill-archived`, and
-    a PDF already sent (the same bytes, from another message) is not sent again. With bill-names,
-    only the PDFs it names go; a message with a PDF it doesn't know waits, untagged, for a line."""
+def archive(dry_run, quiet=False):
+    """Copies mail's PDFs to Nextcloud, named and filed by archive-names, once each: a message
+    done is tagged `archived`, and a PDF already sent (the same bytes, from another message) is
+    not sent again. A message with a PDF archive-names doesn't know waits, untagged, for a line.
+    Mail deleted from the mailbox still goes: Gmail empties the Bin after 30 days."""
     import hashlib
-    conf, rules = bills_config(upload=not dry_run)
-    names = bill_names()
-    wanted = " or ".join(f"({r})" for r in rules)
-    query = (f"(tag:bill or (({wanted}) and not tag:sent))" if wanted else "tag:bill")
-    # Bills deleted from the mailbox still go: Gmail empties the Bin after 30 days.
-    query += (" and (mimetype:application/pdf or attachment:pdf) and not tag:notbill"
-              " and not tag:bill-archived and not tag:spam")
+    conf = archive_config(upload=not dry_run)
+    names = archive_names()
+    query = ("(mimetype:application/pdf or attachment:pdf)"
+             " and not tag:spam and not tag:noarchive and not tag:archived")
     ids = subprocess.run(["notmuch", "search", "--exclude=false", "--output=messages", query],
                          capture_output=True, text=True, check=True).stdout.split()
     if not ids:
         return 0
-    seen_file = STATE / "bills.json"
+    seen_file = STATE / "archive.json"
     seen = json.loads(seen_file.read_text()) if seen_file.exists() else {}
     put = None
     if not dry_run:
         env = dict(os.environ, PASSWORD_STORE_GPG_OPTS="--pinentry-mode=error")
         pw = subprocess.run(["pass", "show", conf["pass"]], capture_output=True, text=True, env=env)
         if pw.returncode or not pw.stdout.strip():
-            print(f"deck-mail: bills: no password from `pass show {conf['pass']}`")
+            print(f"deck-mail: archive: no password from `pass show {conf['pass']}`")
             return 1
         call, put = webdav(conf, pw.stdout.splitlines()[0])
         if call("PROPFIND", conf["folder"]) != 207:
-            print(f"deck-mail: bills: no folder {conf['folder']!r} in Nextcloud for {conf['user']}")
+            print(f"deck-mail: archive: no folder {conf['folder']!r} in Nextcloud for {conf['user']}")
             return 1
     local = pathlib.Path(os.path.expanduser(conf["local"])) if conf.get("local") else None
     sent, left_out, unknown = 0, [], []
     for mid in ids:
         files = subprocess.run(["notmuch", "search", "--output=files", "--exclude=false", mid],
                                capture_output=True, text=True, check=True).stdout.split("\n")
-        date, sender, from_, subject, pdfs = bill_pdfs(files[0])
-        named = {}
-        for fname, _ in pdfs:
-            named[fname] = (bill_name(names, from_, fname.removesuffix(".pdf"))
-                            if names is not None else f"{sender} - {fname}")
-        missing = [f for f, n in named.items() if n is None]
-        if missing:
-            unknown += [f"{date:%Y-%m-%d}\t{from_}\t{f}\t{subject}" for f in missing]
-            continue
+        date, sender, from_, subject, pdfs = mail_pdfs(files[0])
+        named = []
         for fname, data in pdfs:
-            if named[fname] == "-":
-                left_out.append(f"{date:%Y-%m-%d}\t{from_}\t{fname}\t{subject}")
-                continue
             digest = hashlib.sha256(data).hexdigest()
+            named.append((fname, data, digest,
+                          archive_name(names, from_, fname.removesuffix(".pdf"), digest)))
+        row = lambda f, d: f"{date:%Y-%m-%d}\t{from_}\t{f}\t{subject}\tsha256:{d[:16]}"
+        missing = [row(f, d) for f, _, d, n in named if n is None and d not in seen]
+        if missing:
+            unknown += missing
+            continue
+        for fname, data, digest, name in named:
+            if digest in seen:
+                continue
+            if name == ("-", "-"):
+                left_out.append(row(fname, digest))
+                seen[digest] = None if dry_run else "-"
+                continue
             rel = conf["layout"].format(year=f"{date:%Y}", month=f"{date:%m}", date=f"{date:%Y-%m-%d}",
                                         sender=sender, subject=subject, file=fname,
-                                        name=named[fname])
+                                        category=name[0], name=name[1])
             rel = "/".join(safe(p, 120) for p in rel.split("/"))
             if not rel.lower().endswith(".pdf"):
                 rel += ".pdf"
-            if digest in seen:
-                continue
             if dry_run:
                 print(f"{conf['folder']}/{rel}\t{subject}")
                 seen[digest] = rel  # within this run only: the same PDF twice is listed once
@@ -611,17 +610,18 @@ def bills(dry_run, quiet=False):
             seen_file.write_text(json.dumps(seen, indent=1))
             sent += 1
         if not dry_run:
-            subprocess.run(["notmuch", "tag", "+bill-archived", "--", mid], check=True)
+            seen_file.write_text(json.dumps(seen, indent=1))
+            subprocess.run(["notmuch", "tag", "+archived", "--", mid], check=True)
     if dry_run:
-        for title, rows in (("left out", left_out), ("no name in bill-names: held back", unknown)):
+        for title, rows in (("left out", left_out), ("no line in archive-names: held back", unknown)):
             if rows:
                 print(f"\n# {title} ({len(rows)})")
                 print("\n".join(rows))
     if not quiet or sent or unknown:
-        print(f"deck-mail: bills: {len(ids)} messages, {sent} PDFs "
+        print(f"deck-mail: archive: {len(ids)} messages, {sent} PDFs "
               + ("would go to Nextcloud" if dry_run else "copied to Nextcloud")
               + f", {len(left_out)} left out"
-              + (f", {len(unknown)} with no name in {BILL_NAMES} held back" if unknown else ""))
+              + (f", {len(unknown)} with no line in {ARCHIVE_NAMES} held back" if unknown else ""))
     return 0
 
 
@@ -675,12 +675,12 @@ def main():
                   dict(os.environ, **QUEUE_ENV))
     if cmd == ["unlock"]:
         return 0 if unlocked(accounts(), True) else 1
-    if cmd[:1] == ["bills"]:
-        if not BILLS.exists():
-            BILLS.write_text(BILLS_EXAMPLE)
-            print(f"deck-mail: wrote an example {BILLS}: fill it in, then deck-mail bills --dry-run")
+    if cmd[:1] == ["archive"]:
+        if not ARCHIVE.exists():
+            ARCHIVE.write_text(ARCHIVE_EXAMPLE)
+            print(f"deck-mail: wrote an example {ARCHIVE}: fill it in, then deck-mail archive --dry-run")
             return 1
-        return bills(dry_run="--dry-run" in cmd)
+        return archive(dry_run="--dry-run" in cmd)
     if cmd[:1] == ["top"]:
         return top(cmd[1:])
     print(__doc__.split("\n\n", 2)[1], file=sys.stderr)
