@@ -8,8 +8,9 @@
   deck-mail send     aerc's outgoing command: msmtpq, which queues what can't go out now
   deck-mail archive [--dry-run]
                      copy mail's PDFs into the family archive on Nextcloud (WebDAV): where it
-                     is in ~/.config/deck-mail/archive, and what each PDF is called and in which
-                     folder, or that it's left out, in ~/.config/deck-mail/archive-names.
+                     is in ~/.config/deck-mail/archive; what each PDF is called and its
+                     category (also a tag in Nextcloud), or that it's left out, in
+                     ~/.config/deck-mail/archive-names.
                      --dry-run lists every PDF and its name. `sync` runs it.
   deck-mail review    a TUI over those PDFs: which go to Nextcloud, in which folder, as what;
                      which are left out; and which mail to delete. It writes archive-names.
@@ -413,16 +414,16 @@ url     https://cloud.example.org          # the Nextcloud server
 user    you                                # its login
 pass    nextcloud/deck                     # the `pass` entry holding a Nextcloud app password
 folder  Family Archive                     # where in Nextcloud
-# Where in the folder, from: {category} {name} (from archive-names), {year} {month}
-# {date} (YYYY-MM-DD) {sender} {subject} {file}
-layout  {category}/{year}/{date} {name}
+# Where in the folder, from: {category} {name} (from archive-names), {year} {month} {day}
+# {date} (YYYY-MM-DD) {sender} {subject} {file}. Each file also gets its category as a tag.
+layout  {year}/{month}/{day}-{category} - {name}
 local   ~/Documents/Archive                # a copy on deck, same layout
 """
 ARCHIVE_KEYS = ("url", "user", "pass", "folder", "layout", "local")
 
 
 def archive_config(upload=True):
-    conf = {"layout": "{category}/{year}/{date} {name}"}
+    conf = {"layout": "{year}/{month}/{day}-{category} - {name}"}
     for line in ARCHIVE.read_text().splitlines():
         key, _, value = line.strip().partition(" ")
         if key in ARCHIVE_KEYS:
@@ -503,24 +504,40 @@ def mail_pdfs(path):
 
 
 def webdav(conf, password):
-    """PUT for a path inside the Nextcloud folder: creates the folders, never overwrites (a file
-    already there gets " (2)", " (3)"…). Returns the path used."""
+    """Nextcloud over WebDAV: call(method, path in the user's files), put(path, data) that
+    creates the folders and never overwrites (a file already there gets " (2)", " (3)"…) and
+    returns the path used, and tag(path, name), which gives the file that Nextcloud tag."""
     import base64
     import urllib.error
     import urllib.parse
     import urllib.request
-    base = f"{conf['url'].rstrip('/')}/remote.php/dav/files/{urllib.parse.quote(conf['user'])}/"
+    import xml.etree.ElementTree as ET
+    dav = f"{conf['url'].rstrip('/')}/remote.php/dav/"
+    files = f"files/{urllib.parse.quote(conf['user'])}/"
     auth = "Basic " + base64.b64encode(f"{conf['user']}:{password}".encode()).decode()
-    made = set()
+    made, tags = set(), None
+    ns = {"d": "DAV:", "oc": "http://owncloud.org/ns"}
 
-    def call(method, rel, data=None):
-        req = urllib.request.Request(base + urllib.parse.quote(rel), data=data, method=method,
-                                     headers={"Authorization": auth})
+    def request(method, path, data=None, headers=None):
+        req = urllib.request.Request(dav + path, data=data, method=method,
+                                     headers={"Authorization": auth, **(headers or {})})
         try:
             with urllib.request.urlopen(req, timeout=120) as r:
-                return r.status
+                return r.status, r.headers, r.read()
         except urllib.error.HTTPError as e:
-            return e.code
+            return e.code, e.headers, b""
+
+    def propfind(path, props, depth="0"):
+        body = ('<?xml version="1.0"?><d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">'
+                f"<d:prop>{props}</d:prop></d:propfind>").encode()
+        status, _, xml = request("PROPFIND", path, body,
+                                 {"Depth": depth, "Content-Type": "application/xml"})
+        if status != 207:
+            raise OSError(f"Nextcloud: PROPFIND {path} failed ({status})")
+        return ET.fromstring(xml).findall("d:response", ns)
+
+    def call(method, rel, data=None):
+        return request(method, files + urllib.parse.quote(rel), data)[0]
 
     def put(rel, data):
         parts = rel.split("/")
@@ -539,7 +556,30 @@ def webdav(conf, password):
             raise OSError(f"Nextcloud: uploading {rel} failed ({status})")
         return rel
 
-    return call, put
+    def tag(rel, name):
+        nonlocal tags
+        if tags is None or name not in tags:  # Nextcloud's tags, by name: made once, then reused
+            tags = {}
+            for r in propfind("systemtags/", "<oc:id/><oc:display-name/>", "1"):
+                i, n = r.find(".//oc:id", ns), r.find(".//oc:display-name", ns)
+                if i is not None and n is not None:
+                    tags[n.text] = i.text
+        if name not in tags:
+            body = json.dumps({"name": name, "userVisible": True, "userAssignable": True}).encode()
+            status, headers, _ = request("POST", "systemtags/", body,
+                                         {"Content-Type": "application/json"})
+            if status != 201:
+                raise OSError(f"Nextcloud: can't create the tag {name!r} ({status})")
+            tags[name] = headers["Content-Location"].rstrip("/").rpartition("/")[2]
+        found = propfind(files + urllib.parse.quote(rel), "<oc:fileid/>")
+        fileid = found[0].find(".//oc:fileid", ns).text if found else None
+        if not fileid:
+            raise OSError(f"Nextcloud: no file id for {rel}")
+        status = request("PUT", f"systemtags-relations/files/{fileid}/{tags[name]}")[0]
+        if status not in (201, 409):  # 409: it has the tag already
+            raise OSError(f"Nextcloud: tagging {rel} {name!r} failed ({status})")
+
+    return call, put, tag
 
 
 def archive(dry_run, quiet=False):
@@ -565,7 +605,7 @@ def archive(dry_run, quiet=False):
         if pw.returncode or not pw.stdout.strip():
             print(f"deck-mail: archive: no password from `pass show {conf['pass']}`")
             return 1
-        call, put = webdav(conf, pw.stdout.splitlines()[0])
+        call, put, tag = webdav(conf, pw.stdout.splitlines()[0])
         if call("PROPFIND", conf["folder"]) != 207:
             print(f"deck-mail: archive: no folder {conf['folder']!r} in Nextcloud for {conf['user']}")
             return 1
@@ -592,7 +632,8 @@ def archive(dry_run, quiet=False):
                 left_out.append(row(fname, digest))
                 seen[digest] = None if dry_run else "-"
                 continue
-            rel = conf["layout"].format(year=f"{date:%Y}", month=f"{date:%m}", date=f"{date:%Y-%m-%d}",
+            rel = conf["layout"].format(year=f"{date:%Y}", month=f"{date:%m}", day=f"{date:%d}",
+                                        date=f"{date:%Y-%m-%d}",
                                         sender=sender, subject=subject, file=fname,
                                         category=name[0], name=name[1])
             rel = "/".join(safe(p, 120) for p in rel.split("/"))
@@ -611,6 +652,10 @@ def archive(dry_run, quiet=False):
             seen[digest] = rel
             seen_file.write_text(json.dumps(seen, indent=1))
             sent += 1
+            try:
+                tag(f"{conf['folder']}/{rel}", name[0])
+            except OSError as e:  # the file is there; only its tag is missing
+                print(f"deck-mail: archive: {e}")
         if not dry_run:
             seen_file.write_text(json.dumps(seen, indent=1))
             subprocess.run(["notmuch", "tag", "+archived", "--", mid], check=True)
