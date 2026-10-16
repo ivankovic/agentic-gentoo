@@ -20,7 +20,8 @@ ProtectSystem=strict
 ProtectHome=read-only
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
-ProtectKernelLogs=yes
+# No ProtectKernelLogs: it takes CAP_SYSLOG out of the bounding set, and with it the modules'
+# addresses.
 ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
