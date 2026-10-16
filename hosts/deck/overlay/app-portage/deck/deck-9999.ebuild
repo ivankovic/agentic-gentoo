@@ -16,9 +16,10 @@ EGIT_REPO_URI="https://github.com/ivankovic/agentic-gentoo.git"
 EGIT_BRANCH="main"
 S="${WORKDIR}/${P}/tools/deck"
 
-# The repository's license; then the crates', from `cargo metadata`.
+# The repository's license; then the crates', from `cargo metadata` (where a crate offers a
+# choice, one already listed: Apache-2.0 rather than BSL-1.0).
 LICENSE="CC-BY-NC-ND-4.0"
-LICENSE+=" Apache-2.0 BSL-1.0 MIT MPL-2.0 Unicode-3.0 Unicode-DFS-2016 Unlicense WTFPL-2 ZLIB"
+LICENSE+=" Apache-2.0 MIT MPL-2.0 Unicode-3.0 Unicode-DFS-2016 Unlicense WTFPL-2 ZLIB"
 SLOT="0"
 
 # rusqlite links the system's SQLite.
