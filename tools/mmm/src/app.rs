@@ -504,6 +504,7 @@ impl App {
             }
             KeyCode::Char('u') if !ctrl => return self.undo(),
             KeyCode::Char('c') if !ctrl => return self.write(Draft::new_mail()),
+            KeyCode::Char('e') if !ctrl => return self.resume(),
             KeyCode::Char(c @ ('r' | 'R' | 'f')) if !ctrl => return self.answer(c),
             KeyCode::Char(c @ '1'..='9') => {
                 self.view = None;
@@ -753,6 +754,37 @@ impl App {
         }
     }
 
+    /// `e`: back to one of mmm's drafts: the message being read, in a thread; in the list, the
+    /// thread's newest draft.
+    fn resume(&mut self) {
+        let id = match &self.view {
+            Some(v) => v.msgs.get(v.current()).map(|m| m.id.clone()),
+            None => self.threads.get(self.sel).and_then(|t| {
+                notmuch::message_ids(&format!("thread:{} and tag:draft", t.thread))
+                    .ok()?
+                    .into_iter()
+                    .find(|m| compose::draft_of(m).is_some())
+            }),
+        };
+        let Some(id) = id else { return };
+        let Some(draft) = compose::draft_of(&id) else {
+            self.status = if self
+                .view
+                .as_ref()
+                .is_some_and(|v| v.msgs[v.current()].has("draft"))
+            {
+                "a draft from Gmail: mmm resumes only its own; open it on the web or phone".into()
+            } else {
+                "e resumes a draft: there's none here (the Drafts tab has them)".into()
+            };
+            return;
+        };
+        match Draft::load(draft) {
+            Ok(d) => self.write(d),
+            Err(e) => self.status = format!("{e:#}"),
+        }
+    }
+
     /// Back from the editor: an empty new mail is dropped; anything else is reviewed.
     pub fn edited(&mut self, mut d: Draft, ok: bool) {
         if !ok {
@@ -764,12 +796,16 @@ impl App {
             return;
         }
         if d.kind == compose::Kind::New && d.body.trim().is_empty() && d.to.trim().is_empty() {
-            let _ = std::fs::remove_file(&d.file);
+            let _ = d.forget();
             self.status = "nothing written: dropped".into();
             return;
         }
         if d.lang_why != "chosen with l" {
             d.choose_lang();
+        }
+        // Kept as it is now, so it's in Drafts whatever happens next.
+        if let Err(e) = d.save() {
+            self.status = format!("not kept as a draft: {e:#}");
         }
         self.mode = Mode::Review {
             draft: Box::new(d),
@@ -782,9 +818,10 @@ impl App {
         if discard {
             match k.code {
                 KeyCode::Char('y') => {
-                    let _ = std::fs::remove_file(&d.file);
-                    let _ = std::fs::remove_dir_all(d.file.with_extension(""));
-                    self.status = "discarded".into();
+                    self.status = match d.forget() {
+                        Ok(()) => "discarded".into(),
+                        Err(e) => format!("{e:#}"),
+                    };
                 }
                 _ => {
                     self.mode = Mode::Review {
@@ -839,6 +876,15 @@ impl App {
             KeyCode::Char(' ') | KeyCode::PageDown => scroll += 10,
             KeyCode::PageUp => scroll = scroll.saturating_sub(10),
             KeyCode::Char('q') | KeyCode::Esc => {
+                self.status = match d.save() {
+                    Ok(()) => "kept in Drafts: e there resumes it".into(),
+                    Err(e) => format!("not kept: {e:#}"),
+                };
+                self.lastmod.clear();
+                self.tick();
+                return;
+            }
+            KeyCode::Char('D') => {
                 self.mode = Mode::Review {
                     draft: Box::new(d),
                     scroll,

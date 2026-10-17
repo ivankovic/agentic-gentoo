@@ -20,6 +20,7 @@ const HELP: &[&str] = &[
     "  s  m                star / unstar;  mark read / unread",
     "  u                   undo the last of these; first, take back a mail in its minute",
     "  c  r  R  f          write: a new mail / reply / reply to all / forward (the message read)",
+    "  e                   resume a draft ✎ (in the list: the thread's; in a thread: the one read)",
     "  ?                   explain what is selected; ? again: this screen",
     "  q  Esc              back; from the list, quit",
     "",
@@ -37,7 +38,9 @@ const HELP: &[&str] = &[
     "",
     "Writing: the editor, then a look at it before it goes",
     "  y                   send: it goes in a minute, until then u takes it back (also after q)",
-    "  e                   edit again;  l  the signature's language;  f  From;  q  discard",
+    "  e                   edit again;  l  the signature's language;  f  From",
+    "  q  D                keep it as a draft (Drafts tab, e resumes) / discard it (y/n)",
+    "  Tab                 in the editor, on To Cc Bcc: complete the address (again: the next)",
     "                      Signatures: ~/.config/mmm/signatures/hr, en, de, used as written",
     "",
     "PDFs and Nextcloud (on the focused PDF, or the thread's only one waiting)",
@@ -108,7 +111,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             Span::raw("y discards · any other key goes back").dark_gray(),
         ]),
         Mode::Review { .. } if app.status.is_empty() => Line::from(
-            "y send (a minute to take it back) · e edit · l language · f From · j k scroll · q discard",
+            "y send (a minute to take it back) · e edit · l language · f From · q keep as draft · D discard",
         )
         .dark_gray(),
         _ if !app.status.is_empty() => Line::from(app.status.clone()).yellow(),
@@ -195,6 +198,8 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
         let unread = t.has("unread");
         let mark = if t.has("flagged") {
             Span::raw("★").yellow()
+        } else if t.has("draft") {
+            Span::raw("✎").green()
         } else if unread {
             Span::raw("●").cyan()
         } else {
@@ -565,6 +570,7 @@ pub fn explain_list(app: &App) -> Mode {
         ("u", "undo"),
         ("r R f", "reply / all / forward"),
         ("c", "write a new mail"),
+        ("e", "resume its draft ✎"),
     ];
     let Some(t) = app.threads.get(app.sel) else {
         return Mode::Explain {

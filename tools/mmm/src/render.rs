@@ -626,6 +626,18 @@ pub fn thread(msgs: &[Message], width: usize, html: bool, pdfs: &Pdfs) -> Doc {
                 focus: None,
             },
         ]);
+        if m.has("draft") {
+            let last = b.doc.lines.last_mut().expect("just pushed");
+            last.push(Seg {
+                text: if crate::compose::draft_of(&m.id).is_some() {
+                    "  ✎ draft · e resumes it".into()
+                } else {
+                    "  ✎ a draft from Gmail".into()
+                },
+                kind: Kind::Filed,
+                focus: None,
+            });
+        }
         let mut meta = format!("to {}", m.to);
         if !m.cc.is_empty() {
             meta += &format!("  cc {}", m.cc);

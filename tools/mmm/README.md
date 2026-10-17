@@ -38,10 +38,23 @@ mmm from:hep date:1y..  # one notmuch query
   (From, To, Cc, Bcc, Subject, and `Attach:` lines, one file each), then your text, then the
   quoted or forwarded mail. Who a reply goes to, from which of your addresses, `Re:` and the
   threading headers are `notmuch reply`'s; a forward carries the mail's attachments along.
+- **Address completion**, in the editor (nvim, vim): `Tab` on a To, Cc or Bcc line offers the
+  people whose name or address has a word starting with what you typed; `Tab` again for the
+  next, `Enter` takes it. People you wrote to come first (a mail sent counts five times one
+  received); no-reply addresses and your own are left out. It's `mmm addresses PREFIX`, over a
+  list kept in `~/.cache/mmm/addresses` and made again (a second) when the mail has changed.
+- **Drafts**: every time you come back from the editor, the draft is kept, as a message in notmuch
+  (folder `~/Mail/mmm-drafts`, tag `draft`) and as JSON in `~/.local/state/mmm/drafts`. It shows
+  in the Drafts tab, ✎ in the list, and a reply's draft inside its conversation. `q` on the
+  review screen leaves it there; `e` resumes it (in the list, the thread's draft; in a thread,
+  the message read); `D` discards it. Sending clears it away. Gmail never sees these: mbsync
+  only syncs the accounts' own folders, and Gmail's drafts (from the web or phone) show as
+  "a draft from Gmail", to finish there.
 - **Review before it goes**: From, To, Cc, Bcc, attachments, the language and why, the text as it
   will go, and what's wrong: no recipient, an address that isn't one, a file that isn't there
   (these stop it), no subject, or "attached" / "u prilogu" / "anbei" with nothing attached.
-  `e` edits again, `l` steps the language, `f` the From address, `q` discards (y/n).
+  `e` edits again, `l` steps the language, `f` the From address, `q` keeps it as a draft, `D`
+  discards it (y/n).
 - **Language and signature**: the signature is `~/.config/mmm/signatures/hr`, `en` or `de`, used as
   written (start it with a `-- ` line for the usual separator); it goes after your text, above
   the quote. The language is the one you wrote in (whatlang, among the three); when the text is
@@ -52,8 +65,7 @@ mmm from:hep date:1y..  # one notmuch query
   `deck-mail send` (msmtpq: queued when offline, sent by the next sync). The footer counts down;
   `u` takes it back to the review screen until then, even after leaving mmm (the outbox file is
   the lock: whichever of `u` and the timer moves it first has it). Then the mail answered is
-  tagged `replied`, or `passed` for a forward. Drafts are in `~/.local/state/mmm/drafts` until
-  sent.
+  tagged `replied`, or `passed` for a forward, and the draft is gone.
 - New mail and tag changes from elsewhere show up within two seconds (notmuch's revision is
   checked between keys).
 
@@ -61,7 +73,7 @@ mmm runs `notmuch` for everything and never writes mail files; Gmail keeps the s
 
 ## Not yet
 
-Address completion, reopening drafts left behind, HTML mail, images.
+Images. HTML mail: not planned; mail goes as plain text.
 
 Installed through Portage from the local overlay's live ebuild `mail-client/mmm`, built from
 this clone (`portage/env/deck-local-source.conf`), like `deck`.

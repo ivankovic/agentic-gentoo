@@ -12,6 +12,8 @@ use anyhow::{Context, Result, bail};
 use chrono::{Local, TimeZone};
 use mail_builder::MessageBuilder;
 use mail_builder::headers::address::Address;
+use mail_builder::headers::text::Text;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -23,14 +25,17 @@ pub const LANGS: &[(&str, &str)] = &[("hr", "Croatian"), ("en", "English"), ("de
 /// How long a mail waits after `y`, for `u` to take it back.
 pub const UNDO_SECS: u64 = 60;
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub enum Kind {
     New,
     Reply,
     Forward,
 }
 
-#[derive(Clone, Debug)]
+/// A draft is kept twice: as JSON beside the editor's file, which `e` resumes from, and as a
+/// message in notmuch (folder mmm-drafts, tag `draft`), so it shows in the Drafts tab and, for
+/// a reply, in its conversation. Gmail never sees it: mbsync only syncs the accounts' folders.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Draft {
     pub id: String,
     pub kind: Kind,
@@ -54,18 +59,32 @@ pub struct Draft {
     /// The mail answered or forwarded: tagged `replied` or `passed` once this one is sent.
     pub original: Option<Original>,
     /// The signature's language: a code from `LANGS`, or none for no signature.
+    #[serde(skip)]
     pub lang: Option<&'static str>,
+    /// `lang` in the JSON.
+    #[serde(default)]
+    lang_code: Option<String>,
     /// Why that language: shown on the review screen.
     pub lang_why: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Original {
     pub id: String,
     pub from: String,
     pub timestamp: i64,
-    /// The language its text is in, as a guess for this one's.
+    /// The language its text is in, as a guess for this one's (not kept with a draft).
+    #[serde(skip)]
     pub lang: Option<&'static str>,
+}
+
+/// The notmuch message id of a draft, and the draft id back from one.
+pub fn draft_message_id(id: &str) -> String {
+    format!("mmm-draft-{id}@mmm")
+}
+
+pub fn draft_of(message_id: &str) -> Option<&str> {
+    message_id.strip_prefix("mmm-draft-")?.strip_suffix("@mmm")
 }
 
 fn home() -> PathBuf {
@@ -261,6 +280,7 @@ impl Draft {
             references: None,
             original: None,
             lang: None,
+            lang_code: None,
             lang_why: String::new(),
         }
     }
@@ -355,6 +375,101 @@ impl Draft {
             t += &format!("\n{lead}\n{}\n", self.quote);
         }
         (t, line)
+    }
+
+    /// Keeps the draft: its JSON, and its message in notmuch, made or brought up to date.
+    pub fn save(&self) -> Result<()> {
+        std::fs::create_dir_all(drafts_dir())?;
+        let mut kept = self.clone();
+        kept.lang_code = self.lang.map(str::to_string);
+        std::fs::write(
+            self.file.with_extension("json"),
+            serde_json::to_vec_pretty(&kept)?,
+        )?;
+        let raw = self.message(true)?;
+        let q = format!("id:{}", notmuch::quote(&draft_message_id(&self.id)));
+        let files = notmuch_files(&q)?;
+        let run = |args: &[&str], input: Option<&[u8]>| -> Result<()> {
+            let mut child = Command::new("notmuch")
+                .args(args)
+                .stdin(if input.is_some() {
+                    Stdio::piped()
+                } else {
+                    Stdio::null()
+                })
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .context("running notmuch")?;
+            if let (Some(i), Some(mut w)) = (input, child.stdin.take()) {
+                use std::io::Write;
+                w.write_all(i)?;
+            }
+            let out = child.wait_with_output()?;
+            if !out.status.success() {
+                bail!(
+                    "notmuch {}: {}",
+                    args[0],
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
+            Ok(())
+        };
+        match files.first() {
+            Some(f) => {
+                std::fs::write(f, &raw)?;
+                run(&["reindex", &q], None)
+            }
+            None => run(
+                &[
+                    "insert",
+                    "--folder=mmm-drafts",
+                    "--create-folder",
+                    "-new",
+                    "-inbox",
+                    "-unread",
+                    "+draft",
+                ],
+                Some(&raw),
+            ),
+        }
+    }
+
+    /// A draft kept with `save`, back: from its JSON, or from the editor's file when that's
+    /// newer (mmm stopped while the editor was open).
+    pub fn load(id: &str) -> Result<Draft> {
+        let json = drafts_dir().join(format!("{id}.json"));
+        let mut d: Draft = serde_json::from_slice(&std::fs::read(&json).context("no such draft")?)
+            .context("reading the draft")?;
+        d.lang = d
+            .lang_code
+            .as_deref()
+            .and_then(|c| LANGS.iter().find(|(x, _)| *x == c).map(|(x, _)| *x));
+        let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+        if let (Some(t), Some(j)) = (modified(&d.file), modified(&json))
+            && t > j
+        {
+            d.read()?;
+        }
+        Ok(d)
+    }
+
+    /// Sent or thrown away: its message out of notmuch's searches (tagged deleted, the file gone;
+    /// the next `notmuch new` forgets it) and its files.
+    pub fn forget(&self) -> Result<()> {
+        let q = format!("id:{}", notmuch::quote(&draft_message_id(&self.id)));
+        let files = notmuch_files(&q)?;
+        for f in &files {
+            let _ = std::fs::remove_file(f);
+        }
+        if !files.is_empty() {
+            notmuch::tag(&[draft_message_id(&self.id)], "+deleted")?;
+        }
+        for p in [self.file.clone(), self.file.with_extension("json")] {
+            let _ = std::fs::remove_file(p);
+        }
+        let _ = std::fs::remove_dir_all(self.file.with_extension(""));
+        Ok(())
     }
 
     pub fn write(&self) -> Result<usize> {
@@ -540,6 +655,40 @@ impl Draft {
 
     /// The mail as it goes out, with LF line ends for msmtp.
     pub fn build(&self) -> Result<Vec<u8>> {
+        self.message(false)
+    }
+
+    /// The mail, or with `draft` its draft: its own message id, no signature or attachments,
+    /// and the headers as typed, half-written addresses too.
+    fn message(&self, draft: bool) -> Result<Vec<u8>> {
+        if draft {
+            let mut b = MessageBuilder::new()
+                .header("From", Text::new(self.from.clone()))
+                .subject(self.subject.clone())
+                .date(Local::now().timestamp())
+                .message_id(draft_message_id(&self.id))
+                .header("User-Agent", Text::new("mmm"));
+            for (k, v) in [("To", &self.to), ("Cc", &self.cc), ("Bcc", &self.bcc)] {
+                if !v.trim().is_empty() {
+                    b = b.header(k, Text::new(v.clone()));
+                }
+            }
+            if let Some(r) = &self.in_reply_to {
+                b = b.in_reply_to(message_ids(r));
+            }
+            if let Some(r) = &self.references {
+                b = b.references(message_ids(r));
+            }
+            let mut text = self.body.trim_end().to_string();
+            for a in &self.attach {
+                text += &format!("\n\n📎 {}", tilde(a));
+            }
+            if let Some(lead) = &self.lead {
+                text += &format!("\n\n{lead}\n{}", self.quote.trim_end());
+            }
+            let raw = b.text_body(text + "\n").write_to_vec()?;
+            return Ok(String::from_utf8_lossy(&raw).replace("\r\n", "\n").into_bytes());
+        }
         let from = addresses(&self.from)?.into_iter().next().context("no From")?;
         let domain = from.1.rsplit('@').next().unwrap_or("localhost").to_string();
         let list = |v: &str| -> Result<Address<'static>> {
@@ -562,7 +711,7 @@ impl Draft {
             .subject(self.subject.clone())
             .date(Local::now().timestamp())
             .message_id(format!("{}@{domain}", self.id))
-            .header("User-Agent", mail_builder::headers::text::Text::new("mmm"))
+            .header("User-Agent", Text::new("mmm"))
             .text_body(self.final_text());
         if !self.to.trim().is_empty() {
             b = b.to(list(&self.to)?);
@@ -571,17 +720,11 @@ impl Draft {
             b = b.cc(list(&self.cc)?);
         }
         // Bcc goes as a recipient only, never as a header.
-        let ids = |v: &str| -> Vec<String> {
-            v.split_whitespace()
-                .map(|i| i.trim_matches(['<', '>']).to_string())
-                .filter(|i| !i.is_empty())
-                .collect()
-        };
         if let Some(r) = &self.in_reply_to {
-            b = b.in_reply_to(ids(r));
+            b = b.in_reply_to(message_ids(r));
         }
         if let Some(r) = &self.references {
-            b = b.references(ids(r));
+            b = b.references(message_ids(r));
         }
         for a in &self.attach {
             let name = a
@@ -594,6 +737,26 @@ impl Draft {
         let raw = b.write_to_vec()?;
         Ok(String::from_utf8_lossy(&raw).replace("\r\n", "\n").into_bytes())
     }
+}
+
+fn message_ids(v: &str) -> Vec<String> {
+    v.split_whitespace()
+        .map(|i| i.trim_matches(['<', '>']).to_string())
+        .filter(|i| !i.is_empty())
+        .collect()
+}
+
+fn notmuch_files(query: &str) -> Result<Vec<PathBuf>> {
+    let out = Command::new("notmuch")
+        .args(["search", "--output=files", "--exclude=false", query])
+        .stdin(Stdio::null())
+        .output()
+        .context("running notmuch")?;
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(PathBuf::from)
+        .collect())
 }
 
 fn content_type(name: &str) -> &'static str {
@@ -707,14 +870,17 @@ pub struct Pending {
 }
 
 /// The script the timer runs: takes the mail out of the outbox (so a take-back that got there
-/// first wins), hands it to `deck-mail send`, tags the mail it answers, and clears away the
-/// draft and the forwarded mail's attachments.
-/// (No `${…}` in it: systemd expands those in a unit's command line.)
+/// first wins), hands it to `deck-mail send`, tags the mail it answers, and clears the draft
+/// away: its files (the editor's, its JSON, the forwarded mail's attachments) and its message
+/// in notmuch, as `Draft::forget` does. (No `${…}` in it: systemd expands those in a unit's
+/// command line.)
 const SEND: &str = r#"set -u
-f="$1"; draft="$2"; query="$3"; tag="$4"; send="$5"; log="$6"; files="$7"; shift 7
+f="$1"; base="$2"; query="$3"; tag="$4"; send="$5"; log="$6"; draft="$7"; shift 7
 mv -- "$f" "$f.sending" 2>/dev/null || exit 0
 if $send "$@" < "$f.sending"; then
-    rm -rf -- "$f.sending" "$draft" "$files"
+    rm -rf -- "$f.sending" "$base.txt" "$base.json" "$base"
+    notmuch search --output=files --exclude=false "$draft" | while IFS= read -r m; do rm -f -- "$m"; done
+    notmuch tag +deleted -- "$draft"
     if [ -n "$query" ]; then notmuch tag "+$tag" -- "$query"; fi
     printf '%s\tsent\t%s\n' "$(date -Is)" "$(basename "$f")" >> "$log"
 else
@@ -734,8 +900,8 @@ pub fn queue(d: &Draft) -> Result<Pending> {
     std::fs::create_dir_all(&outbox)?;
     let eml = outbox.join(format!("{}.eml", d.id));
     std::fs::write(&eml, raw)?;
-    // The draft file stays until it's sent, so a mail taken back or lost is still there.
-    d.write()?;
+    // The draft stays until it's sent, so a mail taken back or lost is still there.
+    d.save()?;
     let unit = format!("mmm-send-{}", d.id);
     let (query, tag) = match (&d.original, d.kind) {
         (Some(o), Kind::Forward) => (format!("id:{}", notmuch::quote(&o.id)), "passed"),
@@ -762,10 +928,10 @@ pub fn queue(d: &Draft) -> Result<Pending> {
         .args(&env)
         .args(["--", "/bin/sh", "-c", SEND, "mmm-send"])
         .arg(&eml)
-        .arg(&d.file)
+        .arg(d.file.with_extension(""))
         .args([&query, tag, &send])
         .arg(state_dir().join("sent.log"))
-        .arg(d.file.with_extension(""))
+        .arg(format!("id:{}", notmuch::quote(&draft_message_id(&d.id))))
         .args(&recipients)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -907,6 +1073,38 @@ mod tests {
         assert!(warnings.iter().any(|w| w.contains("no subject")));
         d.to = "-oProxyCommand@x".into();
         assert!(d.check().0.iter().any(|e| e.contains("not an address")));
+    }
+
+    #[test]
+    fn a_draft_is_its_own_message() {
+        let mut d = draft(Kind::Reply);
+        d.to = "Ana Horvat <ana@exam".into(); // half typed
+        d.subject = "Re: Ručak".into();
+        d.body = "Može.".into();
+        d.lead = Some("On …, Ana wrote:".into());
+        d.quote = "> Ručak?".into();
+        d.in_reply_to = Some("<abc@x>".into());
+        d.lang = Some("hr");
+        let raw = String::from_utf8(d.message(true).unwrap()).unwrap();
+        assert!(
+            raw.contains(&format!("Message-ID: <{}>", draft_message_id(&d.id))),
+            "{raw}"
+        );
+        assert!(raw.contains("In-Reply-To: <abc@x>"), "{raw}");
+        assert!(raw.contains("Ana Horvat <ana@exam"), "{raw}");
+        assert_eq!(draft_of(&draft_message_id(&d.id)), Some(d.id.as_str()));
+        assert_eq!(draft_of("abc@x"), None);
+        // Kept as JSON and back, the language with it.
+        let mut kept = d.clone();
+        kept.lang_code = d.lang.map(str::to_string);
+        let mut back: Draft = serde_json::from_slice(&serde_json::to_vec(&kept).unwrap()).unwrap();
+        assert_eq!(back.lang, None);
+        back.lang = back
+            .lang_code
+            .as_deref()
+            .and_then(|c| LANGS.iter().find(|(x, _)| *x == c).map(|(x, _)| *x));
+        assert_eq!(back.lang, Some("hr"));
+        assert_eq!((back.body, back.quote, back.kind), (d.body, d.quote, Kind::Reply));
     }
 
     #[test]
