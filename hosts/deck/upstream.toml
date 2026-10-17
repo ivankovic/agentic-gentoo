@@ -20,3 +20,8 @@ upstream = "https://github.com/thomas-mauran/chess-tui"
 at = "2026-10-17T13:35:29+02:00"
 state = "sent"
 url = "https://github.com/thomas-mauran/chess-tui/pull/358"
+
+[[patch.event]]
+at = "2026-10-17T22:35:25+02:00"
+state = "accepted"
+url = "https://github.com/thomas-mauran/chess-tui/commit/58b3f5e7e8754de009df76b5a68b67d6eaaa6607"
