@@ -82,6 +82,13 @@ text are the user's to write, and nothing reaches upstream until `deck push`.
    template. Run it again once the pull request exists: it prints its URL and marks the patch
    `sent` with it, if it was untracked or `unsent`.
 
+In the TUI, `S` on a patch does whichever step comes next, from what the clone shows: stage
+(and open a terminal there), commit (a terminal opens, the commit is yours), fork, push, pull
+request, then mark it sent. Fork and push ask y/n first. Commits made after the pull request,
+such as changes upstream asked for, go through `S` again as a push. `?` on a patch shows the
+steps done and the next one. A patch that came from upstream or is no longer going there
+(`backport`, `accepted`, `released`, `rejected`, `withdrawn`, `dropped`) has nothing to send.
+
 The patch file in the host's directory stays as it is: if upstream asks for changes, they are
 made in the clone, and the patch here is refreshed from it by hand.
 
@@ -98,7 +105,9 @@ made in the clone, and the patch here is refreshed from it by hand.
 | `p` | usage over the last 1, 7 or 30 days |
 | `m` | change a patch's state: pick it, then URL and note (both optional) |
 | `U` | set the patch's upstream project |
-| `S` | stage the patch for upstream, as `deck stage`, and open a terminal in the clone |
+| `S` | the patch's next step upstream (below); fork and push ask y/n first |
+| `o` | a terminal in the patch's clone in `~/3p` |
+| `?` | explain the selected row and the keys that work on it; `?` again: every key |
 | `r` | reload |
 | `q` | quit |
 

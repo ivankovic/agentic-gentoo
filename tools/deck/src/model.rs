@@ -125,20 +125,32 @@ impl Model {
         }
     }
 
+    /// The upstream project the patch is meant for, or an error saying how to set it.
+    pub fn upstream_of(&self, id: &str) -> Result<&str> {
+        self.known(id)?;
+        self.rows
+            .iter()
+            .find(|r| r.id == id)
+            .and_then(|r| self.tracked(r))
+            .map(|t| t.upstream.as_str())
+            .filter(|u| !u.is_empty())
+            .with_context(|| format!("{id} has no upstream project: U, or deck upstream {id} <URL>"))
+    }
+
     /// Stages the patch's file on a branch of its upstream project's clone (`send::stage`).
     pub fn stage(&self, id: &str) -> Result<send::Staged> {
-        self.known(id)?;
+        let upstream = self.upstream_of(id)?;
         let row = self.rows.iter().find(|r| r.id == id).context("no such patch")?;
         let file = row
             .file
             .map(|i| &self.files[i])
             .with_context(|| format!("{id}: its file is gone"))?;
-        let upstream = self
-            .tracked(row)
-            .map(|t| t.upstream.as_str())
-            .filter(|u| !u.is_empty())
-            .with_context(|| format!("{id} has no upstream project: deck upstream {id} <URL>"))?;
         send::stage(upstream, id, &self.host_dir.join(&file.rel))
+    }
+
+    /// How far the patch has come on its way upstream (`send::progress`).
+    pub fn progress(&self, id: &str, look_up_pr: bool) -> Result<send::Progress> {
+        send::progress(self.upstream_of(id)?, id, look_up_pr)
     }
 
     /// The patch that `stage` puts on `branch` in the clone at `dir`, if one does.

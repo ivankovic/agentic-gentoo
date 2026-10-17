@@ -50,6 +50,15 @@ impl State {
         }
     }
 
+    /// Whether there is anything left to send: not when it came from upstream, is upstream
+    /// already, or is no longer going there.
+    pub fn sendable(self) -> bool {
+        matches!(
+            self,
+            State::Unsent | State::Sent | State::InReview | State::ChangesRequested
+        )
+    }
+
     pub fn help(self) -> &'static str {
         match self {
             State::Unsent => "ours, not offered upstream yet",

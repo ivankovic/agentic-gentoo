@@ -2,6 +2,7 @@
 
 use crate::model::{Model, date};
 use crate::patches::Kind;
+use crate::send::{self, Step};
 use crate::track::State;
 use crate::usage::{self, Usage, pct};
 use crate::vdb::{Filter, Origin};
@@ -15,7 +16,7 @@ use ratatui::widgets::{
 };
 use ratatui::{DefaultTerminal, Frame};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, PartialEq)]
 enum View {
@@ -92,6 +93,12 @@ enum Then {
     Upstream,
 }
 
+/// A step towards upstream that acts on GitHub, so it waits for a yes.
+enum Action {
+    Fork(PathBuf),
+    Push(PathBuf),
+}
+
 enum Mode {
     Normal,
     Search,
@@ -101,7 +108,47 @@ enum Mode {
         buf: String,
         then: Then,
     },
+    Confirm {
+        lines: Vec<String>,
+        action: Action,
+    },
+    /// `?`: what the selected row is, and the keys that work on it.
+    Explain {
+        title: String,
+        body: Vec<Line<'static>>,
+        keys: Vec<(&'static str, &'static str)>,
+        scroll: u16,
+    },
+    /// `?` twice: every key.
+    Help,
 }
+
+/// Every key, for the `?` `?` screen. A section starts at column 0, a key sits in the columns
+/// before its description.
+const HELP: &[&str] = &[
+    "Everywhere",
+    "  1 2 3, Tab          packages / patches / usage (Shift+Tab goes back)",
+    "  j k, arrows         move;  d u, PgDn PgUp  a page;  g G, Home End  top, bottom",
+    "  /  Esc              search by name / clear it",
+    "  ?                   explain the selected row; ? again: this screen",
+    "  r  q                reload / quit",
+    "",
+    "Packages",
+    "  f F                 next / previous filter (here, compiled, patched, overlay, …)",
+    "  s  p                sort by name, CPU, active time, peak memory / usage period: 1, 7, 30 days",
+    "  Enter               the package's patches",
+    "",
+    "Patches",
+    "  m, Enter            record a change of state: pick it, then URL and note (both optional)",
+    "  U                   set the upstream project the patch is meant for",
+    "  S                   the next step upstream: stage in ~/3p, commit (by hand), fork, push, PR;",
+    "                      fork and push ask first, nothing is public before push",
+    "  o                   a terminal in the patch's clone in ~/3p",
+    "",
+    "Usage",
+    "  s  p                sort / period, as on Packages",
+    "  Enter               the package, on Packages",
+];
 
 struct App {
     m: Model,
@@ -363,6 +410,38 @@ impl App {
                 }
                 _ => self.mode = Mode::Pick(list),
             },
+            Mode::Confirm { lines, action } => match k.code {
+                KeyCode::Char('y' | 'Y') => self.act(action),
+                KeyCode::Char('n' | 'N' | 'q') | KeyCode::Esc => self.status = "cancelled".into(),
+                _ => self.mode = Mode::Confirm { lines, action },
+            },
+            Mode::Explain {
+                title,
+                body,
+                keys,
+                mut scroll,
+            } => match k.code {
+                KeyCode::Char('?') => self.mode = Mode::Help,
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {}
+                code => {
+                    match code {
+                        KeyCode::Down | KeyCode::Char('j') => scroll = scroll.saturating_add(1),
+                        KeyCode::Up | KeyCode::Char('k') => scroll = scroll.saturating_sub(1),
+                        _ => {}
+                    }
+                    self.mode = Mode::Explain {
+                        title,
+                        body,
+                        keys,
+                        scroll,
+                    };
+                }
+            },
+            Mode::Help => {
+                if !matches!(k.code, KeyCode::Esc | KeyCode::Char('q' | '?') | KeyCode::Enter) {
+                    self.mode = Mode::Help;
+                }
+            }
             Mode::Input {
                 prompt,
                 mut buf,
@@ -409,6 +488,267 @@ impl App {
             Err(e) => format!("not saved: {e:#}"),
         };
         self.refilter();
+    }
+
+    /// `S`: whatever comes next on the patch's way upstream. Local steps happen at once;
+    /// fork and push, which act on GitHub, ask first.
+    fn next_step(&mut self) {
+        let Some(r) = self.selected_patch() else { return };
+        let id = self.m.rows[r].id.clone();
+        if let Some(s) = self.m.last_event(&self.m.rows[r]).map(|e| e.state)
+            && !s.sendable()
+        {
+            self.status = format!("{}: {}; nothing to send", s.label(), s.help());
+            return;
+        }
+        let p = match self.m.progress(&id, true) {
+            Ok(p) => p,
+            Err(e) => {
+                self.status = format!("{e:#}");
+                return;
+            }
+        };
+        let home = |d: &Path| tilde(d);
+        let terminal = |what: String| match send::terminal(&p.dir) {
+            Ok(()) => format!("{what}; a terminal is open in {}", home(&p.dir)),
+            Err(e) => format!("{what}; no terminal: {e:#}"),
+        };
+        self.status = match p.next() {
+            Step::Stage => match self.m.stage(&id) {
+                Ok(s) => terminal(format!("staged on {}, not committed", s.branch)),
+                Err(e) => format!("not staged: {e:#}"),
+            },
+            Step::SwitchBranch => terminal(format!("the clone is on another branch: git switch {}", p.branch)),
+            Step::Commit if p.commits == 0 => terminal("review (git diff --cached) and git commit, with your message".into()),
+            Step::Commit => terminal("uncommitted changes on the branch: commit or stash them".into()),
+            Step::Fork => {
+                let upstream = self.m.upstream_of(&id).unwrap_or_default().to_string();
+                self.mode = Mode::Confirm {
+                    lines: vec![
+                        format!("Create your fork of {upstream} on GitHub?"),
+                        String::new(),
+                        "gh repo fork, added to the clone as the remote fork;".into(),
+                        "origin stays upstream. Nothing is pushed yet.".into(),
+                    ],
+                    action: Action::Fork(p.dir.clone()),
+                };
+                return;
+            }
+            Step::Push => {
+                self.mode = Mode::Confirm {
+                    lines: vec![
+                        format!(
+                            "Push {} ({} commit{}) to your fork {}?",
+                            p.branch,
+                            p.commits,
+                            if p.commits == 1 { "" } else { "s" },
+                            p.fork.clone().unwrap_or_default()
+                        ),
+                        String::new(),
+                        "This makes it public. The pull request is the next step.".into(),
+                    ],
+                    action: Action::Push(p.dir.clone()),
+                };
+                return;
+            }
+            Step::Pr => match send::pr(&p.dir, false) {
+                Ok(_) => "the browser is open on the new pull request; S again once it is created marks the patch sent".into(),
+                Err(e) => format!("{e:#}"),
+            },
+            Step::Follow(url) => match self.m.last_event(&self.m.rows[r]).map(|e| e.state) {
+                None | Some(State::Unsent) => match self.m.record(&id, State::Sent, url.clone(), String::new()) {
+                    Ok(()) => format!("marked sent · {url}"),
+                    Err(e) => format!("not saved: {e:#}"),
+                },
+                Some(s) => format!("{url} · {}: m records what upstream says", s.label()),
+            },
+        };
+        self.refilter();
+    }
+
+    fn act(&mut self, action: Action) {
+        self.status = match action {
+            Action::Fork(dir) => match send::fork(&dir, false) {
+                Ok(fork) => format!("your fork is {fork}, the remote fork · S pushes"),
+                Err(e) => format!("no fork: {e:#}"),
+            },
+            Action::Push(dir) => match send::push(&dir, false) {
+                Ok(()) => "pushed · S opens the pull request in the browser".into(),
+                Err(e) => format!("not pushed: {e:#} (deck push in the clone shows it all)"),
+            },
+        };
+    }
+
+    /// `?`: what the selected row is, and the keys that work on it.
+    fn explain(&self) -> Mode {
+        let (title, body, keys) = match self.view {
+            View::Packages => self.explain_package(),
+            View::Patches => self.explain_patch(),
+            View::Usage => self.explain_usage(),
+        };
+        Mode::Explain {
+            title,
+            body,
+            keys,
+            scroll: 0,
+        }
+    }
+
+    fn explain_package(&self) -> (String, Vec<Line<'static>>, Vec<(&'static str, &'static str)>) {
+        let keys = vec![
+            ("Enter", "its patches"),
+            ("f F", "filter"),
+            ("s", "sort"),
+            ("p", "usage period"),
+            ("/", "search"),
+        ];
+        let Some(i) = self.selected_pkg() else {
+            return ("Packages".into(), vec![Line::from("No package selected.")], keys);
+        };
+        let p = &self.m.pkgs[i];
+        let mut body = vec![
+            Line::from(format!("{}: {}.", p.origin.label(), p.origin.explain())),
+            Line::from(format!(
+                "From the {} repository{}{}.",
+                p.repo,
+                if p.world {
+                    ", in world"
+                } else {
+                    ", pulled in as a dependency"
+                },
+                if p.eco.is_empty() {
+                    String::new()
+                } else {
+                    format!(", vendoring {} crates or modules", p.eco)
+                }
+            )),
+        ];
+        match self.m.patch_counts[i] {
+            0 => {}
+            n => body.push(Line::from(format!(
+                "{n} local patch{} applies to it: Enter lists {}.",
+                if n == 1 { "" } else { "es" },
+                if n == 1 { "it" } else { "them" }
+            ))),
+        }
+        (p.atom(), body, keys)
+    }
+
+    fn explain_patch(&self) -> (String, Vec<Line<'static>>, Vec<(&'static str, &'static str)>) {
+        let keys = vec![
+            ("S", "next step upstream"),
+            ("o", "terminal in the clone"),
+            ("m", "record a state"),
+            ("U", "upstream project"),
+        ];
+        let Some(r) = self.selected_patch() else {
+            return ("Patches".into(), vec![Line::from("No patch selected.")], keys);
+        };
+        let row = &self.m.rows[r];
+        let id = row.id.clone();
+        let mut body = vec![];
+        let state = self.m.last_event(row).map(|e| e.state);
+        body.push(Line::from(vec![
+            Span::raw("State: ").bold(),
+            Span::styled(
+                self.m.state_label(row),
+                Style::new().fg(state_color(self.m.state_label(row))),
+            ),
+            Span::raw(match state {
+                Some(s) => format!(", {}.", s.help()),
+                None => ", nothing recorded yet.".into(),
+            }),
+        ]));
+        if let Some(s) = state
+            && !s.sendable()
+        {
+            body.push(Line::from(""));
+            body.push(Line::from(
+                "Nothing to send upstream. m records a change of state.",
+            ));
+            return (id, body, keys);
+        }
+        let mut p = match self.m.progress(&id, false) {
+            Ok(p) => p,
+            Err(e) => {
+                body.push(Line::from(format!("{e:#}")).yellow());
+                return (id, body, keys);
+            }
+        };
+        body.push(Line::from(""));
+        body.push(Line::from("On its way upstream").bold());
+        let check = |done: bool, text: String| {
+            Line::from(vec![
+                if done {
+                    Span::raw("  ✓ ").green()
+                } else {
+                    Span::raw("  · ").dark_gray()
+                },
+                Span::raw(text),
+            ])
+        };
+        body.push(check(p.cloned, format!("upstream cloned to {}", tilde(&p.dir))));
+        body.push(check(
+            p.branched,
+            format!("on the branch {}, from upstream's default branch", p.branch),
+        ));
+        body.push(check(
+            p.commits > 0 && !p.uncommitted,
+            match (p.commits, p.uncommitted) {
+                (0, _) => "committed, with your message".into(),
+                (n, false) => format!("committed: {n} commit{}", if n == 1 { "" } else { "s" }),
+                (n, true) => format!("{n} committed, and uncommitted changes besides"),
+            },
+        ));
+        body.push(check(
+            p.fork.is_some(),
+            match &p.fork {
+                Some(f) => format!("your fork: {f}"),
+                None => "your fork on GitHub".into(),
+            },
+        ));
+        body.push(check(p.pushed, "pushed to the fork".into()));
+        let pr = self
+            .m
+            .last_event(row)
+            .filter(|e| e.state != State::Unsent && e.url.contains("/pull/"))
+            .map(|e| e.url.clone());
+        body.push(check(
+            pr.is_some(),
+            pr.clone().unwrap_or_else(|| "pull request".into()),
+        ));
+        body.push(Line::from(""));
+        p.pr = pr;
+        let next = match p.next() {
+            Step::Stage => "S clones upstream if needed and stages the patch on the branch, uncommitted; a terminal opens there.".into(),
+            Step::SwitchBranch => format!("the clone is on another branch; S opens a terminal there, git switch {}.", p.branch),
+            Step::Commit => "commit it yourself in the clone, with your message; S or o opens a terminal there.".into(),
+            Step::Fork => "S creates your fork on GitHub, after a yes.".into(),
+            Step::Push => "S pushes the branch to your fork, after a yes; that makes it public.".into(),
+            Step::Pr => "S opens the browser on the pull request, for your text; S again once it exists marks the patch sent.".into(),
+            Step::Follow(_) => "follow the pull request; m records what upstream says. New commits: S pushes them.".into(),
+        };
+        body.push(Line::from(vec![Span::raw("Next: ").bold(), Span::raw(next)]));
+        (id, body, keys)
+    }
+
+    fn explain_usage(&self) -> (String, Vec<Line<'static>>, Vec<(&'static str, &'static str)>) {
+        let keys = vec![("Enter", "the package"), ("s", "sort"), ("p", "period")];
+        let body = vec![
+            Line::from(
+                "CPU is the time its processes ran; Share, of all CPU time; Code, the share of CPU profile samples in its own code, whoever ran it.",
+            ),
+            Line::from(
+                "Active is how long a window of it had the focus. Peak is the highest RSS, PSS the average proportional memory, both MiB. >1 core is the time it used more than one core; Spikes, the bursts of CPU.",
+            ),
+            Line::from(
+                "A row is an installed package (category/package), or a label for what no package owns: user:…, local:…, tmp:, container:…, kernel:…",
+            ),
+        ];
+        let title = self
+            .selected_usage()
+            .map_or("Usage".to_string(), |r| r.label.clone());
+        (title, body, keys)
     }
 
     fn key_normal(&mut self, k: KeyEvent) {
@@ -497,25 +837,18 @@ impl App {
                     self.mode = Mode::Pick(ListState::default().with_selected(Some(at)));
                 }
             }
-            KeyCode::Char('S') if self.view == View::Patches => {
+            KeyCode::Char('?') => self.mode = self.explain(),
+            KeyCode::Char('S') if self.view == View::Patches => self.next_step(),
+            KeyCode::Char('o') if self.view == View::Patches => {
                 if let Some(r) = self.selected_patch() {
                     let id = self.m.rows[r].id.clone();
-                    let res = self
-                        .m
-                        .stage(&id)
-                        .and_then(|s| crate::send::terminal(&s.dir).map(|()| s));
-                    self.status = match res {
-                        Ok(s) if s.fresh => format!(
-                            "staged on {} in {}; a terminal is open there",
-                            s.branch,
-                            s.dir.display()
-                        ),
-                        Ok(s) => format!(
-                            "{} in {} was there already; a terminal is open there",
-                            s.branch,
-                            s.dir.display()
-                        ),
-                        Err(e) => format!("not staged: {e:#}"),
+                    self.status = match self.m.progress(&id, false) {
+                        Ok(p) if p.cloned => match send::terminal(&p.dir) {
+                            Ok(()) => format!("a terminal is open in {}", tilde(&p.dir)),
+                            Err(e) => format!("{e:#}"),
+                        },
+                        Ok(_) => "no clone yet: S stages the patch, which clones upstream".into(),
+                        Err(e) => format!("{e:#}"),
                     };
                 }
             }
@@ -570,11 +903,11 @@ impl App {
             _ if !self.status.is_empty() => Line::from(self.status.clone()).yellow(),
             _ => Line::from(match self.view {
                 View::Packages => {
-                    "q quit · Tab view · j/k move · / search · f/F filter · s sort · p period · Enter patches · r reload"
+                    "? explain · Enter patches · f/F filter · s sort · p period · / search · q quit"
                 }
-                View::Usage => "q quit · Tab view · j/k move · / search · s sort · p period · Enter package · r reload",
+                View::Usage => "? explain · Enter package · s sort · p period · / search · q quit",
                 View::Patches => {
-                    "q quit · Tab view · j/k move · / search · m change state · U upstream · S stage upstream · r reload"
+                    "? explain · S next step upstream · o terminal · m state · U upstream · / search · q quit"
                 }
             })
             .dark_gray(),
@@ -603,6 +936,49 @@ impl App {
                         .highlight_style(Style::new().reversed()),
                     area,
                     list,
+                );
+            }
+            Mode::Confirm { lines, .. } => {
+                let area = centered(f.area(), 72, lines.len() as u16 + 4);
+                let mut text: Vec<Line> = lines.iter().map(|l| Line::from(l.clone())).collect();
+                text[0] = text[0].clone().bold();
+                text.push(Line::from(""));
+                text.push(Line::from(vec![
+                    Span::raw("y").green().bold(),
+                    Span::raw(" yes   "),
+                    Span::raw("n").red().bold(),
+                    Span::raw(" / Esc no"),
+                ]));
+                f.render_widget(Clear, area);
+                f.render_widget(
+                    Paragraph::new(text)
+                        .wrap(Wrap { trim: false })
+                        .block(Block::bordered().title(" Upstream ")),
+                    area,
+                );
+            }
+            Mode::Explain {
+                title,
+                body,
+                keys,
+                scroll,
+            } => draw_explain(f, title, body, keys, *scroll),
+            Mode::Help => {
+                let lines: Vec<Line> = HELP
+                    .iter()
+                    .map(|l| {
+                        if l.starts_with(' ') || l.is_empty() {
+                            Line::from(*l)
+                        } else {
+                            Line::from(*l).bold()
+                        }
+                    })
+                    .collect();
+                let area = centered(f.area(), 100, HELP.len() as u16 + 2);
+                f.render_widget(Clear, area);
+                f.render_widget(
+                    Paragraph::new(lines).block(Block::bordered().title(" Keys · Esc closes ")),
+                    area,
                 );
             }
             Mode::Input { prompt, buf, .. } => {
@@ -999,4 +1375,61 @@ impl App {
             detail,
         );
     }
+}
+
+/// `~/…` for a path in the home directory.
+fn tilde(p: &Path) -> String {
+    match std::env::var_os("HOME").map(PathBuf::from) {
+        Some(h) if p.starts_with(&h) => format!("~/{}", p.strip_prefix(&h).unwrap_or(p).display()),
+        _ => p.display().to_string(),
+    }
+}
+
+/// The `?` box: the explanation on the left, the keys that work on the row on the right, and
+/// how to get out or on to every key at the bottom.
+fn draw_explain(
+    f: &mut Frame,
+    title: &str,
+    body: &[Line<'static>],
+    keys: &[(&'static str, &'static str)],
+    scroll: u16,
+) {
+    let width = f.area().width.saturating_sub(4).min(110);
+    // Tall enough for the text as it wraps beside the keys, and no taller.
+    let text_width = width.saturating_sub(2 + 28 + 2).max(1) as usize;
+    let wrapped: usize = body.iter().map(|l| l.width().max(1).div_ceil(text_width)).sum();
+    let height = (wrapped.max(keys.len() + 1) as u16 + 3).min(f.area().height.saturating_sub(2));
+    let area = centered(f.area(), width, height);
+    f.render_widget(Clear, area);
+    let block = Block::bordered().title(format!(" {title} "));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let [main, foot] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
+    let [text, side] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(28)]).areas(main);
+    f.render_widget(
+        Paragraph::new(body.to_vec())
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        text.inner(ratatui::layout::Margin::new(1, 0)),
+    );
+    let mut lines = vec![Line::from("Keys here").bold()];
+    for (k, what) in keys {
+        lines.push(Line::from(vec![
+            Span::raw(format!("{k:<6}")).bold(),
+            Span::raw(*what),
+        ]));
+    }
+    f.render_widget(Paragraph::new(lines), side);
+    f.render_widget(
+        Line::from(vec![
+            Span::raw(" j/k").bold(),
+            Span::raw(" scroll · "),
+            Span::raw("?").bold(),
+            Span::raw(" every key · "),
+            Span::raw("Esc").bold(),
+            Span::raw(" close"),
+        ])
+        .dark_gray(),
+        foot,
+    );
 }

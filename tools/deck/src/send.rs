@@ -51,15 +51,25 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// Runs a command in `dir` on the user's terminal, for the steps that may ask something.
-fn interactive(dir: &Path, cmd: &str, args: &[&str]) -> Result<()> {
-    let status = Command::new(cmd)
-        .args(args)
-        .current_dir(dir)
-        .status()
-        .with_context(|| format!("running {cmd}"))?;
-    if !status.success() {
-        bail!("{cmd} {} failed", args.join(" "));
+/// Runs a command in `dir`: on the user's terminal with `tty`, so it can ask something;
+/// otherwise with nothing to read and its output kept, as the TUI runs it.
+fn run(dir: &Path, tty: bool, cmd: &str, args: &[&str]) -> Result<()> {
+    let mut c = Command::new(cmd);
+    c.args(args).current_dir(dir);
+    let (ok, err) = if tty {
+        let st = c.status().with_context(|| format!("running {cmd}"))?;
+        (st.success(), String::new())
+    } else {
+        let out = c
+            .stdin(Stdio::null())
+            .output()
+            .with_context(|| format!("running {cmd}"))?;
+        let err = String::from_utf8_lossy(&out.stderr);
+        let last = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
+        (out.status.success(), format!(": {}", last.trim()))
+    };
+    if !ok {
+        bail!("{cmd} {} failed{err}", args.join(" "));
     }
     Ok(())
 }
@@ -142,7 +152,10 @@ pub fn stage(upstream: &str, id: &str, patch: &Path) -> Result<Staged> {
 
 /// Opens a terminal in `dir` in its own scope, as Mod+T does, without waiting for it.
 pub fn terminal(dir: &Path) -> Result<()> {
-    let unit = format!("--unit=app-foot-deck-{}.scope", std::process::id());
+    // A unit name may be used once at a time: the process id and a count keep them apart.
+    static OPENED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = OPENED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let unit = format!("--unit=app-foot-deck-{}-{n}.scope", std::process::id());
     let mut child = Command::new("systemd-run")
         .args(["--user", "--scope", "--slice=app.slice", "--collect", "--quiet"])
         .arg(&unit)
@@ -180,16 +193,22 @@ fn current_branch(dir: &Path) -> Result<String> {
 }
 
 /// Makes your fork on GitHub and adds it as the remote `fork`; `origin` stays upstream.
-pub fn fork(dir: &Path) -> Result<()> {
+/// Returns the fork, `owner/repo`.
+pub fn fork(dir: &Path, tty: bool) -> Result<String> {
     if let Ok(repo) = remote_repo(dir, "fork") {
-        println!("deck: the fork is there already: remote fork, {repo}");
-        return Ok(());
+        return Ok(repo);
     }
-    interactive(dir, "gh", &["repo", "fork", "--remote", "--remote-name", "fork"])
+    run(
+        dir,
+        tty,
+        "gh",
+        &["repo", "fork", "--remote", "--remote-name", "fork"],
+    )?;
+    remote_repo(dir, "fork")
 }
 
 /// Pushes the current branch to your fork, once it has a commit of its own.
-pub fn push(dir: &Path) -> Result<()> {
+pub fn push(dir: &Path, tty: bool) -> Result<()> {
     let branch = current_branch(dir)?;
     let base = default_base(dir)?;
     if git(dir, &["rev-list", "--count", &format!("{base}..HEAD")])? == "0" {
@@ -198,10 +217,15 @@ pub fn push(dir: &Path) -> Result<()> {
     if remote_repo(dir, "fork").is_err() {
         bail!("no remote fork yet: run deck fork first");
     }
-    if !git(dir, &["status", "--porcelain", "--untracked-files=no"])?.is_empty() {
+    if tty && !git(dir, &["status", "--porcelain", "--untracked-files=no"])?.is_empty() {
         println!("deck: note: uncommitted changes stay here, only commits are pushed");
     }
-    interactive(dir, "git", &["push", "-u", "fork", &format!("HEAD:{branch}")])
+    run(
+        dir,
+        tty,
+        "git",
+        &["push", "-u", "fork", &format!("HEAD:{branch}")],
+    )
 }
 
 /// What `pr` found: the pull request's URL once there is one.
@@ -212,31 +236,22 @@ pub struct Pr {
 
 /// Opens the browser to write the pull request from your fork's branch to upstream, with
 /// upstream's template; once it exists, returns its URL instead.
-pub fn pr(dir: &Path) -> Result<Pr> {
+pub fn pr(dir: &Path, tty: bool) -> Result<Pr> {
     let branch = current_branch(dir)?;
     let repo = remote_repo(dir, "origin")?;
     let fork = remote_repo(dir, "fork").context("no remote fork yet: run deck fork first")?;
     let owner = fork.split('/').next().unwrap_or_default();
-    let out = Command::new("gh")
-        .args(["pr", "list", "--repo", &repo, "--state", "all", "--head", &branch])
-        .args(["--json", "url,headRepositoryOwner", "--jq"])
-        .arg(format!(
-            ".[] | select(.headRepositoryOwner.login == \"{owner}\") | .url"
-        ))
-        .stdin(Stdio::null())
-        .output()
-        .context("running gh pr list")?;
-    let found = String::from_utf8_lossy(&out.stdout);
-    if let Some(url) = found.lines().next().filter(|u| !u.is_empty()) {
+    if let Some(url) = find_pr(&repo, owner, &branch)? {
         return Ok(Pr {
             branch,
-            url: Some(url.to_string()),
+            url: Some(url),
         });
     }
     let base = default_base(dir)?;
     let base = base.trim_start_matches("origin/");
-    interactive(
+    run(
         dir,
+        tty,
         "gh",
         &[
             "pr",
@@ -251,6 +266,145 @@ pub fn pr(dir: &Path) -> Result<Pr> {
         ],
     )?;
     Ok(Pr { branch, url: None })
+}
+
+/// The pull request, open or not, from `owner`'s `branch` to upstream `repo`.
+fn find_pr(repo: &str, owner: &str, branch: &str) -> Result<Option<String>> {
+    let out = Command::new("gh")
+        .args(["pr", "list", "--repo", repo, "--state", "all", "--head", branch])
+        .args(["--json", "url,headRepositoryOwner", "--jq"])
+        .arg(format!(
+            ".[] | select(.headRepositoryOwner.login == \"{owner}\") | .url"
+        ))
+        .stdin(Stdio::null())
+        .output()
+        .context("running gh pr list")?;
+    if !out.status.success() {
+        bail!(
+            "gh pr list failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let found = String::from_utf8_lossy(&out.stdout);
+    Ok(found.lines().next().filter(|u| !u.is_empty()).map(str::to_string))
+}
+
+/// How far a patch has come on its way upstream, from what is on disk, plus the pull request
+/// when asked to look it up (that asks GitHub).
+pub struct Progress {
+    pub dir: PathBuf,
+    pub branch: String,
+    pub cloned: bool,
+    pub branched: bool,
+    /// Changes on the branch not committed yet, staged or not.
+    pub uncommitted: bool,
+    /// Commits on the branch on top of upstream's default branch.
+    pub commits: usize,
+    /// Your fork, `owner/repo`, once it is the remote `fork`.
+    pub fork: Option<String>,
+    /// The fork's branch is at the branch's last commit.
+    pub pushed: bool,
+    pub pr: Option<String>,
+}
+
+/// The next thing to do, after `Progress`.
+#[derive(Debug, PartialEq)]
+pub enum Step {
+    Stage,
+    /// The branch is checked out elsewhere, or the clone is on another branch.
+    SwitchBranch,
+    Commit,
+    Fork,
+    Push,
+    Pr,
+    /// There is a pull request: nothing left here but to follow it.
+    Follow(String),
+}
+
+pub fn progress(upstream: &str, id: &str, look_up_pr: bool) -> Result<Progress> {
+    let dir = clone_dir(upstream)?;
+    let branch = branch_name(id);
+    let mut p = Progress {
+        cloned: dir.join(".git").exists(),
+        dir,
+        branch,
+        branched: false,
+        uncommitted: false,
+        commits: 0,
+        fork: None,
+        pushed: false,
+        pr: None,
+    };
+    if !p.cloned {
+        return Ok(p);
+    }
+    let d = p.dir.clone();
+    let b = p.branch.clone();
+    p.branched = git(
+        &d,
+        &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{b}")],
+    )
+    .is_ok();
+    if !p.branched {
+        return Ok(p);
+    }
+    if let Ok(base) = default_base(&d) {
+        p.commits = git(&d, &["rev-list", "--count", &format!("{base}..{b}")])?
+            .parse()
+            .unwrap_or(0);
+    }
+    if current_branch(&d).ok().as_deref() == Some(&b) {
+        p.uncommitted = !git(&d, &["status", "--porcelain", "--untracked-files=no"])?.is_empty();
+    }
+    p.fork = remote_repo(&d, "fork").ok();
+    let tip = git(&d, &["rev-parse", &format!("refs/heads/{b}")])?;
+    p.pushed = git(
+        &d,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/remotes/fork/{b}"),
+        ],
+    )
+    .is_ok_and(|r| r == tip);
+    if look_up_pr
+        && let Some(fork) = &p.fork
+        && let Ok(repo) = remote_repo(&d, "origin")
+    {
+        let owner = fork.split('/').next().unwrap_or_default();
+        p.pr = find_pr(&repo, owner, &b)?;
+    }
+    Ok(p)
+}
+
+impl Progress {
+    /// After a pull request exists, new commits still go through Push: that is how changes
+    /// upstream asked for reach it.
+    pub fn next(&self) -> Step {
+        if !self.branched {
+            return match &self.pr {
+                Some(url) => Step::Follow(url.clone()),
+                None => Step::Stage,
+            };
+        }
+        if current_branch(&self.dir).ok().as_deref() != Some(self.branch.as_str()) {
+            return Step::SwitchBranch;
+        }
+        if self.uncommitted || self.commits == 0 {
+            return Step::Commit;
+        }
+        if self.fork.is_none() {
+            return Step::Fork;
+        }
+        if !self.pushed {
+            return Step::Push;
+        }
+        match &self.pr {
+            Some(url) => Step::Follow(url.clone()),
+            None => Step::Pr,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -116,8 +116,12 @@ fn main() -> Result<()> {
         };
     }
     match &cli.cmd {
-        Some(Cmd::Fork { dir }) => return send::fork(dir),
-        Some(Cmd::Push { dir }) => return send::push(dir),
+        Some(Cmd::Fork { dir }) => {
+            let fork = send::fork(dir, true)?;
+            println!("deck: your fork is {fork}, the remote fork");
+            return Ok(());
+        }
+        Some(Cmd::Push { dir }) => return send::push(dir, true),
         _ => {}
     }
     let mut m = Model::load(host_dir)?;
@@ -182,7 +186,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some(Cmd::Pr { dir }) => {
-            let pr = send::pr(&dir)?;
+            let pr = send::pr(&dir, true)?;
             let Some(url) = pr.url else {
                 println!("deck: once the pull request is created, run deck pr again to mark the patch sent");
                 return Ok(());
