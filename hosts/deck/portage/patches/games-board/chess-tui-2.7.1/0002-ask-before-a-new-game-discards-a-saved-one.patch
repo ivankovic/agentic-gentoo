@@ -1,0 +1,469 @@
+From 6cca13e7fba55bb9e423105c529007309726731b Mon Sep 17 00:00:00 2001
+From: Marko Ivankovic <marko@ivankovic.me>
+Date: Sat, 17 Oct 2026 10:11:33 +0200
+Subject: [PATCH] feat: ask before a new game discards a saved one
+
+Starting a local or bot game from the menu, or pressing r mid-game,
+silently deleted that mode's resume save. Both now ask first when a save
+exists: y starts the new game, n or Esc cancels, and from the menu r
+resumes the saved game instead. Enter doesn't confirm, since Enter is what
+submitted the form. A game with no move played yet, or a finished one, has
+no save and restarts at once.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01XT24tbHwPTAWwP9NadDnuA
+---
+ src/app/game.rs                |  14 +++++
+ src/constants.rs               |   2 +
+ src/handlers/bot.rs            |   2 +-
+ src/handlers/game_mode_menu.rs |  22 ++++++-
+ src/handlers/popup.rs          |  38 ++++++++++++-
+ src/handlers/solo.rs           |   2 +-
+ src/state/ui_state.rs          |  12 ++++
+ src/ui/main_ui.rs              |   4 ++
+ src/ui/popup/mod.rs            |   1 +
+ src/ui/popup/new_game.rs       |  77 +++++++++++++++++++++++++
+ tests/resume_tests.rs          | 101 ++++++++++++++++++++++++++++++++-
+ 11 files changed, 268 insertions(+), 7 deletions(-)
+ create mode 100644 src/ui/popup/new_game.rs
+
+diff --git a/src/app/game.rs b/src/app/game.rs
+index 6b6a752..cefd93f 100644
+--- a/src/app/game.rs
++++ b/src/app/game.rs
+@@ -41,6 +41,20 @@ impl App {
+         }
+     }
+ 
++    /// `restart`, but asks first when that would discard the game's resume save, which exists
++    /// once a move has been played. A finished game has none, so it restarts at once.
++    pub fn request_restart(&mut self) {
++        if self
++            .current_resume_mode()
++            .is_some_and(|mode| self.has_resume_save(mode))
++        {
++            self.ui_state.pending_new_game = Some(crate::state::ui_state::NewGame::Restart);
++            self.ui_state.current_popup = Some(Popups::NewGameConfirmation);
++        } else {
++            self.restart();
++        }
++    }
++
+     /// Restarts the current game while keeping the same opponent and bot.
+     /// Re-randomizes color if random color mode is active, re-initializes the clock, and
+     /// triggers the bot's first move if it starts as White.
+diff --git a/src/constants.rs b/src/constants.rs
+index 19704be..0699859 100644
+--- a/src/constants.rs
++++ b/src/constants.rs
+@@ -174,6 +174,8 @@ pub enum Popups {
+     EnterLichessToken,
+     /// Y/N confirmation before resigning.
+     ResignConfirmation,
++    /// Y/N confirmation before a new game replaces a saved one.
++    NewGameConfirmation,
+     /// SAN move text entry.
+     MoveInputSelection,
+     /// File path entry for loading a PGN file.
+diff --git a/src/handlers/bot.rs b/src/handlers/bot.rs
+index e01d5cd..4810dbf 100644
+--- a/src/handlers/bot.rs
++++ b/src/handlers/bot.rs
+@@ -7,7 +7,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
+ /// Includes restart functionality and bot state cleanup.
+ pub fn handle_bot_page_events(app: &mut App, key_event: KeyEvent) {
+     match key_event.code {
+-        KeyCode::Char('r') => app.restart(), // Restart current game
++        KeyCode::Char('r') => app.request_restart(), // Restart current game, asking if saved
+         KeyCode::Char('b') => {
+             // Return to home menu - clean up bot and reset state
+             app.reset_home();
+diff --git a/src/handlers/game_mode_menu.rs b/src/handlers/game_mode_menu.rs
+index c7d1607..673dd2c 100644
+--- a/src/handlers/game_mode_menu.rs
++++ b/src/handlers/game_mode_menu.rs
+@@ -4,7 +4,7 @@ use crate::{
+     app::App,
+     constants::{BOT_DIFFICULTY_COUNT, Pages, Popups},
+     handlers::handler::fallback_key_handler,
+-    state::resume::ResumeMode,
++    state::{resume::ResumeMode, ui_state::NewGame},
+ };
+ use ratatui::crossterm::event::{KeyCode, KeyEvent};
+ 
+@@ -426,7 +426,25 @@ fn apply_clock_and_start(app: &mut App, page: Pages) {
+ }
+ 
+ fn finish_form(app: &mut App, page: Pages) {
+-    // Starting a brand-new resumable game invalidates any previous save.
++    // A saved game in this mode would be lost: ask first.
++    let mode = match page {
++        Pages::Solo => Some(ResumeMode::Local),
++        Pages::Bot => Some(ResumeMode::Bot),
++        _ => None,
++    };
++    if let Some(mode) = mode
++        && app.has_resume_save(mode)
++    {
++        app.ui_state.pending_new_game = Some(NewGame::Start(page));
++        app.ui_state.current_popup = Some(Popups::NewGameConfirmation);
++        return;
++    }
++    start_game(app, page);
++}
++
++/// Leaves the form for `page`'s game. Starting a brand-new resumable game invalidates any
++/// previous save.
++pub fn start_game(app: &mut App, page: Pages) {
+     match page {
+         Pages::Solo => app.clear_resume_state(ResumeMode::Local),
+         Pages::Bot => app.clear_resume_state(ResumeMode::Bot),
+diff --git a/src/handlers/popup.rs b/src/handlers/popup.rs
+index 5a4eac5..d065d2a 100644
+--- a/src/handlers/popup.rs
++++ b/src/handlers/popup.rs
+@@ -3,7 +3,8 @@
+ use crate::{
+     app::App,
+     constants::{Pages, Popups},
+-    handlers::handler::fallback_key_handler,
++    handlers::{game_mode_menu::start_game, handler::fallback_key_handler},
++    state::{resume::ResumeMode, ui_state::NewGame},
+     utils::normalize_lowercase_to_san,
+ };
+ use ratatui::crossterm::event::{KeyCode, KeyEvent};
+@@ -28,6 +29,7 @@ pub fn handle_popup_input(app: &mut App, key_event: KeyEvent, popup: Popups) {
+         Popups::EnterLichessToken => handle_enter_lichess_token(app, key_event),
+         Popups::SeekingLichessGame => handle_seeking_lichess_game(app, key_event),
+         Popups::ResignConfirmation => handle_resign_confirmation(app, key_event),
++        Popups::NewGameConfirmation => handle_new_game_confirmation(app, key_event),
+         Popups::MoveInputSelection => handle_move_input_selection(app, key_event),
+         _ => fallback_key_handler(app, key_event),
+     }
+@@ -267,6 +269,40 @@ fn handle_resign_confirmation(app: &mut App, key_event: KeyEvent) {
+     }
+ }
+ 
++/// Only `y` discards the save: Enter is what started the form, and a second press shouldn't
++/// lose a game. From the menu, `r` resumes the saved game instead.
++fn handle_new_game_confirmation(app: &mut App, key_event: KeyEvent) {
++    match key_event.code {
++        KeyCode::Char('y' | 'Y') => {
++            app.ui_state.close_popup();
++            match app.ui_state.pending_new_game.take() {
++                Some(NewGame::Start(page)) => start_game(app, page),
++                Some(NewGame::Restart) => app.restart(),
++                None => {}
++            }
++        }
++        KeyCode::Char('r' | 'R') => {
++            if let Some(NewGame::Start(page)) = app.ui_state.pending_new_game {
++                app.ui_state.pending_new_game = None;
++                app.ui_state.close_popup();
++                let mode = if page == Pages::Bot {
++                    ResumeMode::Bot
++                } else {
++                    ResumeMode::Local
++                };
++                app.game_mode_state.form_active = false;
++                app.game_mode_state.form_cursor = 0;
++                app.resume_from_saved(mode);
++            }
++        }
++        KeyCode::Char('n' | 'N') | KeyCode::Esc => {
++            app.ui_state.pending_new_game = None;
++            app.ui_state.close_popup();
++        }
++        _ => fallback_key_handler(app, key_event),
++    }
++}
++
+ fn handle_move_input_selection(app: &mut App, key_event: KeyEvent) {
+     match key_event.code {
+         KeyCode::Enter => {
+diff --git a/src/handlers/solo.rs b/src/handlers/solo.rs
+index 818cdd3..6c9cafb 100644
+--- a/src/handlers/solo.rs
++++ b/src/handlers/solo.rs
+@@ -6,7 +6,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
+ /// Handles keyboard input during solo (two-player) game mode.
+ pub fn handle_solo_page_events(app: &mut App, key_event: KeyEvent) {
+     match key_event.code {
+-        KeyCode::Char('r') => app.restart(), // Restart current game
++        KeyCode::Char('r') => app.request_restart(), // Restart current game, asking if saved
+         KeyCode::Char('b') => {
+             // Return to home menu - reset all game state
+             app.reset_home();
+diff --git a/src/state/ui_state.rs b/src/state/ui_state.rs
+index db1a315..7e7ab51 100644
+--- a/src/state/ui_state.rs
++++ b/src/state/ui_state.rs
+@@ -21,6 +21,17 @@ pub struct UIState {
+     pub end_screen_dismissed: bool,
+     /// menu current cursor
+     pub menu_cursor: u8,
++    /// What `Popups::NewGameConfirmation` starts once the user says yes
++    pub pending_new_game: Option<NewGame>,
++}
++
++/// A new game that would discard a resume save, held until the user confirms it.
++#[derive(Debug, PartialEq, Clone, Copy)]
++pub enum NewGame {
++    /// From the game-mode form: start a game on this page.
++    Start(Pages),
++    /// From a game in progress: restart it.
++    Restart,
+ }
+ 
+ impl Default for UIState {
+@@ -31,6 +42,7 @@ impl Default for UIState {
+             popup_message: None,
+             end_screen_dismissed: false,
+             menu_cursor: 0,
++            pending_new_game: None,
+         }
+     }
+ }
+diff --git a/src/ui/main_ui.rs b/src/ui/main_ui.rs
+index ed9dc78..d6dd059 100644
+--- a/src/ui/main_ui.rs
++++ b/src/ui/main_ui.rs
+@@ -31,6 +31,7 @@ use crate::{
+                 enter_ip::render_enter_multiplayer_ip,
+                 wait_for_player::render_wait_for_other_player,
+             },
++            new_game::render_new_game_confirmation_popup,
+             pgn::path::render_load_pgn_popup,
+             resignation::render_resign_confirmation_popup,
+             success::render_success_popup,
+@@ -115,6 +116,9 @@ pub fn render(app: &mut App, frame: &mut Frame<'_>) {
+         Some(Popups::ResignConfirmation) => {
+             render_resign_confirmation_popup(frame, app);
+         }
++        Some(Popups::NewGameConfirmation) => {
++            render_new_game_confirmation_popup(frame, app);
++        }
+         Some(Popups::PuzzleEndScreen) => {
+             // Show puzzle completion message
+             let message = if let Some(ref msg) = app.ui_state.popup_message {
+diff --git a/src/ui/popup/mod.rs b/src/ui/popup/mod.rs
+index 55211ff..8fa35a0 100644
+--- a/src/ui/popup/mod.rs
++++ b/src/ui/popup/mod.rs
+@@ -8,6 +8,7 @@ pub mod lichess;
+ pub mod loading;
+ pub mod move_input;
+ pub mod multiplayer;
++pub mod new_game;
+ pub mod pgn;
+ pub mod promotion;
+ pub mod resignation;
+diff --git a/src/ui/popup/new_game.rs b/src/ui/popup/new_game.rs
+new file mode 100644
+index 0000000..4953897
+--- /dev/null
++++ b/src/ui/popup/new_game.rs
+@@ -0,0 +1,77 @@
++//! Confirmation before a new game replaces a saved one.
++
++use crate::{
++    app::App, constants::WHITE, state::ui_state::NewGame,
++    ui::components::centered_rect::centered_rect,
++};
++use ratatui::{
++    Frame,
++    layout::Alignment,
++    style::{Color, Modifier, Style},
++    text::{Line, Span},
++    widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap},
++};
++
++/// Renders the "discard the saved game?" dialog for `app.ui_state.pending_new_game`.
++pub fn render_new_game_confirmation_popup(frame: &mut Frame, app: &App) {
++    let restart = app.ui_state.pending_new_game == Some(NewGame::Restart);
++    let block = Block::default()
++        .title(if restart { "Restart Game" } else { "New Game" })
++        .borders(Borders::ALL)
++        .border_type(BorderType::Rounded)
++        .padding(Padding::horizontal(1))
++        .border_style(Style::default().fg(WHITE));
++    let area = centered_rect(50, 30, frame.area());
++
++    let key = |k: &'static str, color: Color| {
++        Span::styled(k, Style::default().fg(color).add_modifier(Modifier::BOLD))
++    };
++    let mut choices = vec![
++        key("Y", Color::Green),
++        Span::raw(if restart {
++            ": restart   "
++        } else {
++            ": new game   "
++        }),
++    ];
++    if !restart {
++        choices.extend([key("R", Color::Yellow), Span::raw(": resume saved game   ")]);
++    }
++    choices.extend([
++        key("N", Color::Red),
++        Span::raw(if restart {
++            ": keep playing"
++        } else {
++            ": cancel"
++        }),
++    ]);
++
++    let text = vec![
++        Line::from(""),
++        Line::from(if restart {
++            "Restart this game from the beginning?"
++        } else {
++            "You have a saved game in this mode."
++        })
++        .alignment(Alignment::Center),
++        Line::from(""),
++        Line::from(if restart {
++            "Its saved position will be lost."
++        } else {
++            "Starting a new game discards it."
++        })
++        .alignment(Alignment::Center),
++        Line::from(""),
++        Line::from(""),
++        Line::from(choices).alignment(Alignment::Center),
++    ];
++
++    let paragraph = Paragraph::new(text)
++        .block(block.clone())
++        .alignment(Alignment::Left)
++        .wrap(Wrap { trim: true });
++
++    frame.render_widget(Clear, area);
++    frame.render_widget(block, area);
++    frame.render_widget(paragraph, area);
++}
+diff --git a/tests/resume_tests.rs b/tests/resume_tests.rs
+index 0a8328b..db6fc53 100644
+--- a/tests/resume_tests.rs
++++ b/tests/resume_tests.rs
+@@ -9,7 +9,7 @@ use std::sync::Mutex;
+ 
+ use chess_tui::{
+     app::{App, AppResult},
+-    constants::Pages,
++    constants::{Pages, Popups},
+     game_logic::game::GameState,
+     handlers::handler::handle_key_events,
+     state::resume::{ClockState, ResumeMode, SavedGame, has_save, save, save_path},
+@@ -244,11 +244,108 @@ fn starting_new_game_clears_existing_save() -> AppResult<()> {
+ 
+     let mut app = App::default();
+     start_local_game(&mut app)?;
++    assert_eq!(
++        app.ui_state.current_popup,
++        Some(Popups::NewGameConfirmation)
++    );
++    assert!(
++        has_save(ResumeMode::Local),
++        "Nothing is wiped before the user confirms"
++    );
+ 
++    send(&mut app, &[KeyCode::Char('y')])?;
+     assert!(
+         !has_save(ResumeMode::Local),
+-        "Submitting the Local form should wipe a stale save",
++        "Confirming a new game from the Local form should wipe the old save",
+     );
++    assert_eq!(app.ui_state.current_page, Pages::Solo);
++    assert_eq!(app.ui_state.current_popup, None);
++    Ok(())
++}
++
++fn existing_local_save() {
++    let saved = SavedGame {
++        mode: ResumeMode::Local,
++        fen: "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2".into(),
++        is_flipped: false,
++        taken_pieces: vec![],
++        bot: None,
++        clock: None,
++        moves_uci: vec!["e2e4".into(), "e7e5".into()],
++    };
++    save(ResumeMode::Local, &saved);
++}
++
++#[test]
++fn new_game_over_a_save_can_be_cancelled() -> AppResult<()> {
++    let _guard = ResumeDirGuard::new();
++    existing_local_save();
++
++    for cancel in [KeyCode::Char('n'), KeyCode::Esc, KeyCode::Enter] {
++        let mut app = App::default();
++        start_local_game(&mut app)?;
++        send(&mut app, &[cancel])?;
++        assert!(
++            has_save(ResumeMode::Local),
++            "{cancel:?} must not discard the save"
++        );
++        assert_eq!(app.ui_state.current_page, Pages::GameModeMenu);
++    }
++    Ok(())
++}
++
++#[test]
++fn new_game_popup_r_resumes_the_save() -> AppResult<()> {
++    let _guard = ResumeDirGuard::new();
++    existing_local_save();
++
++    let mut app = App::default();
++    start_local_game(&mut app)?;
++    send(&mut app, &[KeyCode::Char('r')])?;
++    assert_eq!(app.ui_state.current_page, Pages::Solo);
++    assert_eq!(app.ui_state.current_popup, None);
++    assert_eq!(app.game.logic.game_board.move_history.len(), 2);
++    assert!(has_save(ResumeMode::Local));
++    Ok(())
++}
++
++#[test]
++fn restart_mid_game_asks_first() -> AppResult<()> {
++    let _guard = ResumeDirGuard::new();
++
++    let mut app = App::default();
++    start_local_game(&mut app)?;
++    play_e2e4(&mut app)?;
++    app.autosave_resume_state(); // the main loop's tick
++    assert!(has_save(ResumeMode::Local));
++
++    send(&mut app, &[KeyCode::Char('r')])?;
++    assert_eq!(
++        app.ui_state.current_popup,
++        Some(Popups::NewGameConfirmation)
++    );
++    send(&mut app, &[KeyCode::Char('n')])?;
++    assert_eq!(
++        app.game.logic.game_board.move_history.len(),
++        1,
++        "n keeps the game"
++    );
++    assert!(has_save(ResumeMode::Local));
++
++    send(&mut app, &[KeyCode::Char('r'), KeyCode::Char('y')])?;
++    assert_eq!(app.game.logic.game_board.move_history.len(), 0);
++    assert!(!has_save(ResumeMode::Local));
++    Ok(())
++}
++
++#[test]
++fn restart_before_any_move_does_not_ask() -> AppResult<()> {
++    let _guard = ResumeDirGuard::new();
++
++    let mut app = App::default();
++    start_local_game(&mut app)?;
++    send(&mut app, &[KeyCode::Char('r')])?;
++    assert_eq!(app.ui_state.current_popup, None);
+     Ok(())
+ }
+ 
+-- 
+2.55.0
+
