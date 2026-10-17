@@ -19,7 +19,7 @@ S="${WORKDIR}/${P}/tools/mmm"
 # The repository's license; then the crates', from `cargo metadata` (where a crate offers a
 # choice, one already listed).
 LICENSE="CC-BY-NC-ND-4.0"
-LICENSE+=" Apache-2.0 MIT Unicode-3.0 Unicode-DFS-2016 WTFPL-2 ZLIB"
+LICENSE+=" 0BSD Apache-2.0 BSD MIT Unicode-3.0 Unicode-DFS-2016 WTFPL-2 ZLIB"
 SLOT="0"
 
 # notmuch reads and tags the mail; xdg-open opens links and attachments; wl-copy copies.
@@ -27,6 +27,7 @@ RDEPEND="
 	net-mail/notmuch
 	x11-misc/xdg-utils
 	gui-apps/wl-clipboard
+	sys-apps/systemd
 "
 
 src_unpack() {

@@ -3,6 +3,7 @@
 
 use crate::app::{App, FileForm, Mode, ThreadView, destination, mismatch};
 use crate::archive::State;
+use crate::compose::{self, Draft};
 use crate::render::{self, Kind, Target, when};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Margin, Rect};
@@ -17,7 +18,8 @@ const HELP: &[&str] = &[
     "  /                   search: notmuch's query language (from:ana subject:ručak date:1w..)",
     "  a  d                archive (leaves the Inbox) / delete (Gmail's Bin at the next sync)",
     "  s  m                star / unstar;  mark read / unread",
-    "  u                   undo the last of these",
+    "  u                   undo the last of these; first, take back a mail in its minute",
+    "  c  r  R  f          write: a new mail / reply / reply to all / forward (the message read)",
     "  ?                   explain what is selected; ? again: this screen",
     "  q  Esc              back; from the list, quit",
     "",
@@ -32,6 +34,11 @@ const HELP: &[&str] = &[
     "  y  w                copy the link / save the attachment to ~/Downloads",
     "  n  p                the next / previous message;  J K  the next / previous thread",
     "  H                   HTML or plain text, for mail that has both",
+    "",
+    "Writing: the editor, then a look at it before it goes",
+    "  y                   send: it goes in a minute, until then u takes it back (also after q)",
+    "  e                   edit again;  l  the signature's language;  f  From;  q  discard",
+    "                      Signatures: ~/.config/mmm/signatures/hr, en, de, used as written",
     "",
     "PDFs and Nextcloud (on the focused PDF, or the thread's only one waiting)",
     "  t                   file it in Nextcloud: category and name, suggested from the rules; Enter",
@@ -96,7 +103,22 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     let footer = match &app.mode {
         Mode::Search(q) => Line::from(vec![Span::raw("/").bold(), Span::raw(q.clone()), Span::raw("▏")]),
+        Mode::Review { discard: true, .. } => Line::from(vec![
+            Span::raw("Discard this mail? ").red().bold(),
+            Span::raw("y discards · any other key goes back").dark_gray(),
+        ]),
+        Mode::Review { .. } if app.status.is_empty() => Line::from(
+            "y send (a minute to take it back) · e edit · l language · f From · j k scroll · q discard",
+        )
+        .dark_gray(),
         _ if !app.status.is_empty() => Line::from(app.status.clone()).yellow(),
+        _ if !app.pending.is_empty() => {
+            let p = app.pending.last().expect("not empty");
+            Line::from(vec![
+                Span::raw(format!("✉ to {} in {}:{:02}", p.to, p.left() / 60, p.left() % 60)).green(),
+                Span::raw(" · u takes it back").dark_gray(),
+            ])
+        }
         _ => match app.view.as_ref().and_then(|v| v.focus.map(|i| &v.doc.focus[i])) {
             Some(fp) => match &fp.target {
                 Target::Link(url) => match mismatch(&fp.text, url) {
@@ -133,9 +155,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 Span::raw("t file it in Nextcloud · x leave it out · Tab links · ? explain · q back").dark_gray(),
             ]),
             None => Line::from(if app.view.is_some() {
-                "? explain · Tab links · Enter open · n/p message · a archive · d delete · s star · q back"
+                "? explain · Tab links · r reply · R all · f forward · n/p message · a archive · d delete · q back"
             } else {
-                "? explain · Enter read · / search · a archive · d delete · s star · m read/unread · u undo · q quit"
+                "? explain · Enter read · c write · r reply · / search · a archive · d delete · s star · u undo · q quit"
             })
             .dark_gray(),
         },
@@ -145,6 +167,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     match &app.mode {
         Mode::Explain { title, body, keys } => draw_explain(f, title, body, keys),
         Mode::File(form) => draw_file(f, form),
+        Mode::Review { draft, scroll, .. } => draw_review(f, draft, *scroll, foot),
         Mode::Help => {
             let lines: Vec<Line> = HELP
                 .iter()
@@ -310,6 +333,101 @@ fn draw_thread(f: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
+/// The draft back from the editor, as it will go: who to, what's attached, the language and its
+/// signature, what's wrong with it, and the text.
+fn draw_review(f: &mut Frame, d: &Draft, scroll: usize, foot: Rect) {
+    let area = Rect {
+        height: f.area().height.saturating_sub(foot.height),
+        ..f.area()
+    };
+    f.render_widget(Clear, area);
+    let block = Block::bordered().title(Line::from(" Review before sending ").bold());
+    let inner = block.inner(area).inner(Margin::new(1, 0));
+    f.render_widget(block, area);
+    let field = |k: &str, v: String| Line::from(vec![Span::raw(format!("{k:<9}")).bold(), Span::raw(v)]);
+    let mut lines = vec![field("From", d.from.clone()), field("To", d.to.clone())];
+    if !d.cc.is_empty() {
+        lines.push(field("Cc", d.cc.clone()));
+    }
+    if !d.bcc.is_empty() {
+        lines.push(Line::from(vec![
+            Span::raw(format!("{:<9}", "Bcc")).bold(),
+            Span::raw(d.bcc.clone()),
+            Span::raw("  (the others don't see these)").dark_gray(),
+        ]));
+    }
+    lines.push(field("Subject", d.subject.clone()));
+    for a in &d.attach {
+        let size = std::fs::metadata(a).map(|m| m.len()).unwrap_or(0);
+        // The forwarded mail's own attachments are in the drafts folder: their name says enough.
+        let forwarded = a.starts_with(compose::state_dir());
+        let name = a
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        lines.push(Line::from(vec![
+            Span::raw(format!("{:<9}", "Attached")).bold(),
+            Span::raw(if forwarded { name } else { compose::tilde(a) }).magenta(),
+            Span::raw(format!("  {} KB", size.div_ceil(1024))).dark_gray(),
+            Span::raw(if forwarded {
+                "  from the forwarded mail"
+            } else {
+                ""
+            })
+            .dark_gray(),
+        ]));
+    }
+    let lang = match d.lang {
+        Some(l) => compose::LANGS
+            .iter()
+            .find(|(c, _)| *c == l)
+            .map_or(l, |(_, n)| *n),
+        None => "none: no signature",
+    };
+    lines.push(Line::from(vec![
+        Span::raw(format!("{:<9}", "Language")).bold(),
+        Span::raw(lang.to_string()).cyan(),
+        Span::raw(format!("  {} · l changes it", d.lang_why)).dark_gray(),
+    ]));
+    let (errors, warnings) = d.check();
+    for e in &errors {
+        lines.push(Line::from(format!("✗ {e}")).red().bold());
+    }
+    for w in &warnings {
+        lines.push(Line::from(format!("⚠ {w}")).yellow());
+    }
+    if errors.is_empty() {
+        lines.push(
+            Line::from(format!(
+                "y sends it in {} seconds, from a timer: u takes it back until then, even after leaving mmm.",
+                compose::UNDO_SECS
+            ))
+            .dark_gray(),
+        );
+    }
+    lines.push(Line::from("─".repeat(inner.width as usize)).dark_gray());
+    let text = d.final_text();
+    let sig = d.lang.and_then(compose::signature);
+    let mut in_sig = 0;
+    let sig_first = sig.as_ref().and_then(|s| s.lines().next()).unwrap_or("\u{0}");
+    let sig_len = sig.as_ref().map_or(0, |s| s.lines().count());
+    for l in text.lines().skip(scroll) {
+        if in_sig == 0 && l == sig_first {
+            in_sig = sig_len;
+        }
+        let line = if in_sig > 0 {
+            in_sig -= 1;
+            Line::from(l.to_string()).cyan()
+        } else if l.starts_with('>') || d.lead.as_deref() == Some(l) {
+            Line::from(l.to_string()).dark_gray()
+        } else {
+            Line::from(l.to_string())
+        };
+        lines.push(line);
+    }
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
 /// `t`: the category and name a PDF goes to Nextcloud as.
 fn draw_file(f: &mut Frame, form: &FileForm) {
     let area = centered(f.area(), 90, 13);
@@ -445,6 +563,8 @@ pub fn explain_list(app: &App) -> Mode {
         ("s", "star"),
         ("m", "read / unread"),
         ("u", "undo"),
+        ("r R f", "reply / all / forward"),
+        ("c", "write a new mail"),
     ];
     let Some(t) = app.threads.get(app.sel) else {
         return Mode::Explain {
@@ -611,6 +731,8 @@ pub fn explain_thread(app: &App, v: &ThreadView) -> Mode {
             ("H", "HTML / plain"),
             ("a d", "archive / delete"),
             ("s m", "star / unread"),
+            ("r R", "reply / reply to all"),
+            ("f c", "forward / new mail"),
         ],
     }
 }

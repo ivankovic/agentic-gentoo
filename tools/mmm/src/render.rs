@@ -219,6 +219,52 @@ fn pieces(p: &Value, html: bool, out: &mut Vec<Piece>) {
     }
 }
 
+/// A body as plain text, to quote or forward: text parts as they are, HTML as text.
+pub fn plain_text(body: &[Value]) -> String {
+    let mut ps = vec![];
+    for p in body {
+        pieces(p, false, &mut ps);
+    }
+    let mut out = String::new();
+    for p in ps {
+        let text = match p {
+            Piece::Plain(t) => t,
+            Piece::Html(h) => html2text::from_read(h.as_bytes(), 76).unwrap_or(h),
+            Piece::Attachment { .. } => continue,
+            Piece::Forwarded { headers, body } => {
+                let h = |k: &str| headers[k].as_str().unwrap_or_default().to_string();
+                format!(
+                    "---------- Forwarded message ----------\nFrom: {}\nDate: {}\nSubject: {}\n\n{}",
+                    h("From"),
+                    h("Date"),
+                    h("Subject"),
+                    plain_text(&body)
+                )
+            }
+        };
+        if !out.is_empty() {
+            out += "\n";
+        }
+        out += text.trim_end();
+        out += "\n";
+    }
+    out
+}
+
+/// A body's attachments, as (part, name).
+pub fn attachments(body: &[Value]) -> Vec<(u64, String)> {
+    let mut ps = vec![];
+    for p in body {
+        pieces(p, true, &mut ps);
+    }
+    ps.into_iter()
+        .filter_map(|p| match p {
+            Piece::Attachment { part, name, .. } => Some((part, name)),
+            _ => None,
+        })
+        .collect()
+}
+
 fn size(bytes: u64) -> String {
     match bytes {
         0 => String::new(),

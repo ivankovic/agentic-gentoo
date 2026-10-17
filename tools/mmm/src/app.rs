@@ -1,6 +1,7 @@
 //! What mmm holds while it runs, and what each key does to it.
 
 use crate::archive::{self, Choice, State};
+use crate::compose::{self, Draft, Pending};
 use crate::config::{self, Search};
 use crate::notmuch::{self, Message, Thread};
 use crate::render::{self, Doc, Pdfs, Target};
@@ -61,6 +62,12 @@ pub enum Mode {
     Help,
     /// `t`: filing a PDF in Nextcloud.
     File(FileForm),
+    /// A draft back from the editor: a look before it goes. `discard` asks y/n to throw it away.
+    Review {
+        draft: Box<Draft>,
+        scroll: usize,
+        discard: bool,
+    },
 }
 
 /// What `u` puts back: a tag change, on exactly the messages it changed, or a PDF's choice.
@@ -95,6 +102,10 @@ pub struct App {
     pub quit: bool,
     undo: Vec<Undo>,
     lastmod: String,
+    /// A draft for the editor: main suspends the screen and runs it.
+    pub edit: Option<Draft>,
+    /// Mail sent with `y`, in its minute before it goes.
+    pub pending: Vec<Pending>,
 }
 
 fn invert(change: &str) -> String {
@@ -215,6 +226,8 @@ impl App {
             quit: false,
             undo: vec![],
             lastmod: String::new(),
+            edit: None,
+            pending: vec![],
         };
         app.lastmod = notmuch::lastmod().unwrap_or_default();
         app.load()?;
@@ -259,6 +272,11 @@ impl App {
 
     /// Called between keys: reloads when mail or tags changed, as the sync timer does.
     pub fn tick(&mut self) {
+        // Past its minute, a mail is the timer's: no longer anything to take back.
+        if let Some(p) = self.pending.iter().find(|p| p.left() == 0) {
+            self.status = format!("✉ sent to {}", p.to);
+        }
+        self.pending.retain(|p| p.left() > 0);
         let Ok(m) = notmuch::lastmod() else { return };
         if m != self.lastmod {
             self.lastmod = m;
@@ -325,6 +343,22 @@ impl App {
     }
 
     fn undo(&mut self) {
+        // A mail in its minute comes first: that's what u is for, right after y.
+        if let Some(p) = self.pending.pop() {
+            match p.take_back() {
+                Ok(true) => {
+                    self.status = format!("taken back: the mail to {} didn't go", p.to);
+                    self.mode = Mode::Review {
+                        draft: Box::new(p.draft),
+                        scroll: 0,
+                        discard: false,
+                    };
+                }
+                Ok(false) => self.status = format!("too late: the mail to {} has gone", p.to),
+                Err(e) => self.status = format!("{e:#}"),
+            }
+            return;
+        }
         let Some(u) = self.undo.pop() else {
             self.status = "nothing to undo".into();
             return;
@@ -446,6 +480,11 @@ impl App {
                 return;
             }
             Mode::File(form) => return self.key_file(form, k),
+            Mode::Review {
+                draft,
+                scroll,
+                discard,
+            } => return self.key_review(*draft, scroll, discard, k),
         }
         self.status.clear();
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
@@ -464,6 +503,8 @@ impl App {
                 return;
             }
             KeyCode::Char('u') if !ctrl => return self.undo(),
+            KeyCode::Char('c') if !ctrl => return self.write(Draft::new_mail()),
+            KeyCode::Char(c @ ('r' | 'R' | 'f')) if !ctrl => return self.answer(c),
             KeyCode::Char(c @ '1'..='9') => {
                 self.view = None;
                 return self.switch(c as usize - '1' as usize);
@@ -681,6 +722,136 @@ impl App {
                 },
                 Err(e) => format!("{e:#}"),
             },
+        };
+    }
+
+    /// Starts the editor on a draft (main runs it, the screen suspended).
+    fn write(&mut self, d: Draft) {
+        self.edit = Some(d);
+    }
+
+    /// `r` `R` `f`: a reply, a reply to all, or a forward of the message being read; in the list,
+    /// of the thread's newest.
+    fn answer(&mut self, c: char) {
+        let msg = match &self.view {
+            Some(v) => v.msgs.get(v.current()).cloned(),
+            None => self
+                .threads
+                .get(self.sel)
+                .and_then(|t| notmuch::show_thread(&t.thread).ok())
+                .and_then(|ms| ms.into_iter().max_by_key(|m| m.timestamp)),
+        };
+        let Some(m) = msg else { return };
+        let d = match c {
+            'r' => Draft::reply(&m, false),
+            'R' => Draft::reply(&m, true),
+            _ => Draft::forward(&m),
+        };
+        match d {
+            Ok(d) => self.write(d),
+            Err(e) => self.status = format!("{e:#}"),
+        }
+    }
+
+    /// Back from the editor: an empty new mail is dropped; anything else is reviewed.
+    pub fn edited(&mut self, mut d: Draft, ok: bool) {
+        if !ok {
+            self.status = format!("the editor failed; the draft is in {}", compose::tilde(&d.file));
+            return;
+        }
+        if let Err(e) = d.read() {
+            self.status = format!("{e:#}");
+            return;
+        }
+        if d.kind == compose::Kind::New && d.body.trim().is_empty() && d.to.trim().is_empty() {
+            let _ = std::fs::remove_file(&d.file);
+            self.status = "nothing written: dropped".into();
+            return;
+        }
+        if d.lang_why != "chosen with l" {
+            d.choose_lang();
+        }
+        self.mode = Mode::Review {
+            draft: Box::new(d),
+            scroll: 0,
+            discard: false,
+        };
+    }
+
+    fn key_review(&mut self, mut d: Draft, mut scroll: usize, discard: bool, k: KeyEvent) {
+        if discard {
+            match k.code {
+                KeyCode::Char('y') => {
+                    let _ = std::fs::remove_file(&d.file);
+                    let _ = std::fs::remove_dir_all(d.file.with_extension(""));
+                    self.status = "discarded".into();
+                }
+                _ => {
+                    self.mode = Mode::Review {
+                        draft: Box::new(d),
+                        scroll,
+                        discard: false,
+                    }
+                }
+            }
+            return;
+        }
+        match k.code {
+            KeyCode::Char('y') => match compose::queue(&d) {
+                Ok(p) => {
+                    // The footer counts down to it.
+                    self.pending.push(p);
+                    return;
+                }
+                Err(e) => self.status = format!("not sent: {e:#}"),
+            },
+            KeyCode::Char('e') | KeyCode::Char('n') | KeyCode::Enter => {
+                if let Err(e) = d.write() {
+                    self.status = format!("{e:#}");
+                } else {
+                    self.edit = Some(d);
+                    return;
+                }
+            }
+            KeyCode::Char('l') => {
+                let i = d
+                    .lang
+                    .and_then(|l| compose::LANGS.iter().position(|(c, _)| *c == l));
+                let next = match i {
+                    Some(i) if i + 1 < compose::LANGS.len() => Some(compose::LANGS[i + 1].0),
+                    Some(_) => None,
+                    None => Some(compose::LANGS[0].0),
+                };
+                d.set_lang(next);
+            }
+            KeyCode::Char('f') => {
+                let ids = compose::identities();
+                if !ids.is_empty() {
+                    let i = ids
+                        .iter()
+                        .position(|x| *x == d.from)
+                        .map_or(0, |i| (i + 1) % ids.len());
+                    d.from = ids[i].clone();
+                }
+            }
+            KeyCode::Char('j') | KeyCode::Down => scroll += 1,
+            KeyCode::Char('k') | KeyCode::Up => scroll = scroll.saturating_sub(1),
+            KeyCode::Char(' ') | KeyCode::PageDown => scroll += 10,
+            KeyCode::PageUp => scroll = scroll.saturating_sub(10),
+            KeyCode::Char('q') | KeyCode::Esc => {
+                self.mode = Mode::Review {
+                    draft: Box::new(d),
+                    scroll,
+                    discard: true,
+                };
+                return;
+            }
+            _ => {}
+        }
+        self.mode = Mode::Review {
+            draft: Box::new(d),
+            scroll,
+            discard: false,
         };
     }
 

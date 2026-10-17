@@ -96,7 +96,7 @@ pub fn tag(ids: &[String], change: &str) -> Result<()> {
 }
 
 /// A message id quoted for a notmuch query, should it hold spaces or quotes.
-fn quote(id: &str) -> String {
+pub fn quote(id: &str) -> String {
     if id
         .chars()
         .any(|c| c.is_whitespace() || c == '"' || c == '(' || c == ')')

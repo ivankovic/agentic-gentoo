@@ -1,6 +1,6 @@
 # mmm
 
-Marko's Mail Machine: reading mail in the terminal, over notmuch. It replaces aerc as the
+Marko's Mail Machine: reading and writing mail in the terminal, over notmuch. It replaces aerc as the
 reader on deck; mbsync, notmuch, msmtp and `deck-mail` stay as they are
 ([hosts/deck/email.md](../../hosts/deck/email.md)).
 
@@ -33,15 +33,35 @@ mmm from:hep date:1y..  # one notmuch query
   the focused PDF, or on the thread's only waiting one. Mail with a PDF waiting is in the
   Waiting tab and marked ☁ in the list; a tab's count is its mail that needs you, unread or
   waiting. `deck-mail sync` does the sending ([email.md](../../hosts/deck/email.md)).
+- **Writing**: `c` a new mail, `r` reply, `R` reply to all, `f` forward (the message being read;
+  in the list, the thread's newest). The draft opens in `$VISUAL` / `$EDITOR` (nvim): headers
+  (From, To, Cc, Bcc, Subject, and `Attach:` lines, one file each), then your text, then the
+  quoted or forwarded mail. Who a reply goes to, from which of your addresses, `Re:` and the
+  threading headers are `notmuch reply`'s; a forward carries the mail's attachments along.
+- **Review before it goes**: From, To, Cc, Bcc, attachments, the language and why, the text as it
+  will go, and what's wrong: no recipient, an address that isn't one, a file that isn't there
+  (these stop it), no subject, or "attached" / "u prilogu" / "anbei" with nothing attached.
+  `e` edits again, `l` steps the language, `f` the From address, `q` discards (y/n).
+- **Language and signature**: the signature is `~/.config/mmm/signatures/hr`, `en` or `de`, used as
+  written (start it with a `-- ` line for the usual separator); it goes after your text, above
+  the quote. The language is the one you wrote in (whatlang, among the three); when the text is
+  too short to tell, the one you last wrote to the first recipient in
+  (`~/.local/state/mmm/languages`), then the one of the mail you answer, then English. A reply's
+  "On … wrote:" line follows the language.
+- **Sending**: `y`, and the mail goes a minute later, from a systemd user timer that runs
+  `deck-mail send` (msmtpq: queued when offline, sent by the next sync). The footer counts down;
+  `u` takes it back to the review screen until then, even after leaving mmm (the outbox file is
+  the lock: whichever of `u` and the timer moves it first has it). Then the mail answered is
+  tagged `replied`, or `passed` for a forward. Drafts are in `~/.local/state/mmm/drafts` until
+  sent.
 - New mail and tag changes from elsewhere show up within two seconds (notmuch's revision is
   checked between keys).
 
-mmm runs `notmuch` for everything and never writes mail files.
+mmm runs `notmuch` for everything and never writes mail files; Gmail keeps the sent copy.
 
 ## Not yet
 
-Writing: compose, reply, forward, with the review screen, language detection and signature,
-y/n and a one-minute undo. Then address completion, drafts, images.
+Address completion, reopening drafts left behind, HTML mail, images.
 
 Installed through Portage from the local overlay's live ebuild `mail-client/mmm`, built from
 this clone (`portage/env/deck-local-source.conf`), like `deck`.
