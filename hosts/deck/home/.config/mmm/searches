@@ -1,0 +1,10 @@
+# mmm's searches, along the top, 1 to 9 in this order: Name = notmuch query.
+# Mail tagged deleted or spam is left out of every search unless the query names the tag
+# (notmuch's search.exclude_tags), so Bin needs no "not tag:deleted" elsewhere.
+Inbox = tag:inbox
+Unread = tag:unread
+Starred = tag:flagged
+Sent = tag:sent
+Drafts = tag:draft
+Everything = *
+Bin = tag:deleted

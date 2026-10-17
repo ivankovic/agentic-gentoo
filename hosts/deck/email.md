@@ -32,6 +32,7 @@ workspace ┘ 5 min) └→ ~/Mail/ivankovic/  ┘
 | Sync | mbsync, a user timer every 5 min | `net-mail/isync` (stable) |
 | Index, tags, search | notmuch, one database over `~/Mail` | `net-mail/notmuch` (0.39 stable) |
 | Reader | aerc: "All" tab (combined inbox, unread, flagged, sent) + one tab per account | `mail-client/aerc` (`~amd64`) |
+| Reader, to come | `mmm` ([tools/mmm](../../tools/mmm/)): reading now, writing next; aerc stays until it writes too | `mail-client/mmm` (local overlay, live) |
 | Send | msmtp: picks the account by the From address (`--read-envelope-from`); `msmtpq` queues mail written offline | `mail-mta/msmtp` (`~amd64` for current) |
 | Secrets | app passwords in `pass` (GPG; gpg-agent caches the passphrase) | `app-admin/pass` (stable) |
 | HTML, images | `w3m` renders HTML as text; `chafa` shows image attachments as sixel in aerc's viewer; `:open` sends anything to Firefox or `imv` | `www-client/w3m`, `media-gfx/chafa`, `media-gfx/imv` (stable) |
