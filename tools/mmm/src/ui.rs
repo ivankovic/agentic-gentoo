@@ -1,7 +1,8 @@
 //! Drawing: the searches along the top, the list or the thread, a footer that says what the keys
 //! do here, and the `?` boxes.
 
-use crate::app::{App, Mode, ThreadView, destination, mismatch};
+use crate::app::{App, FileForm, Mode, ThreadView, destination, mismatch};
+use crate::archive::State;
 use crate::render::{self, Kind, Target, when};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Margin, Rect};
@@ -12,7 +13,7 @@ use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table, TableState, Wr
 /// Every key, for `?` `?`. A section starts at column 0.
 const HELP: &[&str] = &[
     "Everywhere",
-    "  1-9, Tab Shift+Tab  a search along the top / the next, previous one",
+    "  1-9, Tab Shift+Tab  a search along the top / the next, previous one; its count: unread or waiting",
     "  /                   search: notmuch's query language (from:ana subject:ručak date:1w..)",
     "  a  d                archive (leaves the Inbox) / delete (Gmail's Bin at the next sync)",
     "  s  m                star / unstar;  mark read / unread",
@@ -31,6 +32,11 @@ const HELP: &[&str] = &[
     "  y  w                copy the link / save the attachment to ~/Downloads",
     "  n  p                the next / previous message;  J K  the next / previous thread",
     "  H                   HTML or plain text, for mail that has both",
+    "",
+    "PDFs and Nextcloud (on the focused PDF, or the thread's only one waiting)",
+    "  t                   file it in Nextcloud: category and name, suggested from the rules; Enter",
+    "  x                   leave it out of Nextcloud;  u undoes either, until the next sync sends it",
+    "                      Until then its mail is in the Waiting tab, ☁ in the list",
 ];
 
 fn kind_style(k: Kind) -> Style {
@@ -43,6 +49,8 @@ fn kind_style(k: Kind) -> Style {
         Kind::Code => Style::new().fg(Color::Green),
         Kind::Link => Style::new().fg(Color::Cyan).underlined(),
         Kind::Attachment => Style::new().fg(Color::Magenta).underlined(),
+        Kind::Waiting => Style::new().fg(Color::Yellow),
+        Kind::Filed => Style::new().fg(Color::Green),
     }
 }
 
@@ -111,9 +119,19 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 Target::Attachment { name, ctype, .. } => Line::from(vec![
                     Span::raw("📎 "),
                     Span::raw(format!("{name} ({ctype})")),
-                    Span::raw("   Enter open · w save · y copy name").dark_gray(),
+                    Span::raw(match app.pdf_target().map(|(_, p)| &p.state) {
+                        Some(State::Waiting | State::Chosen) => {
+                            "   Enter open · t file in Nextcloud · x leave out · w save"
+                        }
+                        _ => "   Enter open · w save · y copy name",
+                    })
+                    .dark_gray(),
                 ]),
             },
+            None if app.pdf_target().is_some_and(|(_, p)| p.state == State::Waiting) => Line::from(vec![
+                Span::raw("☁ a PDF waits: ").yellow(),
+                Span::raw("t file it in Nextcloud · x leave it out · Tab links · ? explain · q back").dark_gray(),
+            ]),
             None => Line::from(if app.view.is_some() {
                 "? explain · Tab links · Enter open · n/p message · a archive · d delete · s star · q back"
             } else {
@@ -126,6 +144,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     match &app.mode {
         Mode::Explain { title, body, keys } => draw_explain(f, title, body, keys),
+        Mode::File(form) => draw_file(f, form),
         Mode::Help => {
             let lines: Vec<Line> = HELP
                 .iter()
@@ -177,6 +196,7 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
                         | "passed"
                         | "draft"
                         | "archived"
+                        | "pdf-waiting"
                 )
             })
             .collect();
@@ -195,7 +215,13 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
             )),
             Cell::from(Span::raw(count).dark_gray()),
             Cell::from(Line::from(subject)),
-            Cell::from(if t.has("attachment") { "📎" } else { "" }),
+            Cell::from(if t.has("pdf-waiting") {
+                Span::raw("☁").yellow()
+            } else if t.has("attachment") {
+                Span::raw("📎")
+            } else {
+                Span::raw("")
+            }),
             Cell::from(Line::from(when(t.timestamp)).right_aligned()),
         ]);
         if unread { row.bold() } else { row }
@@ -284,6 +310,69 @@ fn draw_thread(f: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
+/// `t`: the category and name a PDF goes to Nextcloud as.
+fn draw_file(f: &mut Frame, form: &FileForm) {
+    let area = centered(f.area(), 90, 13);
+    f.render_widget(Clear, area);
+    let block = Block::bordered().title(" File in Nextcloud ");
+    let inner = block.inner(area).inner(Margin::new(1, 0));
+    f.render_widget(block, area);
+    let on = |row: usize, s: Span<'static>| if form.row == row { s.reversed() } else { s };
+    let category = match form.category {
+        Some(c) => format!(" ‹ {} › ", form.categories[c]),
+        None => " ‹ choose one › ".into(),
+    };
+    // The ones a digit picks, in two rows of five; the rest only ← → reach.
+    let picks: Vec<String> = form
+        .categories
+        .iter()
+        .take(10)
+        .enumerate()
+        .map(|(i, c)| format!("{} {c:<12}", (i + 1) % 10))
+        .collect();
+    let (before, after): (String, String) = {
+        let at = form
+            .name
+            .char_indices()
+            .nth(form.cursor)
+            .map_or(form.name.len(), |(i, _)| i);
+        (form.name[..at].to_string(), form.name[at..].to_string())
+    };
+    let mut name = vec![Span::raw("Name      ").bold(), Span::raw(before)];
+    name.push(if form.row == 1 {
+        Span::raw("▏").yellow()
+    } else {
+        Span::raw("")
+    });
+    name.push(Span::raw(after));
+    let lines = vec![
+        Line::from(vec![Span::raw("PDF       ").bold(), Span::raw(form.file.clone()).magenta()]),
+        Line::from(""),
+        Line::from(vec![Span::raw("Category  ").bold(), on(0, Span::raw(category))]),
+        Line::from(Span::raw(format!("          {}", picks[..picks.len().min(5)].concat())).dark_gray()),
+        Line::from(Span::raw(format!("          {}", picks.get(5..).unwrap_or_default().concat())).dark_gray()),
+        Line::from(name),
+        Line::from(""),
+        Line::from(
+            "The next sync puts it in Nextcloud, in a folder by the mail's date, with the category as its tag.",
+        )
+        .dark_gray(),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("Enter").bold(),
+            Span::raw(" file it · "),
+            Span::raw("Tab").bold(),
+            Span::raw(" category / name · "),
+            Span::raw("← → 1-9 0").bold(),
+            Span::raw(" category · "),
+            Span::raw("Esc").bold(),
+            Span::raw(" cancel"),
+        ])
+        .dark_gray(),
+    ];
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
 /// How many lines `text` takes wrapped at word boundaries to `width`, as `Wrap` lays it out.
 fn wrapped_height(text: &str, width: usize) -> usize {
     use unicode_width::UnicodeWidthStr;
@@ -308,7 +397,10 @@ fn wrapped_height(text: &str, width: usize) -> usize {
 fn draw_explain(f: &mut Frame, title: &str, body: &[Line<'static>], keys: &[(&'static str, &'static str)]) {
     let width = f.area().width.saturating_sub(4).min(110);
     let text_width = width.saturating_sub(2 + 28 + 2).max(1) as usize;
-    let wrapped: usize = body.iter().map(|l| wrapped_height(&l.to_string(), text_width)).sum();
+    let wrapped: usize = body
+        .iter()
+        .map(|l| wrapped_height(&l.to_string(), text_width))
+        .sum();
     let height = (wrapped.max(keys.len() + 1) as u16 + 3).min(f.area().height.saturating_sub(2));
     let area = centered(f.area(), width, height);
     f.render_widget(Clear, area);
@@ -394,7 +486,6 @@ pub fn explain_list(app: &App) -> Mode {
 }
 
 pub fn explain_thread(app: &App, v: &ThreadView) -> Mode {
-    let _ = app;
     if let Some(fp) = v.focus.map(|i| &v.doc.focus[i]) {
         return match &fp.target {
             Target::Link(url) => {
@@ -433,23 +524,56 @@ pub fn explain_thread(app: &App, v: &ThreadView) -> Mode {
                     ],
                 }
             }
-            Target::Attachment { name, ctype, .. } => Mode::Explain {
-                title: "Attachment".into(),
-                body: vec![
+            Target::Attachment { name, ctype, .. } => {
+                let mut body = vec![
                     Line::from(vec![Span::raw("Name: ").bold(), Span::raw(name.clone())]),
                     Line::from(vec![Span::raw("Type: ").bold(), Span::raw(ctype.clone())]),
                     Line::from(""),
                     Line::from(
                         "Enter writes it to a private folder ($XDG_RUNTIME_DIR/mmm) and opens it with its program; w saves it to ~/Downloads.",
                     ),
-                ],
-                keys: vec![
+                ];
+                let mut keys = vec![
                     ("Enter", "open"),
                     ("w", "save"),
                     ("y", "copy the name"),
                     ("Tab", "next"),
-                ],
-            },
+                ];
+                if let Some((_, p)) = app.pdf_target() {
+                    body.push(Line::from(""));
+                    body.push(Line::from(match p.state {
+                        State::Sent => format!(
+                            "It is in Nextcloud, in the family archive: {}.",
+                            p.r#where.as_deref().unwrap_or("")
+                        ),
+                        State::LeftOut => "It is left out of Nextcloud.".into(),
+                        State::Chosen => format!(
+                            "It goes to Nextcloud at the next sync, as {} / {}. t changes that, x leaves it out, u undoes.",
+                            p.category.as_deref().unwrap_or(""),
+                            p.name.as_deref().unwrap_or("")
+                        ),
+                        State::Waiting => match &p.suggested {
+                            Some((c, n)) if c != "-" => format!(
+                                "It waits for you: nothing goes to Nextcloud until you choose. The rules suggest {c} / {n}; t shows that to confirm or change. x leaves it out."
+                            ),
+                            Some(_) => "It waits for you: nothing goes to Nextcloud until you choose. The rules suggest leaving it out: x does. t files it after all.".into(),
+                            None => "It waits for you: nothing goes to Nextcloud until you choose. t files it, as a category and name; x leaves it out.".into(),
+                        },
+                    }));
+                    if matches!(p.state, State::Waiting | State::Chosen) {
+                        keys.splice(1..1, [("t", "file in Nextcloud"), ("x", "leave out")]);
+                    }
+                }
+                Mode::Explain {
+                    title: if app.pdf_target().is_some() {
+                        "PDF".into()
+                    } else {
+                        "Attachment".into()
+                    },
+                    body,
+                    keys,
+                }
+            }
         };
     }
     let m = &v.msgs[v.current()];

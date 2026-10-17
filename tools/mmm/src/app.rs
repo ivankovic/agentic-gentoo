@@ -1,11 +1,13 @@
 //! What mmm holds while it runs, and what each key does to it.
 
+use crate::archive::{self, Choice, State};
 use crate::config::{self, Search};
 use crate::notmuch::{self, Message, Thread};
-use crate::render::{self, Doc, Target};
+use crate::render::{self, Doc, Pdfs, Target};
 use anyhow::Result;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::Line;
+use std::collections::HashMap;
 use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -23,6 +25,26 @@ pub struct ThreadView {
     pub html: bool,
     /// Not drawn yet: the first draw fills the screen up to where reading starts.
     pub fresh: bool,
+    /// What became of the thread's PDFs, by (message, part), and the archive's categories.
+    pub pdfs: Pdfs,
+    pub categories: Vec<String>,
+    /// Each PDF's sha256, by (message, part): what deck-mail knows it by.
+    shas: HashMap<(String, u64), String>,
+}
+
+/// `t` on a PDF: where in Nextcloud it goes, before it's chosen.
+pub struct FileForm {
+    pub sha: String,
+    pub file: String,
+    /// The choice it had, for `u`.
+    before: Choice,
+    pub categories: Vec<String>,
+    pub category: Option<usize>,
+    pub name: String,
+    /// In `name`, in characters.
+    pub cursor: usize,
+    /// The row being edited: 0 the category, 1 the name.
+    pub row: usize,
 }
 
 pub enum Mode {
@@ -37,12 +59,21 @@ pub enum Mode {
     },
     /// `?` twice: every key.
     Help,
+    /// `t`: filing a PDF in Nextcloud.
+    File(FileForm),
 }
 
-/// One tag change, kept for `u`: on exactly the messages it changed.
-struct Undo {
-    ids: Vec<String>,
-    change: String,
+/// What `u` puts back: a tag change, on exactly the messages it changed, or a PDF's choice.
+enum Undo {
+    Tags {
+        ids: Vec<String>,
+        change: String,
+    },
+    File {
+        sha: String,
+        file: String,
+        before: Choice,
+    },
 }
 
 pub struct App {
@@ -50,6 +81,7 @@ pub struct App {
     /// Which search the list shows; `None` for a query typed after `/`.
     pub current: Option<usize>,
     pub query: String,
+    /// Each search's mail that needs you: unread, or with a PDF waiting for a choice.
     pub unread: Vec<Option<u64>>,
     pub threads: Vec<Thread>,
     pub more: bool,
@@ -220,7 +252,8 @@ impl App {
 
     fn count_unread(&mut self) {
         for (i, s) in self.searches.iter().enumerate() {
-            self.unread[i] = notmuch::count(&format!("({}) and tag:unread", s.query)).ok();
+            self.unread[i] =
+                notmuch::count(&format!("({}) and (tag:unread or tag:pdf-waiting)", s.query)).ok();
         }
     }
 
@@ -233,6 +266,13 @@ impl App {
                 self.status = format!("{e:#}");
             }
             self.count_unread();
+            // A sync may have sent a PDF, or review chosen one.
+            if let Some(v) = &mut self.view
+                && !v.shas.is_empty()
+                && let Err(e) = v.load_pdfs()
+            {
+                self.status = format!("{e:#}");
+            }
         }
     }
 
@@ -272,7 +312,7 @@ impl App {
         match res {
             Ok(ids) if ids.is_empty() => self.status = format!("{done}: nothing to change"),
             Ok(ids) => {
-                self.undo.push(Undo {
+                self.undo.push(Undo::Tags {
                     ids,
                     change: change.to_string(),
                 });
@@ -289,14 +329,22 @@ impl App {
             self.status = "nothing to undo".into();
             return;
         };
-        let back = invert(&u.change);
-        match notmuch::tag(&u.ids, &back) {
+        let (ids, change) = match u {
+            Undo::Tags { ids, change } => (ids, change),
+            Undo::File { sha, file, before } => {
+                return match archive::choose(&sha, &before) {
+                    Ok(()) => self.chosen(format!("undone: {file} is as it was")),
+                    Err(e) => self.status = format!("{e:#}"),
+                };
+            }
+        };
+        match notmuch::tag(&ids, &invert(&change)) {
             Ok(()) => {
                 self.status = format!(
                     "undone: {} on {} message{}",
-                    u.change,
-                    u.ids.len(),
-                    if u.ids.len() == 1 { "" } else { "s" }
+                    change,
+                    ids.len(),
+                    if ids.len() == 1 { "" } else { "s" }
                 );
                 self.lastmod.clear();
                 self.tick();
@@ -331,8 +379,14 @@ impl App {
                     focus: None,
                     html: self.html,
                     fresh: true,
+                    pdfs: Pdfs::new(),
+                    categories: vec![],
+                    shas: HashMap::new(),
                 };
                 v.layout(80);
+                if let Err(e) = v.load_pdfs() {
+                    self.status = format!("PDFs: {e:#}");
+                }
                 // Start at the first unread message, or the last one.
                 let at = first.unwrap_or(v.msgs.len().saturating_sub(1));
                 v.scroll = v.doc.starts.get(at).copied().unwrap_or(0);
@@ -391,6 +445,7 @@ impl App {
                 }
                 return;
             }
+            Mode::File(form) => return self.key_file(form, k),
         }
         self.status.clear();
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
@@ -577,6 +632,8 @@ impl App {
                 return;
             }
             KeyCode::Enter | KeyCode::Char('o') => return self.open_focus(false),
+            KeyCode::Char('t') => return self.start_file(),
+            KeyCode::Char('x') => return self.leave_out(),
             KeyCode::Char('w') => return self.open_focus(true),
             KeyCode::Char('y') => {
                 if let Some(t) = v.focused() {
@@ -625,6 +682,186 @@ impl App {
                 Err(e) => format!("{e:#}"),
             },
         };
+    }
+
+    /// The PDF `t` and `x` act on: the one focused, or else the thread's only one waiting.
+    pub fn pdf_target(&self) -> Option<(&Target, &archive::Pdf)> {
+        let v = self.view.as_ref()?;
+        let key = |t: &Target| match t {
+            Target::Attachment { msg, part, .. } => Some((msg.clone(), *part)),
+            Target::Link(_) => None,
+        };
+        if let Some(t) = v.focused() {
+            return key(t).and_then(|k| v.pdfs.get(&k)).map(|p| (t, p));
+        }
+        let mut waiting = v.doc.focus.iter().filter_map(|f| {
+            let p = key(&f.target).and_then(|k| v.pdfs.get(&k))?;
+            (p.state == State::Waiting).then_some((&f.target, p))
+        });
+        let one = waiting.next();
+        if waiting.next().is_some() { None } else { one }
+    }
+
+    fn start_file(&mut self) {
+        let Some((Target::Attachment { name: file, msg, .. }, p)) = self.pdf_target() else {
+            self.status = "t files a PDF in Nextcloud: Tab to one first".into();
+            return;
+        };
+        if p.state == State::Sent {
+            self.status = format!("already in Nextcloud: {}", p.r#where.as_deref().unwrap_or(""));
+            return;
+        }
+        let v = self.view.as_ref().expect("a PDF is in a thread");
+        // What it was chosen as, else what the rules suggest, else the sender and file's name.
+        let (cat, name) = match (&p.category, &p.name, &p.suggested) {
+            (Some(c), Some(n), _) => (Some(c.clone()), n.clone()),
+            (_, _, Some((c, n))) if c != "-" => (Some(c.clone()), n.clone()),
+            _ => {
+                let from = v
+                    .msgs
+                    .iter()
+                    .find(|m| &m.id == msg)
+                    .map(|m| m.from.as_str())
+                    .unwrap_or("");
+                let stem = file
+                    .strip_suffix(".pdf")
+                    .or(file.strip_suffix(".PDF"))
+                    .unwrap_or(file);
+                (None, format!("{} - {stem}", render::name(from)))
+            }
+        };
+        let mut categories = v.categories.clone();
+        let category = cat.map(|c| {
+            categories.iter().position(|x| *x == c).unwrap_or_else(|| {
+                categories.push(c);
+                categories.len() - 1
+            })
+        });
+        self.mode = Mode::File(FileForm {
+            sha: p.sha256.clone(),
+            file: file.clone(),
+            before: p.choice(),
+            categories,
+            row: if category.is_some() { 1 } else { 0 },
+            category,
+            cursor: name.chars().count(),
+            name,
+        });
+    }
+
+    fn key_file(&mut self, mut f: FileForm, k: KeyEvent) {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let n = f.categories.len();
+        match k.code {
+            KeyCode::Esc => return,
+            KeyCode::Enter => {
+                let (Some(c), name) = (f.category, f.name.trim()) else {
+                    f.row = 0;
+                    self.status = "choose a category: ← → or its number".into();
+                    self.mode = Mode::File(f);
+                    return;
+                };
+                if name.is_empty() {
+                    self.status = "it needs a name".into();
+                    self.mode = Mode::File(f);
+                    return;
+                }
+                let choice = Choice::To(f.categories[c].clone(), name.to_string());
+                return self.choose(f.sha, f.file, f.before, choice);
+            }
+            KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down => f.row = 1 - f.row,
+            _ if f.row == 0 => match k.code {
+                KeyCode::Left | KeyCode::Char('h') => {
+                    f.category = Some(f.category.map_or(n - 1, |c| (c + n - 1) % n));
+                }
+                KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(' ') => {
+                    f.category = Some(f.category.map_or(0, |c| (c + 1) % n));
+                }
+                KeyCode::Char(d @ '0'..='9') => {
+                    let i = if d == '0' { 9 } else { d as usize - '1' as usize };
+                    if i < n {
+                        f.category = Some(i);
+                        f.row = 1;
+                    }
+                }
+                _ => {}
+            },
+            KeyCode::Char('u') if ctrl => {
+                f.name.clear();
+                f.cursor = 0;
+            }
+            KeyCode::Char('a') if ctrl => f.cursor = 0,
+            KeyCode::Char('e') if ctrl => f.cursor = f.name.chars().count(),
+            KeyCode::Home => f.cursor = 0,
+            KeyCode::End => f.cursor = f.name.chars().count(),
+            KeyCode::Left => f.cursor = f.cursor.saturating_sub(1),
+            KeyCode::Right => f.cursor = (f.cursor + 1).min(f.name.chars().count()),
+            KeyCode::Backspace if f.cursor > 0 => {
+                let at = f.name.char_indices().nth(f.cursor - 1).map_or(0, |(i, _)| i);
+                f.name.remove(at);
+                f.cursor -= 1;
+            }
+            KeyCode::Delete => {
+                if let Some((at, _)) = f.name.char_indices().nth(f.cursor) {
+                    f.name.remove(at);
+                }
+            }
+            KeyCode::Char(c) if !ctrl => {
+                let at = f
+                    .name
+                    .char_indices()
+                    .nth(f.cursor)
+                    .map_or(f.name.len(), |(i, _)| i);
+                f.name.insert(at, c);
+                f.cursor += 1;
+            }
+            _ => {}
+        }
+        self.mode = Mode::File(f);
+    }
+
+    fn leave_out(&mut self) {
+        let Some((Target::Attachment { name: file, .. }, p)) = self.pdf_target() else {
+            self.status = "x leaves a PDF out of Nextcloud: Tab to one first".into();
+            return;
+        };
+        match p.state {
+            State::Sent => {
+                self.status = format!("already in Nextcloud: {}", p.r#where.as_deref().unwrap_or(""));
+            }
+            State::LeftOut => self.status = format!("{file} is left out already"),
+            _ => {
+                let (sha, file, before) = (p.sha256.clone(), file.clone(), p.choice());
+                self.choose(sha, file, before, Choice::Out);
+            }
+        }
+    }
+
+    fn choose(&mut self, sha: String, file: String, before: Choice, choice: Choice) {
+        if let Err(e) = archive::choose(&sha, &choice) {
+            self.status = format!("{e:#}");
+            return;
+        }
+        let done = match &choice {
+            Choice::To(c, n) => format!("{file}: to Nextcloud at the next sync, as {c} / {n} · u undoes"),
+            Choice::Out => format!("{file}: left out of Nextcloud · u undoes"),
+            Choice::Forget => format!("{file}: waits again"),
+        };
+        self.undo.push(Undo::File { sha, file, before });
+        self.chosen(done);
+    }
+
+    /// After a PDF's choice: its line, the Waiting tab and the counts as they are now.
+    fn chosen(&mut self, status: String) {
+        if let Some(v) = &mut self.view
+            && let Err(e) = v.load_pdfs()
+        {
+            self.status = format!("{e:#}");
+            return;
+        }
+        self.lastmod.clear();
+        self.tick();
+        self.status = status;
     }
 
     fn explain(&self) -> Mode {
@@ -684,9 +921,49 @@ impl ThreadView {
             .scroll
             .saturating_sub(self.doc.starts.get(at).copied().unwrap_or(0));
         self.width = width;
-        self.doc = render::thread(&self.msgs, width, self.html);
+        self.doc = render::thread(&self.msgs, width, self.html, &self.pdfs);
         self.scroll = self.doc.starts.get(at).copied().unwrap_or(0) + into;
         self.focus = None;
+    }
+
+    /// Asks deck-mail what became of the thread's PDFs, and lays it out again to show it.
+    pub fn load_pdfs(&mut self) -> Result<()> {
+        for f in &self.doc.focus {
+            if let Target::Attachment {
+                msg,
+                part,
+                name,
+                ctype,
+            } = &f.target
+                && archive::is_pdf(name, ctype)
+                && !self.shas.contains_key(&(msg.clone(), *part))
+            {
+                let bytes = notmuch::part(msg, *part)?;
+                self.shas.insert((msg.clone(), *part), archive::sha256(&bytes));
+            }
+        }
+        if self.shas.is_empty() {
+            return Ok(());
+        }
+        let mut msgs: Vec<String> = self.shas.keys().map(|(m, _)| m.clone()).collect();
+        msgs.sort();
+        msgs.dedup();
+        let (categories, found) = archive::pdfs(&msgs)?;
+        self.categories = categories;
+        self.pdfs = self
+            .shas
+            .iter()
+            .filter_map(|(k, sha)| {
+                let p = found.iter().find(|p| p.message == k.0 && &p.sha256 == sha)?;
+                Some((k.clone(), p.clone()))
+            })
+            .collect();
+        // Lay out again at the same width, keeping the place and the focus.
+        let (w, focus) = (self.width, self.focus);
+        self.width = 0;
+        self.layout(w);
+        self.focus = focus.filter(|&f| f < self.doc.focus.len());
+        Ok(())
     }
 
     /// The message at the top of the screen.

@@ -104,25 +104,29 @@ last year is a candidate. Subjects have Re:/Fwd: removed and numbers shown as `#
 and "Invoice 1240" count together. The sender lines are notmuch searches: `notmuch tag +deleted --
 from:…` (or in aerc, search, select all and `d`) puts them in Gmail's Bin at the next sync.
 
-### Bills to the family archive
+### PDFs to the family archive
 
-`deck-mail bills` copies the PDF attachments of bills into a family-archive folder in Nextcloud over
-WebDAV, filed by date (`{year}/{date} {sender} - {file}`), and keeps a copy in `~/Documents/Bills`.
-`deck-mail sync` runs it after each `notmuch new`, so new bills follow within minutes.
+`deck-mail archive` copies PDFs from mail into a family-archive folder in Nextcloud over WebDAV,
+each where its category and name say (`{year}/{month}/{day}-{category} - {name}`, the category also
+a Nextcloud tag), and keeps a copy in `~/Documents/Archive`. `deck-mail sync` runs it after each
+`notmuch new`. Where it all is: `~/.config/deck-mail/archive` (on deck only).
 
-- **What is a bill**: rules in `~/.config/deck-mail/bills` (on deck only: the billers are
-  personal), one notmuch search a line: `from:` for billers whose subjects don't say so,
-  `subject:` for words (invoice, Rechnung, receipt, Quittung, račun…). Only mail with a PDF
-  counts; sent mail doesn't. In aerc, `Bb` makes any message a bill (tag `bill`), `Bn` keeps one
-  out (tag `notbill`).
-- **Once each**: a message done is tagged `bill-archived`; the PDFs sent are remembered by their
-  SHA-256 (`~/.local/state/deck-mail/bills.json`), so the same PDF in two messages or two
+- **Nothing goes unasked**: each PDF waits until it's been chosen, in mmm (`t` file it as a
+  category and name, `x` leave it out, `u` undoes) or in `deck-mail review` (every PDF at once,
+  as for the backfill). Until then its mail is tagged `pdf-waiting`: mmm's Waiting tab, ☁ in
+  the list. The next sync sends what was chosen.
+- **Suggestions**: the sender and file name lines in `~/.config/deck-mail/archive-names` (on deck
+  only: the senders are personal; `sender regex | file regex | category | name`, `{1}` for a
+  group) only fill in `t`'s form, so a known bill is `t`, Enter. Choices are `sha256:` lines
+  in the same file, at the top; a tag `noarchive` keeps a whole message out.
+- **Once each**: a message done is tagged `archived`; the PDFs sent are remembered by their
+  SHA-256 (`~/.local/state/deck-mail/archive.json`), so the same PDF in two messages or two
   accounts goes once. Nothing in Nextcloud is overwritten: a name taken gets " (2)".
 - **Credentials**: a Nextcloud app password (Settings → Security → Devices & sessions), in `pass`
   under the name the config gives (`nextcloud/deck`).
-- `deck-mail bills --dry-run` lists what would go where, without the password or any upload.
-  To send a message again: `notmuch tag -bill-archived -- id:…` and remove its PDF's line from
-  bills.json.
+- `deck-mail archive --dry-run` lists what would go where, and what waits, without the password
+  or any upload. mmm asks `deck-mail pdfs` what became of a thread's PDFs, and records a choice
+  with `deck-mail file`.
 
 ### Promotions and other bulk mail
 

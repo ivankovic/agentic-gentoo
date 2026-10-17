@@ -14,7 +14,7 @@ mmm from:hep date:1y..  # one notmuch query
 ## What it does
 
 - **Searches** along the top, `1`–`9`, from `~/.config/mmm/searches` (`Name = notmuch query`, a
-  line each), with their unread counts. `/` types any notmuch query.
+  line each), with how many need you (unread, or a PDF waiting). `/` types any notmuch query.
 - **The list**: threads, newest first, loaded 200 at a time as the cursor nears the end.
 - **A thread**: every message, HTML as text (`H` for the plain text, where there is one),
   quotes and signatures dimmed. Reading starts at the first unread message.
@@ -26,6 +26,13 @@ mmm from:hep date:1y..  # one notmuch query
 - **Tags**: `a` archive (`-inbox`), `d` delete (`+deleted`; again, back out), `s` star, `m`
   read/unread. `u` undoes the last, on exactly the messages it changed. Opening a thread marks
   it read. `deck-mail sync` carries all of it to Gmail, as before.
+- **PDFs to the family archive in Nextcloud**: under each PDF, what became of it: in Nextcloud
+  (and where), going at the next sync, left out, or waiting. Nothing goes until it's chosen:
+  `t` files it (a form with the category and name, filled in from deck-mail's rules when they
+  know the sender, so a known bill is `t`, Enter), `x` leaves it out, `u` undoes. Both act on
+  the focused PDF, or on the thread's only waiting one. Mail with a PDF waiting is in the
+  Waiting tab and marked ☁ in the list; a tab's count is its mail that needs you, unread or
+  waiting. `deck-mail sync` does the sending ([email.md](../../hosts/deck/email.md)).
 - New mail and tag changes from elsewhere show up within two seconds (notmuch's revision is
   checked between keys).
 
@@ -34,8 +41,7 @@ mmm runs `notmuch` for everything and never writes mail files.
 ## Not yet
 
 Writing: compose, reply, forward, with the review screen, language detection and signature,
-y/n and a one-minute undo. Then address completion, drafts, the PDF archive review in the
-message view, images.
+y/n and a one-minute undo. Then address completion, drafts, images.
 
 Installed through Portage from the local overlay's live ebuild `mail-client/mmm`, built from
 this clone (`portage/env/deck-local-source.conf`), like `deck`.

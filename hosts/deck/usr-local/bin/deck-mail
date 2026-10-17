@@ -8,12 +8,16 @@
   deck-mail send     aerc's outgoing command: msmtpq, which queues what can't go out now
   deck-mail archive [--dry-run] [--limit N]
                      copy mail's PDFs into the family archive on Nextcloud (WebDAV): where it
-                     is in ~/.config/deck-mail/archive; what each PDF is called and its
-                     category (also a tag in Nextcloud), or that it's left out, in
-                     ~/.config/deck-mail/archive-names.
-                     --dry-run lists every PDF and its name. `sync` runs it.
+                     is in ~/.config/deck-mail/archive. Each PDF goes only once it's been
+                     chosen, in mmm (t, x) or review: its category (also a tag in Nextcloud)
+                     and name, or that it's left out, in ~/.config/deck-mail/archive-names.
+                     Until then its mail is tagged pdf-waiting. Sender and file name lines
+                     there only suggest. --dry-run lists every PDF and its name. `sync` runs it.
   deck-mail review    a TUI over those PDFs: which go to Nextcloud, in which folder, as what;
                      which are left out; and which mail to delete. It writes archive-names.
+  deck-mail pdfs ID…  mmm's view of these messages' PDFs, as JSON
+  deck-mail file SHA256 CATEGORY NAME | SHA256 - | SHA256 --forget
+                     mmm's choice for one PDF: to Nextcloud as this, left out, or undecided
   deck-mail top [N] [query]
                      the N (50) most frequent senders, sender domains and subjects, with the
                      newest message's month: what to clean up. The query defaults to
@@ -457,12 +461,20 @@ def archive_names():
     return names
 
 
-def archive_name(names, sender, fname, digest):
-    """The PDF's (category, name), ("-", "-") for one left out, None for one no line names."""
+def confirmed(names, digest):
+    """What was chosen for this very PDF (a sha256 line): its (category, name), ("-", "-") for
+    one left out, None for one no one has decided on yet. Only these go to Nextcloud."""
+    for s, _, category, name in names:
+        if isinstance(s, str) and digest.startswith(s.removeprefix("sha256:")):
+            return (category, name)
+    return None
+
+
+def suggested(names, sender, fname):
+    """What the sender and file name lines say a PDF is: only a suggestion, shown in review and
+    mmm until it's confirmed. (category, name), ("-", "-") for one to leave out, or None."""
     for s, f, category, name in names:
         if isinstance(s, str):
-            if digest.startswith(s.removeprefix("sha256:")):
-                return (category, name)
             continue
         m = f.search(fname)
         if m and s.search(sender):
@@ -610,22 +622,53 @@ def webdav(conf, password):
     return call, put, tag
 
 
+WAITING = "pdf-waiting"
+
+
+def nm_id(mid):
+    """A message id as a notmuch query term."""
+    return "id:" + (mid if re.fullmatch(r"[^\s\"()]+", mid) else '"' + mid.replace('"', '""') + '"')
+
+
+ARCHIVE_QUERY = ("(mimetype:application/pdf or attachment:pdf)"
+                 " and not tag:spam and not tag:noarchive and not tag:archived")
+
+
+def mark_waiting(waiting):
+    """Tags `pdf-waiting` exactly the messages (ids) in `waiting`: mail with a PDF no one has
+    decided on yet, mmm's Waiting tab. Only what changes is tagged."""
+    have = set(subprocess.run(["notmuch", "search", "--exclude=false", "--output=messages",
+                               f"tag:{WAITING}"], capture_output=True, text=True,
+                              check=True).stdout.split())
+    have = {h.removeprefix("id:") for h in have}
+    batch = [f"+{WAITING} -- {nm_id(m)}" for m in sorted(set(waiting) - have)]
+    batch += [f"-{WAITING} -- {nm_id(m)}" for m in sorted(have - set(waiting))]
+    if batch:
+        subprocess.run(["notmuch", "tag", "--batch"], input="\n".join(batch) + "\n", text=True,
+                       check=True)
+
+
+def archive_seen():
+    f = STATE / "archive.json"
+    return json.loads(f.read_text()) if f.exists() else {}
+
+
 def archive(dry_run, quiet=False, limit=None):
-    """Copies mail's PDFs to Nextcloud, named and filed by archive-names, once each: a message
-    done is tagged `archived`, and a PDF already sent (the same bytes, from another message) is
-    not sent again. A message with a PDF archive-names doesn't know waits, untagged, for a line.
-    Mail deleted from the mailbox still goes: Gmail empties the Bin after 30 days."""
+    """Copies mail's PDFs to Nextcloud once each, as chosen for each one in mmm or review: a
+    message done is tagged `archived`, and a PDF already sent (the same bytes, from another
+    message) is not sent again. A message with a PDF no one has decided on waits, tagged
+    `pdf-waiting`. Mail deleted from the mailbox still goes: Gmail empties the Bin after 30 days."""
     import hashlib
     conf = archive_config(upload=not dry_run)
     names = archive_names()
-    query = ("(mimetype:application/pdf or attachment:pdf)"
-             " and not tag:spam and not tag:noarchive and not tag:archived")
-    ids = subprocess.run(["notmuch", "search", "--exclude=false", "--output=messages", query],
+    ids = subprocess.run(["notmuch", "search", "--exclude=false", "--output=messages", ARCHIVE_QUERY],
                          capture_output=True, text=True, check=True).stdout.split()
     if not ids:
+        if not dry_run:
+            mark_waiting([])
         return 0
     seen_file = STATE / "archive.json"
-    seen = json.loads(seen_file.read_text()) if seen_file.exists() else {}
+    seen = archive_seen()
     put = None
     if not dry_run:
         env = dict(os.environ, PASSWORD_STORE_GPG_OPTS="--pinentry-mode=error")
@@ -638,7 +681,7 @@ def archive(dry_run, quiet=False, limit=None):
             print(f"deck-mail: archive: no folder {conf['folder']!r} in Nextcloud for {conf['user']}")
             return 1
     local = pathlib.Path(os.path.expanduser(conf["local"])) if conf.get("local") else None
-    sent, left_out, unknown = 0, [], []
+    sent, left_out, unknown, waiting = 0, [], [], []
     for mid in ids:
         files = subprocess.run(["notmuch", "search", "--output=files", "--exclude=false", mid],
                                capture_output=True, text=True, check=True).stdout.split("\n")
@@ -646,12 +689,12 @@ def archive(dry_run, quiet=False, limit=None):
         named = []
         for fname, data in pdfs:
             digest = hashlib.sha256(data).hexdigest()
-            named.append((fname, data, digest,
-                          archive_name(names, from_, fname.removesuffix(".pdf"), digest)))
+            named.append((fname, data, digest, confirmed(names, digest)))
         row = lambda f, d: f"{date:%Y-%m-%d}\t{from_}\t{f}\t{subject}\tsha256:{d[:16]}"
         missing = [row(f, d) for f, _, d, n in named if n is None and d not in seen]
         if missing:
             unknown += missing
+            waiting.append(mid.removeprefix("id:"))
             continue
         if limit is not None and sent >= limit:
             break
@@ -693,8 +736,10 @@ def archive(dry_run, quiet=False, limit=None):
         if not dry_run and all(d in seen for _, _, d, _ in named):  # --limit can stop halfway
             seen_file.write_text(json.dumps(seen, indent=1))
             subprocess.run(["notmuch", "tag", "+archived", "--", mid], check=True)
+    if not dry_run and limit is None:  # --limit stops before it has looked at every message
+        mark_waiting(waiting)
     if dry_run:
-        for title, rows in (("left out", left_out), ("no line in archive-names: held back", unknown)):
+        for title, rows in (("left out", left_out), ("not decided yet: waiting", unknown)):
             if rows:
                 print(f"\n# {title} ({len(rows)})")
                 print("\n".join(rows))
@@ -702,7 +747,7 @@ def archive(dry_run, quiet=False, limit=None):
         print(f"deck-mail: archive: {len(ids)} messages, {sent} PDFs "
               + ("would go to Nextcloud" if dry_run else "copied to Nextcloud")
               + f", {len(left_out)} left out"
-              + (f", {len(unknown)} with no line in {ARCHIVE_NAMES} held back" if unknown else ""))
+              + (f", {len(unknown)} waiting for a decision (mmm's Waiting tab)" if unknown else ""))
     return 0
 
 
@@ -713,12 +758,12 @@ REVIEW_END = "# --- end of review choices"
 
 
 def review_load():
-    """Every PDF archive would look at, once each: its messages, what archive-names says now."""
+    """Every PDF archive would look at, once each: its messages, what was chosen for it, and
+    what the sender and file name lines suggest."""
     import hashlib
-    query = ("(mimetype:application/pdf or attachment:pdf)"
-             " and not tag:spam and not tag:noarchive and not tag:archived")
     out = subprocess.run(["notmuch", "show", "--format=json", "--body=false", "--entire-thread=false",
-                          "--exclude=false", query], capture_output=True, text=True, check=True).stdout
+                          "--exclude=false", ARCHIVE_QUERY], capture_output=True, text=True,
+                         check=True).stdout
 
     def walk(node):  # notmuch show: threads of [message, replies] pairs
         if isinstance(node, dict):
@@ -741,7 +786,8 @@ def review_load():
                 continue
             row = {"digest": digest, "date": date, "from": from_, "sender": sender,
                    "subject": subject, "file": fname, "mids": [m["id"]], "path": files[0],
-                   "choice": archive_name(names, from_, fname.removesuffix(".pdf"), digest)}
+                   "choice": confirmed(names, digest),
+                   "suggestion": suggested(names, from_, fname.removesuffix(".pdf"))}
             by_digest[digest] = row
             rows.append(row)
     rows.sort(key=lambda r: r["date"], reverse=True)
@@ -831,7 +877,7 @@ def review():
                                curses.COLOR_CYAN), 1):
             curses.init_pair(i, c, -1)
         GREEN, YELLOW, RED, CYAN = (curses.color_pair(i) for i in range(1, 5))
-        views = ("all", "transfer", "left out", "no name", "delete")
+        views = ("all", "transfer", "left out", "waiting", "delete")
         state = {"cur": 0, "top": 0, "view": 0, "filter": "", "msg": ""}
 
         def status(r):
@@ -844,7 +890,7 @@ def review():
             for r in rows:
                 s = status(r)
                 if v == "transfer" and s != "✓" or v == "left out" and s != "·" \
-                        or v == "no name" and s != "?" \
+                        or v == "waiting" and s != "?" \
                         or v == "delete" and not deleted.intersection(r["mids"]):
                     continue
                 if f and f not in " ".join([r["from"], r["subject"], r["file"],
@@ -919,7 +965,7 @@ def review():
                     return current
 
         def transfer(r, rename=False, recategorise=False):
-            c = r["choice"]
+            c = r["choice"] or r["suggestion"]
             cat, name = c if c and c != ("-", "-") else (None, None)
             if cat is None or recategorise:
                 cat = pick_category(cat)
@@ -942,7 +988,7 @@ def review():
             if cur >= state["top"] + list_h:
                 state["top"] = cur - list_h + 1
             n = {s: sum(status(r) == s for r in rows) for s in "✓·?"}
-            head = (f" {n['✓']} to Nextcloud  {n['·']} left out  {n['?']} no name  "
+            head = (f" {n['✓']} to Nextcloud  {n['·']} left out  {n['?']} waiting  "
                     f"{len({m for m in deleted})} mail to delete   view: {views[state['view']]}"
                     + (f"   filter: {state['filter']}" if state["filter"] else "")
                     + f"   {cur + 1 if vis else 0}/{len(vis)}")
@@ -952,9 +998,11 @@ def review():
                 attr = {"✓": GREEN, "·": curses.A_DIM, "?": YELLOW}[s]
                 if state["top"] + i == cur:
                     attr |= curses.A_REVERSE
-                c = r["choice"]
+                c = r["choice"] or r["suggestion"]
                 cat = c[0] if c and c != ("-", "-") else ""
                 name = c[1] if c and c != ("-", "-") else f"({r['sender']}: {r['file']})"
+                if r["choice"] is None and c:  # only suggested: confirm with t, or x
+                    name += "  (suggested, " + ("leave out" if c == ("-", "-") else "not confirmed") + ")"
                 dele = "D" if deleted.intersection(r["mids"]) else " "
                 put(y, 0, f"{s}{dele} {r['date']:%Y-%m-%d} {cat:<11.11} {name}".ljust(w), attr)
                 if dele == "D":
@@ -1029,14 +1077,14 @@ def review():
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                  start_new_session=True)
             elif ch in ("T", "X"):
-                what = "to Nextcloud, as named now" if ch == "T" else "left out"
-                todo = [x for x in vis if ch == "X" or x["choice"] not in (None, ("-", "-"))]
+                what = "to Nextcloud, as named or suggested" if ch == "T" else "left out"
+                named = lambda x: x["choice"] or x["suggestion"]
+                todo = [x for x in vis if ch == "X" or named(x) not in (None, ("-", "-"))]
                 if ch == "T" and len(todo) < len(vis):
                     what += f" ({len(vis) - len(todo)} with no name skipped)"
                 if ask(f"All {len(todo)} shown {what}? [y/N] ") in ("y", "Y"):
                     for x in todo:
-                        if ch == "X":
-                            x["choice"] = ("-", "-")
+                        x["choice"] = ("-", "-") if ch == "X" else named(x)
                         chosen[key(x)] = x["choice"]
                     review_save(chosen)
                     state["msg"] = f"{len(todo)} changed"
@@ -1047,8 +1095,86 @@ def review():
         shutil.rmtree(tmpdir, ignore_errors=True)
     left = sum(r["choice"] is None for r in rows)
     print(f"deck-mail: review: choices are in {ARCHIVE_NAMES}"
-          + (f"; {left} PDFs still have no name" if left else "")
+          + (f"; {left} PDFs still wait for a decision" if left else "")
           + ". deck-mail archive --dry-run shows what will go; sync sends it and deletes the mail.")
+    return 0
+
+
+def refresh_waiting():
+    """`pdf-waiting` on the mail whose PDFs still wait, after a choice in review or mmm."""
+    rows, _ = review_load()
+    seen = archive_seen()
+    mark_waiting({m for r in rows if r["choice"] is None and r["digest"] not in seen
+                  for m in r["mids"]})
+
+
+def pdfs(mids):
+    """For mmm: each PDF of these messages as JSON: its sha256, and its state, `sent` (with
+    `where` in Nextcloud), `chosen` (goes at the next sync), `left out`, or `waiting`; the
+    category and name chosen, or the ones suggested."""
+    import hashlib
+    names, seen, out = archive_names(), archive_seen(), []
+    shown = subprocess.run(["notmuch", "show", "--format=json", "--body=false", "--entire-thread=false",
+                            "--exclude=false", " or ".join(nm_id(m) for m in mids)],
+                           capture_output=True, text=True, check=True).stdout if mids else "[]"
+
+    def walk(node):
+        if isinstance(node, dict):
+            yield node
+        elif isinstance(node, list):
+            for n in node:
+                yield from walk(n)
+
+    for m in walk(json.loads(shown)):
+        files = m["filename"] if isinstance(m["filename"], list) else [m["filename"]]
+        _, _, from_, _, found = mail_pdfs(files[0])
+        tags = m.get("tags", [])
+        for fname, data in found:
+            digest = hashlib.sha256(data).hexdigest()
+            choice = confirmed(names, digest)
+            pdf = {"message": m["id"], "file": fname, "sha256": digest,
+                   "suggested": suggested(names, from_, fname.removesuffix(".pdf"))}
+            if seen.get(digest) not in (None, "-"):
+                pdf.update(state="sent", where=seen[digest])
+            elif seen.get(digest) == "-" or choice == ("-", "-") or "noarchive" in tags:
+                pdf.update(state="left out")
+            elif choice:
+                pdf.update(state="chosen")
+            else:
+                pdf.update(state="waiting")
+            if choice and choice != ("-", "-"):
+                pdf.update(category=choice[0], name=choice[1])
+            out.append(pdf)
+    print(json.dumps({"categories": CATEGORIES, "pdfs": out}, ensure_ascii=False))
+    return 0
+
+
+def file_pdf(args):
+    """`file SHA256 CATEGORY NAME`, `file SHA256 -` (leave out), `file SHA256 --forget`: the
+    choice for one PDF, as review makes it. The next sync sends it."""
+    if len(args) not in (2, 3) or len(args) == 2 and args[1] not in ("-", "--forget"):
+        print("deck-mail file SHA256 CATEGORY NAME | SHA256 - | SHA256 --forget", file=sys.stderr)
+        return 2
+    digest = args[0].removeprefix("sha256:").lower()
+    if not re.fullmatch(r"[0-9a-f]{16,64}", digest):
+        print(f"deck-mail: file: not a sha256: {args[0]}", file=sys.stderr)
+        return 2
+    done = next((v for d, v in archive_seen().items() if d.startswith(digest)), None)
+    if done is not None:
+        print("deck-mail: file: already " + ("left out" if done == "-" else f"in Nextcloud: {done}"),
+              file=sys.stderr)
+        return 1
+    chosen = review_overrides()
+    key = digest[:16]
+    if args[1] == "--forget":
+        chosen.pop(key, None)
+    elif args[1] == "-":
+        chosen[key] = ("-", "-")
+    else:
+        category, name = safe(args[1], 40), safe(args[2], 90)
+        chosen[key] = (category, name)
+    review_save(chosen)
+    refresh_waiting()
     return 0
 
 
@@ -1110,7 +1236,13 @@ def main():
         limit = int(cmd[cmd.index("--limit") + 1]) if "--limit" in cmd else None
         return archive(dry_run="--dry-run" in cmd, limit=limit)
     if cmd == ["review"]:
-        return review()
+        r = review()
+        refresh_waiting()
+        return r
+    if cmd[:1] == ["pdfs"]:
+        return pdfs(cmd[1:])
+    if cmd[:1] == ["file"]:
+        return file_pdf(cmd[1:])
     if cmd[:1] == ["top"]:
         return top(cmd[1:])
     print(__doc__.split("\n\n", 2)[1], file=sys.stderr)

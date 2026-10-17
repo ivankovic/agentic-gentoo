@@ -1,10 +1,12 @@
 //! A thread as lines on screen. Links (in HTML and bare URLs in plain text) and attachments are
 //! focus points the cursor jumps between; everything else is text with a kind for its style.
 
+use crate::archive::{Pdf, State};
 use crate::notmuch::Message;
 use chrono::{Datelike, Local, TimeZone};
 use html2text::render::RichAnnotation;
 use serde_json::Value;
+use std::collections::HashMap;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -21,7 +23,14 @@ pub enum Kind {
     Link,
     Attachment,
     Rule,
+    /// A PDF that waits for a choice: to Nextcloud, or left out.
+    Waiting,
+    /// A PDF chosen for, or already in, Nextcloud.
+    Filed,
 }
+
+/// What became of each PDF, by (message id, part).
+pub type Pdfs = HashMap<(String, u64), Pdf>;
 
 #[derive(Clone, Debug)]
 pub struct Seg {
@@ -219,12 +228,46 @@ fn size(bytes: u64) -> String {
     }
 }
 
-struct Builder {
+struct Builder<'a> {
     doc: Doc,
     width: usize,
+    pdfs: &'a Pdfs,
 }
 
-impl Builder {
+/// The line under a PDF: what became of it, or that it waits and what `t` would make of it.
+fn filing(p: &Pdf) -> (String, Kind) {
+    let as_ = |c: &str, n: &str| format!("{c} / {n}");
+    match (&p.state, &p.category, &p.name) {
+        (State::Sent, ..) => (
+            format!("   ☁ in Nextcloud: {}", p.r#where.as_deref().unwrap_or("")),
+            Kind::Meta,
+        ),
+        (State::LeftOut, ..) => ("   ☁ left out of Nextcloud".into(), Kind::Meta),
+        (State::Chosen, Some(c), Some(n)) => (
+            format!(
+                "   ☁ to Nextcloud at the next sync, as {} · t changes it",
+                as_(c, n)
+            ),
+            Kind::Filed,
+        ),
+        _ => match &p.suggested {
+            Some((c, _)) if c == "-" => (
+                "   ☁ waiting · the rules say leave it out: x does · t files it in Nextcloud".into(),
+                Kind::Waiting,
+            ),
+            Some((c, n)) => (
+                format!("   ☁ waiting · t files it as {} · x leaves it out", as_(c, n)),
+                Kind::Waiting,
+            ),
+            None => (
+                "   ☁ waiting · t files it in Nextcloud · x leaves it out".into(),
+                Kind::Waiting,
+            ),
+        },
+    }
+}
+
+impl Builder<'_> {
     fn focus(&mut self, target: Target, text: String) -> usize {
         self.doc.focus.push(Focus {
             target,
@@ -473,6 +516,14 @@ impl Builder {
                             focus: None,
                         },
                     ]);
+                    if let Some(p) = self.pdfs.get(&(msg.to_string(), part)) {
+                        let (text, kind) = filing(p);
+                        self.line(vec![Seg {
+                            text,
+                            kind,
+                            focus: None,
+                        }]);
+                    }
                 }
                 Piece::Forwarded { headers, body } => {
                     self.blank();
@@ -500,11 +551,13 @@ fn push(line: &mut Vec<Seg>, s: Seg) {
     line.push(s);
 }
 
-/// The thread at `width` columns. `html` prefers the HTML of a message that has both.
-pub fn thread(msgs: &[Message], width: usize, html: bool) -> Doc {
+/// The thread at `width` columns. `html` prefers the HTML of a message that has both; `pdfs`
+/// says what became of its PDFs.
+pub fn thread(msgs: &[Message], width: usize, html: bool, pdfs: &Pdfs) -> Doc {
     let mut b = Builder {
         doc: Doc::default(),
         width: width.max(20),
+        pdfs,
     };
     for (i, m) in msgs.iter().enumerate() {
         if i > 0 {
@@ -569,6 +622,7 @@ mod tests {
         let mut b = Builder {
             doc: Doc::default(),
             width: 30,
+            pdfs: &Pdfs::new(),
         };
         b.plain("Read it at https://example.org/a/very/long/path/that/wraps/around and reply");
         assert_eq!(b.doc.focus.len(), 1);
@@ -596,6 +650,7 @@ mod tests {
         let mut b = Builder {
             doc: Doc::default(),
             width: 60,
+            pdfs: &Pdfs::new(),
         };
         b.html("<p>Bok, mjesto je <a href=\"https://maps.example/x\">ovdje na karti</a>.</p>");
         assert_eq!(b.doc.focus.len(), 1);
@@ -604,6 +659,50 @@ mod tests {
             Target::Link("https://maps.example/x".into())
         );
         assert_eq!(b.doc.focus[0].text, "ovdje na karti");
+    }
+
+    #[test]
+    fn a_pdf_says_what_became_of_it() {
+        let msg = Message {
+            id: "m@x".into(),
+            timestamp: 0,
+            tags: vec![],
+            from: "HEP <racuni@hep.hr>".into(),
+            to: "me".into(),
+            cc: String::new(),
+            subject: "Račun".into(),
+            body: serde_json::from_str(
+                r#"[{"id": 1, "content-type": "multipart/mixed", "content": [
+                    {"id": 2, "content-type": "text/plain", "content": "U privitku."},
+                    {"id": 3, "content-type": "application/pdf", "filename": "racun.pdf"}]}]"#,
+            )
+            .unwrap(),
+        };
+        let mut pdfs = Pdfs::new();
+        pdfs.insert(
+            ("m@x".into(), 3),
+            Pdf {
+                message: "m@x".into(),
+                sha256: "ab".into(),
+                state: State::Waiting,
+                category: None,
+                name: None,
+                r#where: None,
+                suggested: Some(("Računi".into(), "HEP - račun".into())),
+            },
+        );
+        let doc = thread(&[msg], 80, true, &pdfs);
+        let text: Vec<String> = doc
+            .lines
+            .iter()
+            .map(|l| l.iter().map(|s| s.text.as_str()).collect())
+            .collect();
+        let at = text.iter().position(|l| l.contains("racun.pdf")).unwrap();
+        assert!(
+            text[at + 1].contains("waiting · t files it as Računi / HEP - račun"),
+            "{text:?}"
+        );
+        assert_eq!(doc.lines[at + 1][0].kind, Kind::Waiting);
     }
 
     #[test]

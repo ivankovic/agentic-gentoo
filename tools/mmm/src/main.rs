@@ -2,6 +2,7 @@
 //! Gmail through `deck-mail sync`, as anything else's do.
 
 mod app;
+mod archive;
 mod config;
 mod notmuch;
 mod render;

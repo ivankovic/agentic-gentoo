@@ -11,6 +11,7 @@ const DEFAULT: &str = "\
 Inbox = tag:inbox
 Unread = tag:unread
 Starred = tag:flagged
+Waiting = tag:pdf-waiting
 Sent = tag:sent
 Drafts = tag:draft
 Everything = *
