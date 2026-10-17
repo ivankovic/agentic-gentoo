@@ -15,4 +15,8 @@ note = "upstream 7d722c9 on main, after 2.7.1; drop on the next release"
 [[patch]]
 id = "games-board/chess-tui/0002-ask-before-a-new-game-discards-a-saved-one.patch"
 upstream = "https://github.com/thomas-mauran/chess-tui"
-event = []
+
+[[patch.event]]
+at = "2026-10-17T13:35:29+02:00"
+state = "sent"
+url = "https://github.com/thomas-mauran/chess-tui/pull/358"
