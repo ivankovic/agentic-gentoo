@@ -497,6 +497,28 @@ impl App {
                     self.mode = Mode::Pick(ListState::default().with_selected(Some(at)));
                 }
             }
+            KeyCode::Char('S') if self.view == View::Patches => {
+                if let Some(r) = self.selected_patch() {
+                    let id = self.m.rows[r].id.clone();
+                    let res = self
+                        .m
+                        .stage(&id)
+                        .and_then(|s| crate::send::terminal(&s.dir).map(|()| s));
+                    self.status = match res {
+                        Ok(s) if s.fresh => format!(
+                            "staged on {} in {}; a terminal is open there",
+                            s.branch,
+                            s.dir.display()
+                        ),
+                        Ok(s) => format!(
+                            "{} in {} was there already; a terminal is open there",
+                            s.branch,
+                            s.dir.display()
+                        ),
+                        Err(e) => format!("not staged: {e:#}"),
+                    };
+                }
+            }
             KeyCode::Char('U') if self.view == View::Patches => {
                 if let Some(r) = self.selected_patch() {
                     let buf = self
@@ -552,7 +574,7 @@ impl App {
                 }
                 View::Usage => "q quit · Tab view · j/k move · / search · s sort · p period · Enter package · r reload",
                 View::Patches => {
-                    "q quit · Tab view · j/k move · / search · m change state · U upstream · r reload"
+                    "q quit · Tab view · j/k move · / search · m change state · U upstream · S stage upstream · r reload"
                 }
             })
             .dark_gray(),

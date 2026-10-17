@@ -3,6 +3,7 @@
 
 mod model;
 mod patches;
+mod send;
 mod track;
 mod tui;
 mod usage;
@@ -51,6 +52,28 @@ enum Cmd {
     },
     /// Set the upstream project a patch is meant for
     Upstream { id: String, url: String },
+    /// Put a patch on a new branch of its upstream project's clone in ~/3p, staged and not
+    /// committed, and open a terminal there
+    Stage {
+        id: String,
+        #[arg(long)]
+        no_terminal: bool,
+    },
+    /// In a clone: make your fork on GitHub and add it as the remote `fork`
+    Fork {
+        #[arg(short = 'C', default_value = ".")]
+        dir: PathBuf,
+    },
+    /// In a clone: push the current branch to your fork
+    Push {
+        #[arg(short = 'C', default_value = ".")]
+        dir: PathBuf,
+    },
+    /// In a clone: open the browser to write the pull request; once it exists, mark the patch sent
+    Pr {
+        #[arg(short = 'C', default_value = ".")]
+        dir: PathBuf,
+    },
     /// Print CPU and memory use per package, as deck-usaged recorded it, tab-separated
     Usage {
         /// How far back, in days
@@ -91,6 +114,11 @@ fn main() -> Result<()> {
             (None, true) => usage::print_spikes(db, *days, None),
             (None, false) => usage::print_totals(db, *days),
         };
+    }
+    match &cli.cmd {
+        Some(Cmd::Fork { dir }) => return send::fork(dir),
+        Some(Cmd::Push { dir }) => return send::push(dir),
+        _ => {}
     }
     let mut m = Model::load(host_dir)?;
     match cli.cmd {
@@ -136,6 +164,43 @@ fn main() -> Result<()> {
         }
         Some(Cmd::Mark { id, state, url, note }) => m.record(&id, state, url, note),
         Some(Cmd::Upstream { id, url }) => m.set_upstream(&id, url),
-        Some(Cmd::Usage { .. }) => unreachable!(),
+        Some(Cmd::Stage { id, no_terminal }) => {
+            let s = m.stage(&id)?;
+            if s.fresh {
+                println!("deck: staged on branch {} in {}", s.branch, s.dir.display());
+            } else {
+                println!(
+                    "deck: branch {} in {} was there already, left as it is",
+                    s.branch,
+                    s.dir.display()
+                );
+            }
+            println!("deck: there: git diff --cached, git commit, then deck fork, deck push, deck pr");
+            if !no_terminal {
+                send::terminal(&s.dir)?;
+            }
+            Ok(())
+        }
+        Some(Cmd::Pr { dir }) => {
+            let pr = send::pr(&dir)?;
+            let Some(url) = pr.url else {
+                println!("deck: once the pull request is created, run deck pr again to mark the patch sent");
+                return Ok(());
+            };
+            let Some(row) = m.staged_on(&dir, &pr.branch) else {
+                println!("deck: {url} (no local patch staged on {})", pr.branch);
+                return Ok(());
+            };
+            let id = row.id.clone();
+            match m.last_event(row).map(|e| e.state) {
+                None | Some(State::Unsent) => {
+                    m.record(&id, State::Sent, url.clone(), String::new())?;
+                    println!("deck: {url}; {id} marked sent");
+                }
+                Some(s) => println!("deck: {url}; {id} is {}", s.label()),
+            }
+            Ok(())
+        }
+        Some(Cmd::Usage { .. } | Cmd::Fork { .. } | Cmd::Push { .. }) => unreachable!(),
     }
 }

@@ -495,7 +495,8 @@ generate the gitleaks ebuild below).
 `deck` ([tools/deck](../../tools/deck/)) lists every installed package by origin and the local patches each carries.
 [upstream.toml](upstream.toml) records where each patch stands upstream (sent, in review,
 rejected, backport…), one timestamped event per change; `deck` edits it, as do `deck mark` and
-hand edits.
+hand edits. `deck stage`, `deck fork`, `deck push` and `deck pr` take a patch upstream one step at a
+time, with the commit message and pull request written by hand ([tools/deck](../../tools/deck/README.md#sending-a-patch-upstream)).
 
 `deck` and its services come from the overlay's `app-portage/deck` (live, built from this
 clone). `deck-usaged` (root) records CPU, memory and a CPU profile per package per hour, with

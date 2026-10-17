@@ -13,6 +13,8 @@ deck packages [--filter here|compiled|patched|overlay|…]
 deck patches
 deck mark <category/package/file> <state> [--url URL] [--note TEXT]
 deck upstream <category/package/file> <URL>
+deck stage <category/package/file>         # onto a branch of upstream's clone, staged; a terminal there
+deck fork | deck push | deck pr            # in that clone, one step each
 deck usage [--days N] [--spikes]           # CPU, memory, active time per package
 deck usage --pkg <label>                   # whose code it ran, who ran its code, its spikes
 ```
@@ -63,6 +65,26 @@ last event is the current state. A patch removed from the repository stays liste
 
 The first five count as open.
 
+## Sending a patch upstream
+
+Each step is one command and only runs when asked: the commit message and the pull request's
+text are the user's to write, and nothing reaches upstream until `deck push`.
+
+1. `deck stage <id>` (or `S`): clones the patch's upstream project to `~/3p/<host>/<owner>/<repo>`
+   if it isn't there, makes a branch named after the patch file (`0002-ask-before.patch` goes on
+   `ask-before`) from upstream's default branch, applies the patch with
+   `git apply --3way --index`, staged and uncommitted, and opens a terminal there. A branch that
+   exists already is left as it is; uncommitted changes in the clone stop it.
+2. Review (`git diff --cached`), adapt it to upstream's current code and checks, `git commit`.
+3. `deck fork`: `gh repo fork`, as the remote `fork`; `origin` stays upstream.
+4. `deck push`: the branch to the fork, once it has a commit of its own.
+5. `deck pr`: opens the browser on a new pull request from the fork's branch, with upstream's
+   template. Run it again once the pull request exists: it prints its URL and marks the patch
+   `sent` with it, if it was untracked or `unsent`.
+
+The patch file in the host's directory stays as it is: if upstream asks for changes, they are
+made in the clone, and the patch here is refreshed from it by hand.
+
 ## Keys
 
 | Key | |
@@ -76,6 +98,7 @@ The first five count as open.
 | `p` | usage over the last 1, 7 or 30 days |
 | `m` | change a patch's state: pick it, then URL and note (both optional) |
 | `U` | set the patch's upstream project |
+| `S` | stage the patch for upstream, as `deck stage`, and open a terminal in the clone |
 | `r` | reload |
 | `q` | quit |
 

@@ -1,12 +1,13 @@
 //! Everything deck shows, loaded once and reloaded on request.
 
 use crate::patches::{self, PatchFile};
+use crate::send;
 use crate::track::{Event, State, Tracked, Tracking};
 use crate::vdb::{self, Pkg};
 use anyhow::{Context, Result, bail};
 use chrono::{Local, TimeZone};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A patch as deck lists it: a file in the host's directory, an entry in upstream.toml, or both.
 /// An entry without a file is a patch no longer carried, kept for its history.
@@ -122,6 +123,35 @@ impl Model {
                 None => "(no match)".into(),
             },
         }
+    }
+
+    /// Stages the patch's file on a branch of its upstream project's clone (`send::stage`).
+    pub fn stage(&self, id: &str) -> Result<send::Staged> {
+        self.known(id)?;
+        let row = self.rows.iter().find(|r| r.id == id).context("no such patch")?;
+        let file = row
+            .file
+            .map(|i| &self.files[i])
+            .with_context(|| format!("{id}: its file is gone"))?;
+        let upstream = self
+            .tracked(row)
+            .map(|t| t.upstream.as_str())
+            .filter(|u| !u.is_empty())
+            .with_context(|| format!("{id} has no upstream project: deck upstream {id} <URL>"))?;
+        send::stage(upstream, id, &self.host_dir.join(&file.rel))
+    }
+
+    /// The patch that `stage` puts on `branch` in the clone at `dir`, if one does.
+    pub fn staged_on(&self, dir: &Path, branch: &str) -> Option<&PatchRow> {
+        let dir = dir.canonicalize().ok()?;
+        self.rows.iter().find(|r| {
+            send::branch_name(&r.id) == branch
+                && self
+                    .tracked(r)
+                    .and_then(|t| send::clone_dir(&t.upstream).ok())
+                    .and_then(|d| d.canonicalize().ok())
+                    == Some(dir.clone())
+        })
     }
 
     fn known(&self, id: &str) -> Result<()> {
