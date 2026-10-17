@@ -100,6 +100,10 @@ Secrets (SSH keys, `gh` token, Wi-Fi passwords) stay on the machine; see [Secret
   through `gui-apps/xwayland-satellite` (GURU, `~amd64`; niri starts it on demand) with
   `GDK_BACKEND=x11`, set by [a desktop entry override](home/.local/share/applications/bambu-studio.desktop).
   Without that it exits with status 255 right after startup.
+- **OrcaSlicer** (`media-gfx/orcaslicer-bin`, GURU, `~amd64`), on trial to replace Bambu Studio:
+  the open source (AGPL-3) fork, its upstream AppImage unpacked to `/opt`. It runs on Wayland
+  directly. The plan is the printer in LAN-only and Developer mode, so prints can go to it without
+  Bambu's network plugin; a source build, or PrusaSlicer, once it proves itself.
 
 ## Theme
 
