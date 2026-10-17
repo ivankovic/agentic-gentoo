@@ -194,3 +194,50 @@ impl Model {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every patch ever tracked stays listed, whatever its state, after its file is deleted.
+    #[test]
+    fn a_patch_without_its_file_is_still_listed() {
+        let tracked = |id: &str, state| Tracked {
+            id: id.into(),
+            upstream: String::new(),
+            events: vec![Event {
+                at: now(),
+                state,
+                url: String::new(),
+                note: String::new(),
+            }],
+        };
+        let mut m = Model {
+            host_dir: PathBuf::new(),
+            track_path: PathBuf::new(),
+            pkgs: vec![],
+            files: vec![],
+            tracking: Tracking {
+                patches: vec![
+                    tracked("cat/pkg/0001-a.patch", State::Released),
+                    tracked("cat/pkg/0002-b.patch", State::Dropped),
+                ],
+            },
+            rows: vec![],
+            patch_counts: vec![],
+        };
+        m.rebuild_rows();
+        let rows: Vec<_> = m
+            .rows
+            .iter()
+            .map(|r| (r.id.as_str(), m.state_label(r), m.applies_label(r)))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("cat/pkg/0001-a.patch", "released", "(file gone)".to_string()),
+                ("cat/pkg/0002-b.patch", "dropped", "(file gone)".to_string()),
+            ]
+        );
+    }
+}
