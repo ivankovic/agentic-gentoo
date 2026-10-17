@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
-"""deck-terminals: after a crash, reopen the foot terminals where they were.
+"""deck-terminals: after a crash or a flat battery, reopen the foot terminals where they were.
 
 Runs as a user service (home/.config/systemd/user/deck-terminals.service) for the whole niri
 session. Every 10 s it records each foot window: its workspace, column and place in the column,
 width, the shell's directory and what is running in it (the terminal's foreground program). It
 writes ~/.local/state/deck-terminals/session.json only when that changes, and syncs it to disk,
 so a reset loses at most the last 10 s. Stopping the service (logout, shutdown, reboot) marks
-the file clean.
+the file clean, except when the battery is nearly empty and discharging: that shutdown is
+upower's (CriticalPowerAction; the deck can't hibernate, so it powers off), not yours.
 
 At the start of a session, a file that isn't marked clean means the previous one ended in a
-crash, reset or power loss. If no foot window is open yet, each terminal is opened again in its
+crash, reset, power loss or flat battery. If no foot window is open yet, each terminal is opened again in its
 directory, in the same order and widths on the same workspaces, and the focused one is focused.
 What was running comes back through ~/.bashrc (DECK_RESTORE_CMD):
 
   ssh, nvim, vim   run again as they were (nvim offers its swap file for recovery)
+  mmm, deck        run again (a draft mmm was editing: e on it, and nvim offers the swap file)
   claude           resumed: `claude --resume <session>`, the session found by the window title
                    (Claude Code's title for it) in ~/.claude/projects/<directory>/; when no title
                    matches, `claude --continue`
@@ -39,7 +41,10 @@ PROJECTS = pathlib.Path.home() / ".claude/projects"
 # What /usr/local/bin/jail gives jailed programs as their home.
 JAIL_HOME = pathlib.Path(os.environ.get("XDG_DATA_HOME") or pathlib.Path.home() / ".local/share") / "jail/home"
 INTERVAL = 10
-RERUN = {"ssh", "nvim", "vim"}
+RERUN = {"ssh", "nvim", "vim", "mmm", "deck"}
+# Discharging at this or less when the service stops: upower is powering off (its
+# PercentageAction is 2%), so the session should come back.
+LOW_BATTERY = 5
 SHELLS = {"bash", "sh", "zsh", "fish"}
 
 
@@ -198,7 +203,7 @@ def wait_for_window(pid, timeout=10):
     return None
 
 
-def restore(terminals):
+def restore(terminals, why):
     focus = None
     for n, t in enumerate(terminals):
         if n == 0 or t["workspace"] != terminals[n - 1]["workspace"]:
@@ -206,6 +211,7 @@ def restore(terminals):
         env = dict(os.environ)
         env.pop("DECK_RESTORE_CMD", None)
         env.pop("DECK_RESTORE_RUN", None)
+        env["DECK_RESTORE_WHY"] = why
         if t["cmd"]:
             env["DECK_RESTORE_CMD"] = t["cmd"]
             if t["run"]:
@@ -229,6 +235,18 @@ def restore(terminals):
             focus = wid
     if focus is not None:
         action("focus-window", "--id", str(focus))
+
+
+def battery_flat():
+    for bat in pathlib.Path("/sys/class/power_supply").glob("BAT*"):
+        try:
+            status = (bat / "status").read_text().strip()
+            capacity = int((bat / "capacity").read_text())
+        except (OSError, ValueError):
+            continue
+        if status == "Discharging" and capacity <= LOW_BATTERY:
+            return True
+    return False
 
 
 def notify(body):
@@ -261,9 +279,10 @@ def main():
         previous = {"clean": True, "terminals": []}
     if not previous.get("clean") and previous.get("terminals"):
         if not any(w.get("app_id") == "foot" for w in niri("windows")):
-            restore(previous["terminals"])
+            why = previous.get("why") or "a crash"
+            restore(previous["terminals"], why)
             n = len(previous["terminals"])
-            notify(f"{n} terminal{'s' if n != 1 else ''} reopened after a crash, as they were at "
+            notify(f"{n} terminal{'s' if n != 1 else ''} reopened after {why}, as they were at "
                    f"{previous.get('saved', '?')}.")
 
     last = None
@@ -283,7 +302,10 @@ def main():
 
     try:
         state = json.loads(STATE.read_text())
-        state["clean"] = True
+        if battery_flat():
+            state["why"] = "the battery ran out"
+        else:
+            state["clean"] = True
         write(state)
     except (OSError, ValueError):
         pass

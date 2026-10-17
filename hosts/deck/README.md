@@ -296,12 +296,14 @@ but not yet past the gaps before it (about 2 days), so not conclusive. The cost 
 deck-usaged: Firefox drawing on the CPU took a quarter to half of all CPU time (pixman in the
 profile), often above one core.
 
-**Terminals come back after a crash.** [deck-terminals](usr-local/bin/deck-terminals), run by the
-user service [deck-terminals.service](home/.config/systemd/user/deck-terminals.service), records
-every 10 s each foot window's workspace, column, width, directory and foreground program in
+**Terminals come back after a crash or a flat battery.**
+[deck-terminals](usr-local/bin/deck-terminals), run by the user service
+[deck-terminals.service](home/.config/systemd/user/deck-terminals.service), records every 10 s each
+foot window's workspace, column, width, directory and foreground program in
 `~/.local/state/deck-terminals/session.json` (written and synced only on a change). Logout and
-shutdown mark it clean; if it isn't clean at the next login and no terminal is open yet, the
-terminals reopen as they were and a notification says so. ssh, nvim and vim run again, Claude Code
+shutdown mark it clean, except upower's power-off on a flat battery (discharging at 5% or less when
+the service stops); if it isn't clean at the next login and no terminal is open yet, the terminals
+reopen as they were and a notification says so. ssh, nvim, vim, mmm and deck run again, Claude Code
 resumes its session (`claude --resume`, found by the window title); any other command waits on ↑
 ([home/.bashrc](home/.bashrc), `DECK_RESTORE_CMD`). `deck-terminals --show` prints what would be
 saved now. Scrollback and anything mid-run (a build, an emerge) don't come back.

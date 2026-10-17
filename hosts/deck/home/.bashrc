@@ -148,20 +148,20 @@ __prompt() {
 }
 PROMPT_COMMAND=__prompt
 
-# A terminal reopened after a crash (deck-terminals): its last command goes on ↑, and runs again
-# at the first prompt when DECK_RESTORE_RUN is set (ssh, nvim, vim, claude --resume). At the first
-# prompt, since bash reads the history file only after .bashrc.
+# A terminal reopened after a crash or a flat battery (deck-terminals): its last command goes on
+# ↑, and runs again at the first prompt when DECK_RESTORE_RUN is set (ssh, nvim, vim, mmm, deck,
+# claude --resume). At the first prompt, since bash reads the history file only after .bashrc.
 if [[ -n ${DECK_RESTORE_CMD-} ]]; then
 	__restore() {
-		local cmd=$DECK_RESTORE_CMD run=${DECK_RESTORE_RUN-}
-		unset DECK_RESTORE_CMD DECK_RESTORE_RUN
+		local cmd=$DECK_RESTORE_CMD run=${DECK_RESTORE_RUN-} why=${DECK_RESTORE_WHY:-a crash}
+		unset DECK_RESTORE_CMD DECK_RESTORE_RUN DECK_RESTORE_WHY
 		PROMPT_COMMAND=__prompt
 		history -s -- "$cmd"
 		if [[ -n $run ]]; then
-			printf '\e[90mreopened after a crash: %s\e[0m\n' "$cmd"
+			printf '\e[90mreopened after %s: %s\e[0m\n' "$why" "$cmd"
 			eval "$cmd"
 		else
-			printf '\e[90mreopened after a crash; on ↑: %s\e[0m\n' "$cmd"
+			printf '\e[90mreopened after %s; on ↑: %s\e[0m\n' "$why" "$cmd"
 		fi
 		unset __prompt_t0 __prompt_cmd
 		__prompt
