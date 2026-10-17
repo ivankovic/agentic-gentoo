@@ -12,6 +12,8 @@ for a in */; do
 	drafts+=("folder:\"$a/Drafts\"") trash+=("folder:\"$a/Trash\"")
 done
 ((${#inbox[@]})) || exit 0
+# mmm keeps its drafts in a folder of its own, next to the accounts.
+drafts+=('folder:mmm-drafts')
 or() { local IFS='|'; local q="$*"; echo "(${q//|/ or })"; }
 notmuch tag --batch <<END
 +inbox -- $(or "${inbox[@]}") and not tag:inbox

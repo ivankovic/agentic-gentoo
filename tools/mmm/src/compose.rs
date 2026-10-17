@@ -454,16 +454,21 @@ impl Draft {
         Ok(d)
     }
 
-    /// Sent or thrown away: its message out of notmuch's searches (tagged deleted, the file gone;
-    /// the next `notmuch new` forgets it) and its files.
+    /// Sent or thrown away: its message out of notmuch (tagged deleted, the file gone, and
+    /// `notmuch new` to forget it; a reply's draft left half there breaks its whole thread) and
+    /// its files.
     pub fn forget(&self) -> Result<()> {
         let q = format!("id:{}", notmuch::quote(&draft_message_id(&self.id)));
         let files = notmuch_files(&q)?;
+        if !files.is_empty() {
+            notmuch::tag(&[draft_message_id(&self.id)], "+deleted")?;
+        }
         for f in &files {
             let _ = std::fs::remove_file(f);
         }
         if !files.is_empty() {
-            notmuch::tag(&[draft_message_id(&self.id)], "+deleted")?;
+            // Should this fail (a sync holds the database), showing the thread tries again.
+            let _ = notmuch::forget_gone();
         }
         for p in [self.file.clone(), self.file.with_extension("json")] {
             let _ = std::fs::remove_file(p);
@@ -879,8 +884,9 @@ f="$1"; base="$2"; query="$3"; tag="$4"; send="$5"; log="$6"; draft="$7"; shift 
 mv -- "$f" "$f.sending" 2>/dev/null || exit 0
 if $send "$@" < "$f.sending"; then
     rm -rf -- "$f.sending" "$base.txt" "$base.json" "$base"
-    notmuch search --output=files --exclude=false "$draft" | while IFS= read -r m; do rm -f -- "$m"; done
     notmuch tag +deleted -- "$draft"
+    notmuch search --output=files --exclude=false "$draft" | while IFS= read -r m; do rm -f -- "$m"; done
+    notmuch new --quiet --no-hooks || true
     if [ -n "$query" ]; then notmuch tag "+$tag" -- "$query"; fi
     printf '%s\tsent\t%s\n' "$(date -Is)" "$(basename "$f")" >> "$log"
 else

@@ -126,16 +126,29 @@ impl Message {
     }
 }
 
+/// Makes notmuch forget mail whose files are gone (a draft sent or discarded): until it does,
+/// `notmuch show` fails on the whole thread. No hooks: deck-mail's sync runs them.
+pub fn forget_gone() -> Result<()> {
+    notmuch(&["new", "--quiet", "--no-hooks"]).map(|_| ())
+}
+
 /// Every message of a thread, in thread order, replies after what they answer.
 pub fn show_thread(thread: &str) -> Result<Vec<Message>> {
-    let out = notmuch(&[
+    let args = [
         "show",
         "--format=json",
         "--include-html",
         "--exclude=false",
         "--entire-thread=true",
         &format!("thread:{thread}"),
-    ])?;
+    ];
+    let out = match notmuch(&args) {
+        Err(e) if e.to_string().contains("Error opening") => {
+            forget_gone()?;
+            notmuch(&args)?
+        }
+        r => r?,
+    };
     let v: Value = serde_json::from_slice(&out).context("reading notmuch show")?;
     let mut msgs = vec![];
     // [thread] → thread: [node] → node: [message, [node]]
