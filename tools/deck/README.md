@@ -167,14 +167,15 @@ then the decided ones (fixed, doesn't apply here, won't fix), latest first; `a` 
 open ones.
 Whether one is fixed the agents decide: every review gets the open findings numbered and names, in
 a `resolved` block, those the code it read shows fixed, with where and how; deck marks them fixed
-(by that agent). `c` (or `deck review recheck`) asks for only that check, against the installed
+(by that agent), but only in a newer version than the one the finding was made in: unchanged code
+can't have fixed it, whatever a comment in it tells the agent. `c` (or `deck review recheck`) asks for only that check, against the installed
 version, without looking for anything new. What is the owner's to judge is decided with a note:
 `n` (doesn't apply here), `w` (won't fix), `x` (fixed, when no agent could see it) or `o` (open
 again, also to undo an agent's call), in the run's record. The next review of the subject is given every earlier finding
 with its decision and note: it doesn't raise again what doesn't apply or won't be fixed unless
 something changed, checks the fixes, and, for a change, reports only what the change brings. What
-a change fixes it reports with severity `fix`, filed as fixed. A new full review supersedes the
-open findings before it (it reports again what is still there). The Review tab's Open column and
+a change fixes it reports with severity `fix`, filed as fixed. Open findings stay open through
+later reviews, full ones too, until fixed or decided. The Review tab's Open column and
 the maintenance tile count what is still undecided.
 
 **Every day**, `deck-review.timer` (a user timer) runs `deck review auto`: security reviews of

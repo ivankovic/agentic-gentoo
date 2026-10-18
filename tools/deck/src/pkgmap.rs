@@ -18,7 +18,8 @@ pub struct PkgMap {
     by_path: HashMap<u64, u32>,
     /// `category/package`, without the version: usage carries over an upgrade.
     pub cps: Vec<String>,
-    stamp: Option<SystemTime>,
+    /// The package database's `stamp()` when the map was built.
+    pub stamp: Option<SystemTime>,
 }
 
 fn hash(s: &str) -> u64 {
@@ -27,7 +28,8 @@ fn hash(s: &str) -> u64 {
     h.finish()
 }
 
-fn stamp() -> Option<SystemTime> {
+/// When Portage last merged or removed a package.
+pub fn stamp() -> Option<SystemTime> {
     fs::metadata(COUNTER).and_then(|m| m.modified()).ok()
 }
 
@@ -115,11 +117,6 @@ impl PkgMap {
         self.by_path
             .get(&hash(path))
             .map(|&i| self.cps[i as usize].as_str())
-    }
-
-    /// Whether Portage merged or removed something since the map was built.
-    pub fn stale(&self) -> bool {
-        stamp() != self.stamp
     }
 
     pub fn len(&self) -> usize {

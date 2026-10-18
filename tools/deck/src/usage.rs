@@ -160,6 +160,7 @@ pub fn load(db: &Path, days: f64) -> Result<Usage> {
 
     let mut rows: Vec<Row> = rows.into_values().collect();
     for r in &mut rows {
+        r.label = shown(&r.label);
         r.ctx.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     }
     rows.sort_by(|a, b| b.cpu_us.cmp(&a.cpu_us).then(a.label.cmp(&b.label)));
@@ -184,7 +185,7 @@ pub fn spikes(db: &Path, days: f64, label: Option<&str>) -> Result<Vec<Spike>> {
         Ok(Spike {
             start: r.get(0)?,
             secs: r.get(1)?,
-            label: r.get(2)?,
+            label: shown(&r.get::<_, String>(2)?),
             ctx: r.get(3)?,
             cpu_us: r.get(4)?,
             peak_cores: r.get(5)?,
@@ -205,7 +206,9 @@ pub fn code(db: &Path, days: f64, label: &str) -> Result<(Samples, Samples)> {
         let Ok(mut q) = c.prepare(sql) else {
             return Ok(vec![]);
         };
-        let rows = q.query_map(params![from, label], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let rows = q.query_map(params![from, label], |r| {
+            Ok((shown(&r.get::<_, String>(0)?), r.get(1)?))
+        })?;
         Ok(rows.collect::<Result<_, _>>()?)
     };
     let runs = by(
@@ -215,6 +218,21 @@ pub fn code(db: &Path, days: f64, label: &str) -> Result<(Samples, Samples)> {
         "SELECT prog, sum(samples) s FROM libs WHERE hour >= ?1 AND lib = ?2 GROUP BY prog ORDER BY s DESC",
     )?;
     Ok((runs, ran_by))
+}
+
+/// A label as text to show: labels come from program and file names and `comm`, which any process
+/// sets, so control characters (an escape sequence for the terminal, a tab or line break that
+/// would split the table) are shown escaped.
+pub fn shown(label: &str) -> String {
+    let mut out = String::with_capacity(label.len());
+    for c in label.chars() {
+        if c.is_control() {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 pub fn pct(part: i64, total: i64) -> f64 {
@@ -286,4 +304,16 @@ pub fn print_code(db: &Path, days: f64, label: &str) -> Result<()> {
         println!("{p}\t{n}\t{:.1}%", pct(*n, total));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn labels_show_no_control_characters() {
+        assert_eq!(shown("tmp:\x1b]52;c;aGk=\x07x"), "tmp:\\u{1b}]52;c;aGk=\\u{7}x");
+        assert_eq!(shown("a\tb\nc"), "a\\tb\\nc");
+        assert_eq!(shown("dev-libs/glib"), "dev-libs/glib");
+    }
 }

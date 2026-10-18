@@ -299,20 +299,29 @@ fn kv<'a>(k: &'a str, v: impl Into<String>) -> Line<'a> {
 
 impl App {
     fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
+        // Drawn again only when something changed: nothing on screen moves by itself.
+        let mut dirty = true;
         while !self.quit {
-            terminal.draw(|f| self.draw(f))?;
+            if dirty {
+                terminal.draw(|f| self.draw(f))?;
+                dirty = false;
+            }
             // Every two seconds without a key, whether the reviews' records changed: a review
             // started, finished or decided anywhere (the timer, a terminal, an agent) shows here.
             if !event::poll(std::time::Duration::from_secs(2))? {
                 if review::runs_changed() != self.runs_seen {
                     self.reload_runs();
+                    dirty = true;
                 }
                 continue;
             }
-            if let Event::Key(k) = event::read()?
-                && k.kind == KeyEventKind::Press
-            {
-                self.key(k);
+            match event::read()? {
+                Event::Key(k) if k.kind == KeyEventKind::Press => {
+                    self.key(k);
+                    dirty = true;
+                }
+                Event::Resize(..) => dirty = true,
+                _ => {}
             }
         }
         Ok(())

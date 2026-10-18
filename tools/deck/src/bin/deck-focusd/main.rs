@@ -75,14 +75,16 @@ fn niri(tx: Sender<Msg>) {
     }
 }
 
-/// The process the user works with in a window: for a terminal, its foreground program.
-fn foreground(pid: i32) -> i32 {
+/// The process the user works with in a window: for a terminal, its foreground program. And
+/// whether the window is a terminal (a child of its process has one): what runs in a terminal
+/// changes, a GUI app's program doesn't.
+fn foreground(pid: i32) -> (i32, bool) {
     let fg = procfs::children(pid)
         .into_iter()
         .filter_map(procfs::stat)
         .find(|s| s.tty != 0 && s.tpgid > 0)
         .map(|s| s.tpgid);
-    let Some(mut p) = fg else { return pid };
+    let Some(mut p) = fg else { return (pid, false) };
     for _ in 0..8 {
         let Some(exe) = procfs::exe(p) else { break };
         let wrapper = exe.ends_with("/bwrap") || (is_interpreter(&exe) && procfs::script_path(p).is_some());
@@ -92,19 +94,20 @@ fn foreground(pid: i32) -> i32 {
         }
         p = kids[0];
     }
-    p
+    (p, true)
 }
 
-/// The path that names the program: its script's for an interpreter running one.
-fn program(pid: i32) -> Option<String> {
-    let p = foreground(pid);
+/// The path that names the program: its script's for an interpreter running one. And whether it
+/// runs in a terminal.
+fn program(pid: i32) -> Option<(String, bool)> {
+    let (p, terminal) = foreground(pid);
     let exe = procfs::exe(p)?;
     if is_interpreter(&exe)
         && let Some(script) = procfs::script_path(p)
     {
-        return Some(script);
+        return Some((script, terminal));
     }
-    Some(exe)
+    Some((exe, terminal))
 }
 
 #[derive(Default)]
@@ -112,6 +115,9 @@ struct Focus {
     /// Window id → (pid, app id).
     windows: HashMap<u64, (i32, String)>,
     focused: Option<u64>,
+    /// The program of each window that isn't a terminal, once found: looked up again only when
+    /// niri says the window changed.
+    programs: HashMap<u64, String>,
 }
 
 impl Focus {
@@ -120,6 +126,7 @@ impl Focus {
         let pid = w["pid"].as_i64().unwrap_or(0) as i32;
         let app = w["app_id"].as_str().unwrap_or("").to_string();
         self.windows.insert(id, (pid, app));
+        self.programs.remove(&id);
         if w["is_focused"].as_bool() == Some(true) {
             self.focused = Some(id);
         }
@@ -128,6 +135,7 @@ impl Focus {
     fn event(&mut self, v: &Value) {
         if let Some(e) = v.get("WindowsChanged") {
             self.windows.clear();
+            self.programs.clear();
             self.focused = None;
             for w in e["windows"].as_array().into_iter().flatten() {
                 self.window(w);
@@ -137,6 +145,7 @@ impl Focus {
         } else if let Some(e) = v.get("WindowClosed") {
             if let Some(id) = e["id"].as_u64() {
                 self.windows.remove(&id);
+                self.programs.remove(&id);
                 if self.focused == Some(id) {
                     self.focused = None;
                 }
@@ -147,12 +156,20 @@ impl Focus {
     }
 
     /// The focused window's program and app id.
-    fn target(&self) -> Option<(String, String)> {
-        let (pid, app) = self.windows.get(&self.focused?)?;
+    fn target(&mut self) -> Option<(String, String)> {
+        let id = self.focused?;
+        let (pid, app) = self.windows.get(&id)?;
         if *pid <= 0 {
             return None;
         }
-        Some((program(*pid)?, app.clone()))
+        if let Some(p) = self.programs.get(&id) {
+            return Some((p.clone(), app.clone()));
+        }
+        let (program, terminal) = program(*pid)?;
+        if !terminal {
+            self.programs.insert(id, program.clone());
+        }
+        Some((program, app.clone()))
     }
 }
 
@@ -190,7 +207,10 @@ fn main() -> Result<()> {
         ids.sort();
         for id in ids {
             let (pid, app) = &focus.windows[&id];
-            println!("{app}\t{pid}\t{}", program(*pid).unwrap_or_default());
+            println!(
+                "{app}\t{pid}\t{}",
+                program(*pid).map(|(p, _)| p).unwrap_or_default()
+            );
         }
         return Ok(());
     }
@@ -226,14 +246,27 @@ fn main() -> Result<()> {
     let mut next = Instant::now() + Duration::from_secs(1);
     let mut flushed = Instant::now();
     loop {
-        match rx.recv_timeout(next.saturating_duration_since(Instant::now())) {
+        // Idle, nothing is counted: no tick, only a message (the user back, a window) wakes it.
+        let msg = if idle {
+            rx.recv().map_err(|_| RecvTimeoutError::Disconnected)
+        } else {
+            rx.recv_timeout(next.saturating_duration_since(Instant::now()))
+        };
+        match msg {
             Ok(Msg::Niri(v)) => focus.event(&v),
             Ok(Msg::NiriGone) => focus = Focus::default(),
             Ok(Msg::Idle(true)) => {
                 idle = true;
                 pending.clear();
+                if let Err(e) = flush(&mut db, &mut done) {
+                    eprintln!("deck-focusd: writing {}: {e:#}", path.display());
+                }
+                flushed = Instant::now();
             }
-            Ok(Msg::Idle(false)) => idle = false,
+            Ok(Msg::Idle(false)) => {
+                idle = false;
+                next = Instant::now() + Duration::from_secs(1);
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }

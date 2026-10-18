@@ -16,6 +16,9 @@ const CN_VAL_PROC: u32 = 1;
 const PROC_CN_MCAST_LISTEN: u32 = 1;
 const PROC_EVENT_FORK: u32 = 1;
 const PROC_EVENT_EXEC: u32 = 2;
+/// From 6.6 the kernel takes `struct proc_input`, which names the events wanted, and sends no
+/// others: no wakeup for each exit, rename or uid change. Before, only the operation.
+const FILTER_SINCE: (u32, u32) = (6, 6);
 
 const NLMSG_HDRLEN: usize = 16;
 const NLMSG_ERROR: u16 = 2;
@@ -30,6 +33,7 @@ const TASKSTATS_CMD_GET: u8 = 1;
 const TASKSTATS_CMD_ATTR_REGISTER_CPUMASK: u16 = 3;
 const TASKSTATS_TYPE_STATS: u16 = 3;
 const TASKSTATS_TYPE_AGGR_PID: u16 = 4;
+const TASKSTATS_TYPE_AGGR_TGID: u16 = 5;
 
 // struct taskstats
 const TS_COMM: usize = 80;
@@ -57,6 +61,18 @@ pub struct ThreadExit {
     /// Peak resident memory of the process, in KiB.
     pub hiwater_kb: u64,
     pub comm: String,
+    /// The process may have ended with it: its last thread (the report has the whole process's
+    /// totals), or its main one.
+    pub last: bool,
+}
+
+/// The running kernel's version, major and minor.
+fn kernel_version() -> (u32, u32) {
+    let release = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
+    let mut v = release
+        .split(|c: char| !c.is_ascii_digit())
+        .map(|n| n.parse().unwrap_or(0));
+    (v.next().unwrap_or(0), v.next().unwrap_or(0))
 }
 
 fn align4(n: usize) -> usize {
@@ -254,9 +270,13 @@ impl ProcConnector {
         cn.extend(CN_VAL_PROC.to_ne_bytes());
         cn.extend(0u32.to_ne_bytes()); // seq
         cn.extend(0u32.to_ne_bytes()); // ack
-        cn.extend(4u16.to_ne_bytes()); // len
+        let filter = kernel_version() >= FILTER_SINCE;
+        cn.extend((if filter { 8u16 } else { 4u16 }).to_ne_bytes()); // len
         cn.extend(0u16.to_ne_bytes()); // flags
         cn.extend(PROC_CN_MCAST_LISTEN.to_ne_bytes());
+        if filter {
+            cn.extend((PROC_EVENT_FORK | PROC_EVENT_EXEC).to_ne_bytes());
+        }
         send(&fd, &nlmsg(NLMSG_DONE, 0, &cn))?;
         Ok(ProcConnector {
             fd,
@@ -348,10 +368,6 @@ impl Taskstats {
         Ok(Taskstats { fd, family, buf })
     }
 
-    pub fn fd(&self) -> RawFd {
-        self.fd.as_raw_fd()
-    }
-
     /// Reads every queued exit report. Returns how many times the queue had overflowed.
     pub fn drain(&mut self, out: &mut Vec<ThreadExit>) -> io::Result<u64> {
         let mut lost = 0;
@@ -370,7 +386,8 @@ impl Taskstats {
                     continue;
                 }
                 // Only the per-thread part: the per-process aggregate sent when the last thread
-                // exits carries delay accounting, not CPU time.
+                // exits carries delay accounting, not CPU time. It says the process ended.
+                let ended = attrs(&p[4..]).any(|(t, _)| t == TASKSTATS_TYPE_AGGR_TGID);
                 for (t, nested) in attrs(&p[4..]) {
                     if t != TASKSTATS_TYPE_AGGR_PID {
                         continue;
@@ -379,8 +396,9 @@ impl Taskstats {
                         if t == TASKSTATS_TYPE_STATS && s.len() >= TS_TGID + 4 {
                             let comm = &s[TS_COMM..TS_COMM + 32];
                             let end = comm.iter().position(|&c| c == 0).unwrap_or(32);
+                            let pid = u32_at(s, TS_PID);
                             let tgid = match u32_at(s, TS_TGID) {
-                                0 => u32_at(s, TS_PID),
+                                0 => pid,
                                 t => t,
                             };
                             out.push(ThreadExit {
@@ -388,6 +406,7 @@ impl Taskstats {
                                 cpu_us: u64_at(s, TS_UTIME) + u64_at(s, TS_STIME),
                                 hiwater_kb: u64_at(s, TS_HIWATER_RSS),
                                 comm: String::from_utf8_lossy(&comm[..end]).into_owned(),
+                                last: ended || pid == tgid,
                             });
                         }
                     }

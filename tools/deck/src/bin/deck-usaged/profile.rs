@@ -180,6 +180,7 @@ impl Profiler {
     /// Takes every sample the CPUs have written since the last call.
     pub fn drain(&mut self, out: &mut Vec<Sample>) {
         let mut rec = Vec::with_capacity(64);
+        let mut hdr = [0u8; 8];
         for r in &self.rings {
             let head = unsafe { std::ptr::read_volatile(r.base.add(DATA_HEAD) as *const u64) };
             fence(Ordering::Acquire);
@@ -187,7 +188,9 @@ impl Profiler {
             while tail + 8 <= head {
                 // A record may wrap around the end of the buffer: copy it out byte by byte.
                 let at = |i: u64| unsafe { *r.base.add(r.data + ((tail + i) as usize % r.size)) };
-                let hdr: Vec<u8> = (0..8).map(at).collect();
+                for (i, b) in hdr.iter_mut().enumerate() {
+                    *b = at(i as u64);
+                }
                 let ty = u32::from_ne_bytes(hdr[0..4].try_into().unwrap());
                 let misc = u16::from_ne_bytes(hdr[4..6].try_into().unwrap());
                 let size = u16::from_ne_bytes(hdr[6..8].try_into().unwrap()) as u64;

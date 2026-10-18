@@ -87,12 +87,14 @@ impl Store {
         Ok(())
     }
 
-    /// Adds the totals gathered since the last flush.
+    /// Adds the totals gathered since the last flush, and sets the meta values given, in one
+    /// transaction.
     pub fn flush<'a>(
         &mut self,
         rows: impl Iterator<Item = (i64, &'a str, &'a str, &'a Agg)>,
         libs: impl Iterator<Item = (i64, &'a str, &'a str, &'a str, u64)>,
         spikes: &[Spike],
+        meta: &[(&str, String)],
     ) -> Result<()> {
         let tx = self.db.transaction()?;
         {
@@ -148,6 +150,10 @@ impl Store {
                     s.peak_cores,
                     s.rss_peak_kb as i64
                 ])?;
+            }
+            let mut m = tx.prepare_cached("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)")?;
+            for (k, v) in meta {
+                m.execute(params![k, v])?;
             }
         }
         tx.commit()?;

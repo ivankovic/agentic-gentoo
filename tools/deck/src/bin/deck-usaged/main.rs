@@ -3,8 +3,11 @@
 //! Every second it reads each process's CPU counter from /proc and credits the increase to the
 //! package that owns the program (or the script, for interpreters). The kernel's process events
 //! name programs as they start, and its exit reports give the CPU time of processes too short
-//! for a reading. Every 10 s it reads and resets each process's peak memory, every 5 min its PSS.
-//! Totals go to SQLite each minute; `deck usage` reads them.
+//! for a reading. Every 10 s it reads and resets the peak memory of each process that ran, every
+//! 5 min each one's PSS. Totals go to SQLite each minute; `deck usage` reads them.
+//!
+//! It keeps each process's stat file and each cgroup's cpu.stat open, and reads them again with
+//! one pread: opening a path in /proc for every process every second was most of its own cost.
 
 mod netlink;
 mod profile;
@@ -12,7 +15,7 @@ mod store;
 
 use anyhow::Result;
 use deck::pkgmap::{self, PkgMap, is_interpreter};
-use deck::procfs;
+use deck::procfs::{self, CpuStat, StatFile};
 use netlink::{ProcConnector, ProcEvent, Taskstats, ThreadExit};
 use profile::Profiler;
 use std::collections::{HashMap, HashSet};
@@ -32,9 +35,20 @@ const BURST_START: f64 = 0.5;
 const BURST_KEEP: f64 = 0.1;
 const BURST_QUIET: u32 = 3;
 const SPIKE_MIN_US: u64 = 1_000_000;
-/// Every this many seconds all processes are read, kernel threads included, and their cgroups
-/// re-read; in between only those in cgroups whose CPU total moved.
+/// Every this many seconds all processes are read, kernel threads included, and /proc listed for
+/// any the kernel's events missed; in between only those in cgroups whose CPU total moved.
 const FULL_EVERY: u64 = 10;
+/// For this many seconds after a process is first seen, full readings read its cgroup again:
+/// systemd moves a launched app into a scope of its own just after it starts.
+const YOUNG: u64 = 60;
+/// Labels are names any process can choose (a program's file name, its comm): the daemon keeps at
+/// most this many, each at most this long, so a loop of random names can't grow it without end.
+const MAX_LABELS: usize = 20_000;
+const MAX_LABEL: usize = 200;
+/// Where labels past MAX_LABELS go; the first label, index 0.
+const TOO_MANY: &str = "other:too-many-labels";
+/// /proc/<pid>/stat is under 1 KiB; cpu.stat a few hundred bytes.
+const READ_BUF: usize = 4096;
 const NO_CG: u32 = u32::MAX;
 /// Profiler samples per second per CPU: a prime, so it doesn't beat with periodic work.
 const PROFILE_HZ: u64 = 49;
@@ -73,6 +87,8 @@ type ExecMaps = Vec<(u64, u64, u32)>;
 type Key = (u32, Ctx);
 
 struct Proc {
+    /// Its stat file, open since it was first read.
+    stat: Option<StatFile>,
     /// Start time in clock ticks after boot; 0 until read.
     start: u64,
     key: Key,
@@ -87,6 +103,47 @@ struct Proc {
     born_here: bool,
     /// Readings in a row that did not find it; finalized at 2, so late exit reports still land.
     missing: u8,
+    /// The reading (`Daemon::reading`) that last found it.
+    reading: u64,
+    /// The tick it was first seen.
+    seen_tick: u64,
+    /// To read at the next reading whatever its cgroup did: an exit report says it may have ended,
+    /// or the last reading didn't find it.
+    check: bool,
+    /// `credited_us` at the last peak memory reading (MAX before the first), and its resident
+    /// memory then: a process that used no CPU since can't have grown, so it isn't read again.
+    peak_credited: u64,
+    idle_kb: u64,
+}
+
+impl Proc {
+    fn new(start: u64, key: Key, cg: u32, last_ticks: u64, born_here: bool, tick: u64) -> Proc {
+        Proc {
+            stat: None,
+            start,
+            key,
+            cg,
+            last_ticks,
+            credited_us: 0,
+            exited_us: 0,
+            hiwater_kb: 0,
+            born_here,
+            missing: 0,
+            reading: 0,
+            seen_tick: tick,
+            check: false,
+            peak_credited: u64::MAX,
+            idle_kb: 0,
+        }
+    }
+}
+
+/// What a reading found of a process it knew.
+enum Read {
+    Alive,
+    Gone,
+    /// Its PID now names another process.
+    Replaced,
 }
 
 struct Burst {
@@ -130,9 +187,12 @@ struct Daemon {
     host_mnt: Option<u64>,
     cgroups: Vec<String>,
     cg_ix: HashMap<String, u32>,
-    /// Per cgroup: its CPU total at the last reading, and whether it moved since the one before.
+    /// Per cgroup: its cpu.stat, its CPU total at the last reading, whether it moved since the one
+    /// before, and whether it is gone (its processes moved on).
+    cpustat: Vec<Option<CpuStat>>,
     cg_usage: Vec<u64>,
     cg_moved: Vec<bool>,
+    cg_gone: Vec<bool>,
     start_ticks: u64,
     us_per_tick: u64,
     /// CPU credited in the current second.
@@ -141,14 +201,40 @@ struct Daemon {
     bursts: HashMap<Key, Burst>,
     spikes: Vec<Spike>,
     lost: u64,
-    /// Kernel modules' address ranges, for samples in the kernel.
-    modules: Vec<(u64, u64, String)>,
+    /// Kernel modules' address ranges and labels (kmod:<name>), for samples in the kernel.
+    modules: Vec<(u64, u64, u32)>,
     /// Per process: its executable mappings with their package labels, and when they were read.
     maps: HashMap<i32, (ExecMaps, Instant)>,
     /// Samples per hour, per package whose code ran (library or program), per process key.
     libs: HashMap<(i64, u32, Key), u64>,
     unresolved: u64,
     jit_guess: u64,
+    /// Readings so far, and seconds so far.
+    reading: u64,
+    tick: u64,
+    /// What the database's meta table last got, so unchanged values aren't written again.
+    meta: HashMap<&'static str, String>,
+    /// The package database's stamp when it was last seen changed, and minutes it stayed so:
+    /// the map is rebuilt once a merge or an emerge is over, not after each package.
+    map_pending: Option<Option<std::time::SystemTime>>,
+    map_quiet: u32,
+    // Kept between ticks so they aren't allocated each second.
+    buf: Vec<u8>,
+    pid_buf: Vec<i32>,
+    fresh: Vec<(i32, procfs::Stat)>,
+    cg_used: Vec<bool>,
+    alive_keys: HashSet<Key>,
+    busy: HashSet<Key>,
+    used: Vec<(Key, u64)>,
+}
+
+/// A label as kept: control characters out (they would reach a terminal from `deck usage`), and
+/// no longer than MAX_LABEL.
+fn clean_label(s: &str) -> String {
+    s.chars()
+        .take(MAX_LABEL)
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect()
 }
 
 impl Daemon {
@@ -156,9 +242,16 @@ impl Daemon {
         if let Some(&i) = self.label_ix.get(s) {
             return i;
         }
-        self.labels.push(s.to_string());
+        let clean = clean_label(s);
+        if let Some(&i) = self.label_ix.get(&clean) {
+            return i;
+        }
+        if self.labels.len() >= MAX_LABELS {
+            return 0;
+        }
+        self.labels.push(clean.clone());
         let i = (self.labels.len() - 1) as u32;
-        self.label_ix.insert(s.to_string(), i);
+        self.label_ix.insert(clean, i);
         i
     }
 
@@ -167,27 +260,86 @@ impl Daemon {
             return i;
         }
         self.cgroups.push(path.clone());
+        self.cpustat.push(None);
         self.cg_usage.push(0);
         self.cg_moved.push(true);
+        self.cg_gone.push(false);
         let i = (self.cgroups.len() - 1) as u32;
         self.cg_ix.insert(path, i);
         i
     }
 
+    /// Drops the cgroups no process is in any more: each app launched gets a scope of its own.
+    fn compact_cgroups(&mut self) {
+        let mut used = vec![false; self.cgroups.len()];
+        for p in self.procs.values().filter(|p| p.cg != NO_CG) {
+            used[p.cg as usize] = true;
+        }
+        if used.iter().all(|&u| u) {
+            return;
+        }
+        let mut remap = vec![NO_CG; used.len()];
+        let cgroups = std::mem::take(&mut self.cgroups);
+        let cpustat = std::mem::take(&mut self.cpustat);
+        let usage = std::mem::take(&mut self.cg_usage);
+        let moved = std::mem::take(&mut self.cg_moved);
+        let gone = std::mem::take(&mut self.cg_gone);
+        self.cg_ix.clear();
+        for (i, (((path, f), u), (m, g))) in cgroups
+            .into_iter()
+            .zip(cpustat)
+            .zip(usage)
+            .zip(moved.into_iter().zip(gone))
+            .enumerate()
+        {
+            if used[i] {
+                remap[i] = self.cgroups.len() as u32;
+                self.cg_ix.insert(path.clone(), remap[i]);
+                self.cgroups.push(path);
+                self.cpustat.push(f);
+                self.cg_usage.push(u);
+                self.cg_moved.push(m);
+                self.cg_gone.push(g);
+            }
+        }
+        for p in self.procs.values_mut().filter(|p| p.cg != NO_CG) {
+            p.cg = remap[p.cg as usize];
+        }
+    }
+
     /// Reads the CPU total of every cgroup a process is in and marks those that moved.
     fn read_cgroups(&mut self) {
-        let used: HashSet<u32> = self
-            .procs
-            .values()
-            .map(|p| p.cg)
-            .filter(|&c| c != NO_CG)
-            .collect();
-        for c in used {
-            let i = c as usize;
-            let usage = procfs::cgroup_usage_us(&self.cgroups[i]);
+        self.cg_used.clear();
+        self.cg_used.resize(self.cgroups.len(), false);
+        for p in self.procs.values().filter(|p| p.cg != NO_CG) {
+            self.cg_used[p.cg as usize] = true;
+        }
+        for i in 0..self.cgroups.len() {
+            if !self.cg_used[i] || self.cg_gone[i] {
+                continue;
+            }
+            if self.cpustat[i].is_none() {
+                self.cpustat[i] = CpuStat::open(&self.cgroups[i]);
+            }
+            let usage = self.cpustat[i].as_ref().and_then(|f| f.usage_us(&mut self.buf));
+            if usage.is_none() {
+                // Removed: its processes are elsewhere now, or gone. The next full reading
+                // reads where they are.
+                self.cpustat[i] = None;
+                self.cg_gone[i] = true;
+            }
             self.cg_moved[i] = usage.is_none_or(|u| u != self.cg_usage[i]);
             self.cg_usage[i] = usage.unwrap_or(0);
         }
+    }
+
+    /// Kernel modules again: one may have been loaded.
+    fn load_modules(&mut self) {
+        let mods = profile::modules();
+        self.modules = mods
+            .into_iter()
+            .map(|(a, b, name)| (a, b, self.intern(&format!("kmod:{name}"))))
+            .collect();
     }
 
     fn agg(&mut self, key: Key) -> &mut Agg {
@@ -289,24 +441,14 @@ impl Daemon {
             self.finalize(child, old);
         }
         self.gone.remove(&child);
-        self.procs.insert(
-            child,
-            Proc {
-                start: 0,
-                key,
-                cg,
-                last_ticks: 0,
-                credited_us: 0,
-                exited_us: 0,
-                hiwater_kb: 0,
-                born_here: true,
-                missing: 0,
-            },
-        );
+        self.procs
+            .insert(child, Proc::new(0, key, cg, 0, true, self.tick));
     }
 
     fn on_exec(&mut self, tgid: i32) {
         let Some(st) = procfs::stat(tgid) else { return };
+        // Another program: other mappings.
+        self.maps.remove(&tgid);
         let inherited = match self.procs.get_mut(&tgid) {
             Some(p) => {
                 // What it used before the exec belongs to the program it was.
@@ -321,24 +463,16 @@ impl Daemon {
                 Some(key.1)
             }
             None => {
+                // Its fork was missed: named here, once.
                 let parent = self.procs.get(&st.ppid).map(|p| p.key.1);
                 let born_here = st.start >= self.start_ticks;
                 let (key, cg) = self.identify(tgid, &st, parent);
-                self.procs.insert(
-                    tgid,
-                    Proc {
-                        start: st.start,
-                        key,
-                        cg,
-                        last_ticks: if born_here { 0 } else { st.ticks },
-                        credited_us: 0,
-                        exited_us: 0,
-                        hiwater_kb: 0,
-                        born_here,
-                        missing: 0,
-                    },
-                );
-                parent
+                let last = if born_here { 0 } else { st.ticks };
+                let mut p = Proc::new(st.start, key, cg, last, born_here, self.tick);
+                p.stat = StatFile::open(tgid);
+                self.procs.insert(tgid, p);
+                self.agg(key).launches += 1;
+                return;
             }
         };
         let (key, cg) = self.identify(tgid, &st, inherited);
@@ -356,24 +490,13 @@ impl Daemon {
         if !self.procs.contains_key(&r.tgid) {
             // Never seen: both its fork and exec events were lost.
             let key = (self.intern(&format!("unknown:{}", r.comm)), Ctx::Other);
-            self.procs.insert(
-                r.tgid,
-                Proc {
-                    start: 0,
-                    key,
-                    cg: NO_CG,
-                    last_ticks: 0,
-                    credited_us: 0,
-                    exited_us: 0,
-                    hiwater_kb: 0,
-                    born_here: true,
-                    missing: 0,
-                },
-            );
+            self.procs
+                .insert(r.tgid, Proc::new(0, key, NO_CG, 0, true, self.tick));
         }
         let p = self.procs.get_mut(&r.tgid).unwrap();
         p.exited_us += r.cpu_us;
         p.hiwater_kb = p.hiwater_kb.max(r.hiwater_kb);
+        p.check |= r.last;
     }
 
     /// The package whose code is at `ip` in process `pid`; SELF for JIT code.
@@ -387,13 +510,14 @@ impl Daemon {
         {
             return Some(l);
         }
-        // Not mapped when last read: read again, at most every 30 s per process. Misses are nearly
-        // all JIT code, counted as the process's own anyway, and Firefox's maps are long: reading
-        // them every second for each of its processes cost more than the rest of the daemon.
+        // Not mapped when last read: read again, at most every 5 min per process (and after an
+        // exec). Misses are nearly all JIT code, counted as the process's own anyway, and
+        // Firefox's maps are long: reading them every second for each of its processes cost more
+        // than the rest of the daemon, and every 30 s still most of what the profile cost.
         if self
             .maps
             .get(&pid)
-            .is_some_and(|(_, at)| at.elapsed() < Duration::from_secs(30))
+            .is_some_and(|(_, at)| at.elapsed() < Duration::from_secs(300))
         {
             return None;
         }
@@ -435,10 +559,7 @@ impl Daemon {
             } else if s.kernel {
                 let i = self.modules.partition_point(|m| m.1 <= s.ip);
                 match self.modules.get(i).filter(|m| m.0 <= s.ip) {
-                    Some(m) => {
-                        let l = format!("kmod:{}", m.2);
-                        self.intern(&l)
-                    }
+                    Some(m) => m.2,
                     None => self.intern("kernel"),
                 }
             } else {
@@ -471,113 +592,148 @@ impl Daemon {
         self.gone.insert(pid, Instant::now());
     }
 
-    /// Credits each process's CPU since the last reading. A full sweep reads every process; the
-    /// others only those in cgroups whose total moved, and otherwise just check they still exist.
+    /// Credits each process's CPU since the last reading. A full sweep lists /proc and reads
+    /// every process; the others only those in cgroups whose total moved, those not read yet and
+    /// those an exit report named, and take the rest to be still there.
     fn sweep(&mut self, full: bool, first: bool) {
         if !full {
             self.read_cgroups();
         }
-        let mut alive = HashSet::new();
-        let mut fresh: Vec<(i32, procfs::Stat)> = Vec::new();
-        for pid in procfs::pids() {
-            let read = match self.procs.get(&pid) {
-                None => true,
-                Some(p) => full || p.start == 0 || (p.cg != NO_CG && self.cg_moved[p.cg as usize]),
-            };
-            if !read {
-                alive.insert(pid);
-                continue;
-            }
-            let Some(st) = procfs::stat(pid) else { continue };
-            alive.insert(pid);
-            if self
-                .procs
-                .get(&pid)
-                .is_some_and(|p| p.start != 0 && p.start != st.start)
-            {
-                let old = self.procs.remove(&pid).unwrap();
-                self.finalize(pid, old);
-            }
-            match self.procs.get_mut(&pid) {
-                Some(p) => {
-                    if p.start == 0 {
-                        p.start = st.start;
-                    }
-                    if full && p.cg != NO_CG {
-                        // systemd moves a launched app into its own scope after the fork.
-                        let path = procfs::cgroup(pid);
-                        let cg = self.cg(path);
-                        self.procs.get_mut(&pid).unwrap().cg = cg;
-                    }
-                    self.read_cpu(pid, &st);
+        self.reading += 1;
+        let mut pids = std::mem::take(&mut self.pid_buf);
+        let mut fresh = std::mem::take(&mut self.fresh);
+        fresh.clear();
+        if full {
+            procfs::pids(&mut pids);
+        } else {
+            pids.clear();
+            for (&pid, p) in self.procs.iter_mut() {
+                if p.start == 0 || p.check || (p.cg != NO_CG && self.cg_moved[p.cg as usize]) {
+                    pids.push(pid);
+                } else {
+                    p.reading = self.reading;
                 }
-                None => fresh.push((pid, st)),
             }
         }
+        for &pid in &pids {
+            let read = if self.procs.contains_key(&pid) {
+                self.read_proc(pid, full)
+            } else if full {
+                Read::Replaced
+            } else {
+                Read::Gone
+            };
+            // Only when a process is there to replace it: one that just ended keeps its grace.
+            if let Read::Replaced = read
+                && let Some(st) = procfs::stat(pid)
+            {
+                if let Some(old) = self.procs.remove(&pid) {
+                    self.finalize(pid, old);
+                }
+                self.gone.remove(&pid);
+                fresh.push((pid, st));
+            }
+        }
+        self.pid_buf = pids;
         if first {
             // Parents first, so children inherit build and jail.
             fresh.sort_by_key(|(_, s)| s.start);
         }
-        for (pid, st) in fresh {
+        for (pid, st) in fresh.drain(..) {
+            // Opened after the stat was read: the PID must still be that process.
+            let Some(f) = StatFile::open(pid) else { continue };
+            let Some((ticks, start)) = f.times(&mut self.buf) else { continue };
+            if start != st.start {
+                continue;
+            }
             let born_here = st.start >= self.start_ticks;
             let parent = self.procs.get(&st.ppid).map(|p| p.key.1);
             let (key, cg) = self.identify(pid, &st, parent);
-            self.procs.insert(
-                pid,
-                Proc {
-                    start: st.start,
-                    key,
-                    cg,
-                    last_ticks: if born_here { 0 } else { st.ticks },
-                    credited_us: 0,
-                    exited_us: 0,
-                    hiwater_kb: 0,
-                    born_here,
-                    missing: 0,
-                },
-            );
-            self.read_cpu(pid, &st);
+            let last = if born_here { 0 } else { st.ticks };
+            let mut p = Proc::new(st.start, key, cg, last, born_here, self.tick);
+            p.stat = Some(f);
+            p.reading = self.reading;
+            self.procs.insert(pid, p);
+            self.read_cpu(pid, ticks);
         }
-        let mut dead = Vec::new();
+        self.fresh = fresh;
+        let mut dead = std::mem::take(&mut self.pid_buf);
+        dead.clear();
         for (pid, p) in self.procs.iter_mut() {
-            if alive.contains(pid) {
+            if p.reading == self.reading {
                 p.missing = 0;
             } else {
                 p.missing += 1;
+                p.check = true;
                 if p.missing >= 2 {
                     dead.push(*pid);
                 }
             }
         }
-        for pid in dead {
+        for &pid in &dead {
             let p = self.procs.remove(&pid).unwrap();
             self.finalize(pid, p);
         }
+        self.pid_buf = dead;
         self.gone.retain(|_, t| t.elapsed() < Duration::from_secs(10));
     }
 
-    fn read_cpu(&mut self, pid: i32, st: &procfs::Stat) {
+    /// Reads a known process through its stat file, and credits its CPU.
+    fn read_proc(&mut self, pid: i32, full: bool) -> Read {
         let p = self.procs.get_mut(&pid).unwrap();
-        let d = st.ticks.saturating_sub(p.last_ticks) * self.us_per_tick;
-        p.last_ticks = p.last_ticks.max(st.ticks);
+        if p.stat.is_none() {
+            // Known from its fork event, not read yet.
+            p.stat = StatFile::open(pid);
+        }
+        let Some((ticks, start)) = p.stat.as_ref().and_then(|f| f.times(&mut self.buf)) else {
+            // Gone; or, listed in /proc all the same, its PID taken by another.
+            return if full && p.stat.is_some() {
+                Read::Replaced
+            } else {
+                Read::Gone
+            };
+        };
+        if p.start != 0 && p.start != start {
+            return Read::Replaced;
+        }
+        p.start = start;
+        p.reading = self.reading;
+        p.check = false;
+        let recheck = full
+            && p.cg != NO_CG
+            && (self.tick.saturating_sub(p.seen_tick) <= YOUNG || self.cg_gone[p.cg as usize]);
+        if recheck {
+            let path = procfs::cgroup(pid);
+            let cg = self.cg(path);
+            self.procs.get_mut(&pid).unwrap().cg = cg;
+        }
+        self.read_cpu(pid, ticks);
+        Read::Alive
+    }
+
+    fn read_cpu(&mut self, pid: i32, ticks: u64) {
+        let p = self.procs.get_mut(&pid).unwrap();
+        let d = ticks.saturating_sub(p.last_ticks) * self.us_per_tick;
+        p.last_ticks = p.last_ticks.max(ticks);
         p.credited_us += d;
         let key = p.key;
         self.credit(key, d);
     }
 
     fn end_tick(&mut self, elapsed_us: u64) {
-        let alive: HashSet<Key> = self
-            .procs
-            .values()
-            .filter(|p| p.missing == 0)
-            .map(|p| p.key)
-            .collect();
-        for k in alive {
+        let mut alive = std::mem::take(&mut self.alive_keys);
+        alive.clear();
+        alive.extend(self.procs.values().filter(|p| p.missing == 0).map(|p| p.key));
+        for &k in &alive {
             self.agg(k).alive_s += 1;
         }
-        let used: Vec<(Key, u64)> = self.now_us.drain().collect();
-        let mut busy = HashSet::new();
-        for (key, us) in used {
+        self.alive_keys = alive;
+        let mut used = std::mem::take(&mut self.used);
+        used.clear();
+        used.extend(self.now_us.drain());
+        let mut busy = std::mem::take(&mut self.busy);
+        busy.clear();
+        for &(key, us) in &used {
             let cores = us as f64 / elapsed_us.max(1) as f64;
             let bucket = match cores {
                 c if c <= 0.05 => 0,
@@ -601,6 +757,8 @@ impl Daemon {
         for key in quiet {
             self.burst(key, 0.0, 0);
         }
+        self.used = used;
+        self.busy = busy;
     }
 
     fn burst(&mut self, key: Key, cores: f64, us: u64) {
@@ -642,16 +800,24 @@ impl Daemon {
         }
     }
 
-    /// Peak memory of each process over the last interval, summed per package.
+    /// Peak memory of each process over the last interval, summed per package. Only processes
+    /// that ran since the last reading are read and reset: resetting takes the process's memory
+    /// map lock. The others count what they held when they were last read.
     fn peaks(&mut self) {
         let mut sums: HashMap<Key, u64> = HashMap::new();
-        for (&pid, p) in &self.procs {
+        for (&pid, p) in self.procs.iter_mut() {
             if p.key.1 == Ctx::Kernel || p.missing > 0 {
                 continue;
             }
-            if let Some(kb) = procfs::peak_rss_kb(pid) {
-                *sums.entry(p.key).or_default() += kb;
+            if p.credited_us == p.peak_credited {
+                *sums.entry(p.key).or_default() += p.idle_kb;
+                continue;
+            }
+            if let Some((peak, now)) = procfs::peak_rss_kb(pid) {
+                *sums.entry(p.key).or_default() += peak;
                 procfs::reset_peak(pid);
+                p.peak_credited = p.credited_us;
+                p.idle_kb = now;
             }
         }
         for (key, kb) in sums {
@@ -680,7 +846,22 @@ impl Daemon {
         }
     }
 
-    fn flush(&mut self, store: &mut Store) {
+    /// The meta values that changed since they were last written.
+    fn meta_changes(&mut self, prof_lost: Option<u64>) -> Vec<(&'static str, String)> {
+        let mut now = vec![
+            ("lost_event_batches", self.lost.to_string()),
+            ("profile_unresolved_samples", self.unresolved.to_string()),
+            ("profile_unmapped_as_own_samples", self.jit_guess.to_string()),
+        ];
+        if let Some(l) = prof_lost {
+            now.push(("profile_lost_samples", l.to_string()));
+        }
+        now.retain(|(k, v)| self.meta.get(k) != Some(v));
+        now
+    }
+
+    fn flush(&mut self, store: &mut Store, prof_lost: Option<u64>) {
+        let meta = self.meta_changes(prof_lost);
         let rows = self
             .hourly
             .iter()
@@ -694,17 +875,17 @@ impl Daemon {
                 *n,
             )
         });
-        match store.flush(rows, libs, &self.spikes) {
+        // One transaction a minute, meta values with the totals: each commit syncs the journal.
+        match store.flush(rows, libs, &self.spikes, &meta) {
             Ok(()) => {
                 self.hourly.clear();
                 self.libs.clear();
                 self.spikes.clear();
+                self.meta.extend(meta);
             }
             Err(e) => eprintln!("deck-usaged: writing the database failed, keeping the totals: {e:#}"),
         }
-        let _ = store.meta("lost_event_batches", &self.lost.to_string());
-        let _ = store.meta("profile_unresolved_samples", &self.unresolved.to_string());
-        let _ = store.meta("profile_unmapped_as_own_samples", &self.jit_guess.to_string());
+        self.compact_cgroups();
     }
 }
 
@@ -724,6 +905,15 @@ fn main() -> Result<()> {
     unsafe {
         libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
         libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
+    }
+
+    // A descriptor for each process's stat file, and each cgroup's: the default soft limit is 1024.
+    unsafe {
+        let mut l: libc::rlimit = std::mem::zeroed();
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut l) == 0 {
+            l.rlim_cur = l.rlim_max;
+            libc::setrlimit(libc::RLIMIT_NOFILE, &l);
+        }
     }
 
     let me = std::process::id() as i32;
@@ -765,15 +955,17 @@ fn main() -> Result<()> {
 
     let mut d = Daemon {
         map,
-        labels: Vec::new(),
-        label_ix: HashMap::new(),
+        labels: vec![TOO_MANY.to_string()],
+        label_ix: HashMap::from([(TOO_MANY.to_string(), 0)]),
         procs: HashMap::new(),
         gone: HashMap::new(),
         host_mnt: procfs::mnt_ns(1),
         cgroups: Vec::new(),
         cg_ix: HashMap::new(),
+        cpustat: Vec::new(),
         cg_usage: Vec::new(),
         cg_moved: Vec::new(),
+        cg_gone: Vec::new(),
         start_ticks,
         us_per_tick: 1_000_000 / hz,
         now_us: HashMap::new(),
@@ -781,12 +973,25 @@ fn main() -> Result<()> {
         bursts: HashMap::new(),
         spikes: Vec::new(),
         lost: 0,
-        modules: profile::modules(),
+        modules: Vec::new(),
         maps: HashMap::new(),
         libs: HashMap::new(),
         unresolved: 0,
         jit_guess: 0,
+        reading: 0,
+        tick: 0,
+        meta: HashMap::new(),
+        map_pending: None,
+        map_quiet: 0,
+        buf: vec![0; READ_BUF],
+        pid_buf: Vec::new(),
+        fresh: Vec::new(),
+        cg_used: Vec::new(),
+        alive_keys: HashSet::new(),
+        busy: HashSet::new(),
+        used: Vec::new(),
     };
+    d.load_modules();
     d.sweep(true, true);
     d.read_cgroups();
     d.now_us.clear();
@@ -801,16 +1006,19 @@ fn main() -> Result<()> {
     let mut last_tick = Instant::now();
     let mut next_tick = last_tick + TICK;
     let mut n: u64 = 0;
+    // Only the process events wake the loop: an exec is named while the process is still there.
+    // Exit reports wait in their socket's buffer (16 MiB, far more than a second of them) for the
+    // tick; the readings already allow for reports that come late.
+    let mut fds: Vec<libc::pollfd> = pc
+        .as_ref()
+        .map(|p| libc::pollfd {
+            fd: p.fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        })
+        .into_iter()
+        .collect();
     while !STOP.load(Ordering::Relaxed) {
-        let mut fds: Vec<libc::pollfd> = [pc.as_ref().map(|p| p.fd()), ts.as_ref().map(|t| t.fd())]
-            .into_iter()
-            .flatten()
-            .map(|fd| libc::pollfd {
-                fd,
-                events: libc::POLLIN,
-                revents: 0,
-            })
-            .collect();
         let wait = next_tick.saturating_duration_since(Instant::now()).as_millis() as i32;
         unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, wait) };
 
@@ -820,24 +1028,25 @@ fn main() -> Result<()> {
                 Err(e) => eprintln!("deck-usaged: process events: {e}"),
             }
         }
-        if let Some(t) = ts.as_mut() {
-            match t.drain(&mut exits) {
-                Ok(lost) => d.lost += lost,
-                Err(e) => eprintln!("deck-usaged: exit reports: {e}"),
-            }
-        }
         for e in events.drain(..) {
             match e {
                 ProcEvent::Fork { parent, child } => d.on_fork(parent, child),
                 ProcEvent::Exec { tgid } => d.on_exec(tgid),
             }
         }
-        for r in exits.drain(..) {
-            d.on_thread_exit(r);
-        }
 
         let now = Instant::now();
         if now >= next_tick {
+            if let Some(t) = ts.as_mut() {
+                match t.drain(&mut exits) {
+                    Ok(lost) => d.lost += lost,
+                    Err(e) => eprintln!("deck-usaged: exit reports: {e}"),
+                }
+            }
+            for r in exits.drain(..) {
+                d.on_thread_exit(r);
+            }
+            d.tick = n;
             d.sweep(n % FULL_EVERY == FULL_EVERY - 1, false);
             d.end_tick((now - last_tick).as_micros() as u64);
             if let Some(p) = prof.as_mut() {
@@ -853,17 +1062,26 @@ fn main() -> Result<()> {
                 d.pss();
             }
             if n.is_multiple_of(FLUSH_EVERY) {
-                if let Some(p) = prof.as_ref() {
-                    let _ = store.meta("profile_lost_samples", &p.lost.to_string());
-                }
-                d.flush(&mut store);
-                d.modules = profile::modules();
-                if d.map.stale() {
-                    d.map = PkgMap::build();
-                    eprintln!(
-                        "deck-usaged: package database changed, {} files mapped",
-                        d.map.len()
-                    );
+                d.flush(&mut store, prof.as_ref().map(|p| p.lost));
+                d.load_modules();
+                // Rebuilt once the package database stayed the same for two minutes: an emerge
+                // changes it after each package it merges.
+                let stamp = pkgmap::stamp();
+                if stamp != d.map.stamp {
+                    if d.map_pending == Some(stamp) {
+                        d.map_quiet += 1;
+                    } else {
+                        d.map_pending = Some(stamp);
+                        d.map_quiet = 0;
+                    }
+                    if d.map_quiet >= 2 {
+                        d.map = PkgMap::build();
+                        d.map_pending = None;
+                        eprintln!(
+                            "deck-usaged: package database changed, {} files mapped",
+                            d.map.len()
+                        );
+                    }
                 }
             }
             next_tick += TICK;
@@ -872,7 +1090,7 @@ fn main() -> Result<()> {
             }
         }
     }
-    d.flush(&mut store);
+    d.flush(&mut store, prof.as_ref().map(|p| p.lost));
     eprintln!("deck-usaged: stopped");
     Ok(())
 }

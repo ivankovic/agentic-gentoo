@@ -5,6 +5,9 @@ Documentation=https://github.com/ivankovic/agentic-gentoo/tree/main/tools/deck
 
 [Service]
 ExecStart=/usr/sbin/deck-usaged
+# Killed at MemoryMax or crashed: back after a few seconds, not off until someone notices.
+Restart=on-failure
+RestartSec=5
 StateDirectory=deck
 Nice=10
 IOSchedulingClass=idle

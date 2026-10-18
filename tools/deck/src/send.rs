@@ -8,14 +8,22 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// `~/3p/<host>/<owner>/<repo>` for an upstream URL such as `https://github.com/owner/repo`.
+/// `~/3p/<host>/<owner>/<repo>` for an upstream URL such as `https://github.com/owner/repo`. Only
+/// https:// and ssh://, and each part a plain name: the URL may be pasted from anywhere, and it
+/// becomes a path and git clone's argument.
 pub fn clone_dir(upstream: &str) -> Result<PathBuf> {
-    let rest = upstream
-        .split_once("://")
-        .map_or(upstream, |(_, r)| r)
+    let rest = ["https://", "ssh://"]
+        .iter()
+        .find_map(|s| upstream.strip_prefix(s))
+        .with_context(|| format!("{upstream}: expected https://<host>/<owner>/<repo>"))?
         .trim_end_matches('/')
         .trim_end_matches(".git");
-    if rest.split('/').filter(|s| !s.is_empty()).count() < 3 {
+    let parts: Vec<&str> = rest.split('/').collect();
+    if parts.len() < 3
+        || parts
+            .iter()
+            .any(|p| p.is_empty() || *p == "." || *p == ".." || p.chars().any(char::is_control))
+    {
         bail!("{upstream}: expected https://<host>/<owner>/<repo>");
     }
     let home = std::env::var_os("HOME").context("HOME is not set")?;
@@ -101,7 +109,7 @@ pub fn stage(upstream: &str, id: &str, patch: &Path) -> Result<Staged> {
             fs::create_dir_all(parent)?;
         }
         let ok = Command::new("git")
-            .args(["clone", "--quiet", upstream])
+            .args(["clone", "--quiet", "--", upstream])
             .arg(&dir)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -433,5 +441,14 @@ mod tests {
             d.display()
         );
         assert!(clone_dir("https://github.com/x").is_err());
+        for bad in [
+            "--upload-pack=touch /tmp/x",
+            "https://h/../../.config/x/y",
+            "https://h//owner/repo",
+            "file:///home/m/src/x/y",
+            "ext::sh -c touch% /tmp/x",
+        ] {
+            assert!(clone_dir(bad).is_err(), "{bad}");
+        }
     }
 }

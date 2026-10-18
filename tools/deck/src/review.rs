@@ -492,15 +492,15 @@ pub fn decide(id: &str, index: usize, status: &str, note: &str, by: &str) -> Res
 
 /// For the next prompt: what earlier reviews found (of this kind, or all), and what was decided.
 /// The open ones are numbered F1, F2…, for the agent to say which it found fixed: the second
-/// value maps each number to its run and place there.
-fn known(runs: &[Run], subject: &str, kind: Option<Kind>) -> (String, Vec<(String, usize)>) {
+/// value maps each number to its run, its place there and the version it was found in.
+fn known(runs: &[Run], subject: &str, kind: Option<Kind>) -> (String, Vec<(String, usize, String)>) {
     let (mut t, mut refs) = (String::new(), vec![]);
     for l in findings(runs, subject, true) {
         if kind.is_some_and(|k| l.run.kind != k) || l.finding.status == "superseded" || l.finding.is_fix() {
             continue;
         }
         let label = if l.finding.is_open() {
-            refs.push((l.run.id.clone(), l.index));
+            refs.push((l.run.id.clone(), l.index, l.run.version.clone()));
             format!("F{}, open", refs.len())
         } else {
             l.finding.status_label().to_string()
@@ -914,12 +914,8 @@ pub fn prompt(
              decided yet; fixed; n/a here: does not apply on this machine, with why; won't fix):\n{known}\n\
              Do not report again what is n/a here or won't fix, unless something has changed that \
              makes it matter; then say what. For each fixed one, check the fix where you can and \
-             report it again if it is incomplete. {}\n\n{RESOLVED}\n\n",
-            if from.is_some() {
-                "Report only what the change brings: open ones it doesn't fix stay open on their own."
-            } else {
-                "Report the open ones again if they are still there: this review replaces them."
-            }
+             report it again if it is incomplete. Do not report the open ones again: they stay \
+             open until they are fixed.\n\n{RESOLVED}\n\n"
         );
     }
     p += RULES;
@@ -1056,9 +1052,11 @@ pub fn run(repo: &Path, req: Request, v: &Versions, log: &mut dyn Write) -> Resu
             bail!("the agent exited with {st}; its errors are in {}", report.with_extension("log").display());
         }
         let text = std::fs::read_to_string(&report)?;
-        // What the agent found fixed of the open findings it was given.
+        // What the agent found fixed of the open findings it was given. Only in another version
+        // than the one it was found in: code that didn't change can't have fixed it, and text in
+        // it that says otherwise is the code talking, not a fix.
         for (reference, evidence) in parse_resolved(&text) {
-            let Some((run, index)) = reference
+            let Some((run, index, found_in)) = reference
                 .trim_start_matches(['F', 'f'])
                 .parse::<usize>()
                 .ok()
@@ -1066,6 +1064,10 @@ pub fn run(repo: &Path, req: Request, v: &Versions, log: &mut dyn Write) -> Resu
             else {
                 continue;
             };
+            if *found_in == target {
+                writeln!(log, "deck: {reference} not taken as fixed: found in this same version, {target}")?;
+                continue;
+            }
             let note = format!("fixed in {target}: {evidence}");
             decide(run, *index, "fixed", &note, &req.agent.name)?;
             writeln!(log, "deck: {reference} fixed: {evidence}")?;
@@ -1088,22 +1090,9 @@ pub fn run(repo: &Path, req: Request, v: &Versions, log: &mut dyn Write) -> Resu
             r.error = format!("{e:#}");
         }
     }
+    // Open findings stay open after a full review too, until the agent finds them fixed in a
+    // newer version or the owner decides: a review talked into reporting nothing closes nothing.
     r.save()?;
-    // A full review looked at everything again: earlier open findings it didn't repeat are gone or
-    // were reported anew, so they give way to it.
-    if r.status == "done" && r.from.is_none() && r.mode.is_empty() {
-        for mut old in runs().into_iter().filter(|o| o.subject == r.subject && o.kind == r.kind && o.id != r.id) {
-            let mut changed = false;
-            for f in old.findings.iter_mut().filter(|f| f.is_open()) {
-                f.status = "superseded".into();
-                f.decided = r.finished;
-                changed = true;
-            }
-            if changed {
-                old.save()?;
-            }
-        }
-    }
     Ok(r)
 }
 
