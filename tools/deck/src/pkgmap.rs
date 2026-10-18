@@ -12,6 +12,7 @@ const VDB: &str = "/var/db/pkg";
 /// Portage bumps it on every merge.
 const COUNTER: &str = "/var/cache/edb/counter";
 
+#[derive(Default)]
 pub struct PkgMap {
     /// Path hash → index into `cps`. Hashes keep 375k paths in a few MiB; a collision would
     /// need two installed files with the same 64-bit hash.
@@ -20,6 +21,9 @@ pub struct PkgMap {
     pub cps: Vec<String>,
     /// The package database's `stamp()` when the map was built.
     pub stamp: Option<SystemTime>,
+    /// Each directory named in CONTENTS, resolved: kept for the next build, which then only
+    /// resolves the directories new packages bring.
+    canon: HashMap<String, String>,
 }
 
 fn hash(s: &str) -> u64 {
@@ -51,10 +55,18 @@ fn pn(pf: &str) -> &str {
 
 impl PkgMap {
     pub fn build() -> PkgMap {
+        PkgMap::rebuild(HashMap::new())
+    }
+
+    /// Built again after a merge, from the directories this one resolved.
+    pub fn rebuilt(self) -> PkgMap {
+        PkgMap::rebuild(self.canon)
+    }
+
+    fn rebuild(mut canon: HashMap<String, String>) -> PkgMap {
         let stamp = stamp();
         let mut by_path = HashMap::with_capacity(400_000);
         let mut cps: Vec<String> = Vec::new();
-        let mut canon: HashMap<String, String> = HashMap::new();
         let mut entries: Vec<_> = fs::read_dir(VDB)
             .into_iter()
             .flatten()
@@ -110,7 +122,12 @@ impl PkgMap {
                 }
             }
         }
-        PkgMap { by_path, cps, stamp }
+        PkgMap {
+            by_path,
+            cps,
+            stamp,
+            canon,
+        }
     }
 
     pub fn lookup(&self, path: &str) -> Option<&str> {

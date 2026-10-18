@@ -1075,7 +1075,8 @@ fn main() -> Result<()> {
                         d.map_quiet = 0;
                     }
                     if d.map_quiet >= 2 {
-                        d.map = PkgMap::build();
+                        let old = std::mem::take(&mut d.map);
+                        d.map = old.rebuilt();
                         d.map_pending = None;
                         eprintln!(
                             "deck-usaged: package database changed, {} files mapped",

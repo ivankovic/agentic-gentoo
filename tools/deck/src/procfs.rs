@@ -190,8 +190,14 @@ pub fn script_path(pid: i32) -> Option<String> {
     let args = cmdline(pid);
     let root = File::open(format!("/proc/{pid}/root")).ok()?;
     let cwd = fs::read_link(format!("/proc/{pid}/cwd")).ok();
-    let owner = fs::metadata(format!("/proc/{pid}")).ok()?;
-    let _as = FsCreds::of(owner.uid(), owner.gid())?;
+    // Its file system ids, from status: /proc/<pid> itself shows root as the owner of a process
+    // that isn't dumpable, and any user can make one.
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let id = |key: &str| -> Option<u32> {
+        let l = status.lines().find(|l| l.starts_with(key))?;
+        l[key.len()..].split_whitespace().nth(3)?.parse().ok()
+    };
+    let _as = FsCreds::of(id("Uid:")?, id("Gid:")?)?;
     for a in args.iter().skip(1).take(4) {
         if a.starts_with('-') {
             continue;
