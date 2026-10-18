@@ -37,23 +37,15 @@
 # diff first.
 set -euo pipefail
 
+# Two stages: this script starts the scope and pasta (the jail's own network), then runs again
+# inside them (JAIL_STAGE=inner) to set up the mounts and start bubblewrap. The mounts that come
+# from repositories are opened there and handed to bwrap as descriptors, which pasta wouldn't pass
+# on from outside.
 src=$HOME/src
 jhome=${XDG_DATA_HOME:-$HOME/.local/share}/jail/home
-mkdir -p "$jhome/.cargo" "$jhome/go"
-# Its caches stay out of the hourly snapshots: each its own btrfs subvolume (deck-nosnap). The jail
-# home is the jail's to change: a symlink there is left alone, not followed by the host.
-if command -v deck-nosnap >/dev/null; then
-	for d in "$jhome/.cache" "$jhome/.cargo/registry" "$jhome/go/pkg" "$jhome/.npm"; do
-		[[ -L $d || -L ${d%/*} ]] || deck-nosnap "$d" >/dev/null
-	done
-fi
-
-# The network: pasta gives the jail its own namespace, with the internet and DNS (forwarded to the
-# host's resolver from DNS_ADDR), but not the host's loopback (--no-map-gw) and no forwarded ports.
 DNS_ADDR=169.254.1.1
 resolv=${XDG_RUNTIME_DIR:-/tmp}/jail-resolv.conf
-[[ -f $resolv ]] || printf 'nameserver %s\n' "$DNS_ADDR" >"$resolv"
-net=(pasta --quiet --config-net --no-map-gw -t none -u none -T none -U none --dns-forward "$DNS_ADDR" --)
+orig=("$@")
 
 nosrc= chdir= extra=()
 while (($#)); do
@@ -80,8 +72,30 @@ esac
 [[ -n $nosrc ]] && dir=$HOME
 [[ -n $chdir ]] && dir=$chdir
 
+if [[ ${JAIL_STAGE-} != inner ]]; then
+	mkdir -p "$jhome/.cargo" "$jhome/go"
+	# Its caches stay out of the hourly snapshots: each its own btrfs subvolume (deck-nosnap). The
+	# jail home is the jail's to change: a symlink there is left alone, not followed by the host.
+	if command -v deck-nosnap >/dev/null; then
+		for d in "$jhome/.cache" "$jhome/.cargo/registry" "$jhome/go/pkg" "$jhome/.npm"; do
+			[[ -L $d || -L ${d%/*} ]] || deck-nosnap "$d" >/dev/null
+		done
+	fi
+	[[ -f $resolv ]] || printf 'nameserver %s\n' "$DNS_ADDR" >"$resolv"
+	# The network: pasta gives the jail its own namespace, with the internet and DNS (forwarded to
+	# the host's resolver from DNS_ADDR), but not the host's loopback (--no-map-gw) and no forwarded
+	# ports. Inside it, the user shows as root (mapped to the user): bwrap is told the real ids.
+	# Not exec: this script stays the terminal's foreground process, so deck-terminals can tell a
+	# jailed program apart and reopen it in the jail.
+	JAIL_STAGE=inner JAIL_UID=$(id -u) JAIL_GID=$(id -g) \
+		systemd-run --user --scope --slice=jail.slice --collect --quiet --unit="jail-$$.scope" -- \
+		pasta --quiet --config-net --no-map-gw -t none -u none -T none -U none --dns-forward "$DNS_ADDR" -- \
+		"$0" "${orig[@]}"
+	exit
+fi
+
 args=(
-	--unshare-user --uid "$(id -u)" --gid "$(id -g)"
+	--unshare-user --uid "$JAIL_UID" --gid "$JAIL_GID"
 	--unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try
 	--die-with-parent --hostname jail
 	--ro-bind /usr /usr
@@ -108,27 +122,39 @@ for p in "${ro[@]}"; do
 	[[ -e $HOME/$p ]] && args+=(--ro-bind "$HOME/$p" "$HOME/$p")
 done
 
+# Before the repositories' read-only mounts, so a --rw can't undo them.
+args+=("${extra[@]}")
+
 # Repositories up to two levels down: what git on the host executes stays read-only. Nothing from a
 # repository (a jailed program may have written it) becomes a mount source unless it is a real
-# directory or file inside that repository: no symlinks, no paths leading out.
-inside() { # PATH REPO: PATH resolves to REPO or under it, and isn't a symlink
-	local r
-	[[ ! -L $1 ]] && r=$(realpath -e -- "$1" 2>/dev/null) && [[ $r/ = "$2"/* ]]
+# directory or file under ROOT: no symlinks, no paths leading out. It is opened first and checked
+# where it really is, and bwrap mounts that open descriptor: a jail running meanwhile can't swap
+# it for a symlink between the check and the mount.
+bind_ro() { # PATH ROOT
+	local fd r
+	[[ -L $1 ]] && return 1
+	exec {fd}<"$1" 2>/dev/null || return 1
+	r=$(readlink "/proc/self/fd/$fd")
+	if [[ $r/ = "$2"/* ]]; then
+		args+=(--ro-bind-fd "$fd" "$1")
+	else
+		exec {fd}<&-
+		return 1
+	fi
 }
 while IFS= read -r git; do
 	repo=$(realpath -e -- "${git%/.git}") || continue
 	[[ -L $git ]] && continue
-	for p in "$git/config" "$git/hooks"; do
-		inside "$p" "$repo" && args+=(--ro-bind "$p" "$p")
-	done
+	bind_ro "$git/config" "$repo" || true
+	bind_ro "$git/hooks" "$repo" || true
 	# The file itself, read by the real git: no include, nothing run.
 	hooks=$(/usr/bin/git config --file "$git/config" --get core.hooksPath 2>/dev/null || true)
 	if [[ -n $hooks ]]; then
 		[[ $hooks = /* ]] || hooks=$repo/$hooks
-		[[ -d $hooks ]] && inside "$hooks" "$repo" && args+=(--ro-bind "$hooks" "$hooks")
+		# Anywhere in ~/src: also the jail's to write.
+		[[ -d $hooks ]] && { bind_ro "$hooks" "$src" || true; }
 	fi
 done < <([[ -n $nosrc ]] || find "$src" -mindepth 2 -maxdepth 3 -name .git -type d -prune 2>/dev/null)
-args+=("${extra[@]}")
 
 # A clean environment: nothing from the session leaks in (agent sockets, tokens, D-Bus).
 env=(--clearenv --setenv HOME "$HOME" --setenv USER "$USER" --setenv LOGNAME "$USER"
@@ -144,7 +170,4 @@ done
 
 (($#)) || set -- /bin/bash -i
 
-# Not exec: this script stays the terminal's foreground process, so deck-terminals can tell a
-# jailed program apart and reopen it in the jail.
-systemd-run --user --scope --slice=jail.slice --collect --quiet --unit="jail-$$.scope" -- \
-	"${net[@]}" bwrap "${args[@]}" "${env[@]}" --chdir "$dir" -- "$@"
+exec bwrap "${args[@]}" "${env[@]}" --chdir "$dir" -- "$@"
