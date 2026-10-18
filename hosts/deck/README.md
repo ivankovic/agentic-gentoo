@@ -304,6 +304,12 @@ set explicitly: prefs.js keeps the old value), video still decoded on the CPU. A
 coming back: WebRender on i915 triggers them, and the next things to try are on the kernel side
 (i915 panel self refresh and display power states, a newer kernel, the `xe` driver). No reset:
 video decoding (VA-API) back on as step 2.
+Result: reset 2026-10-18 ~09:01, 38 min after Firefox restarted with WebRender on the GPU, on
+Reddit. Same as the others: no pstore, no i915 message; the last vitals sample (09:01:10) idle-ish
+(8.5 W package, 46 °C, GPU asleep in nearly every sample since 08:23), the next never came, and the
+deck was booting again at 09:01:40. WebRender on the GPU is the trigger. A reset with no panic and
+no log, set off by GPU work, is the platform resetting (firmware, power delivery), not the kernel
+crashing. BIOS N3PET33W (1.24) is the newest fwupd knows of.
 
 **Terminals come back after a crash or a flat battery.**
 [deck-terminals](usr-local/bin/deck-terminals), run by the user service
