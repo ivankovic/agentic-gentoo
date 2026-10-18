@@ -866,8 +866,9 @@ def review():
         review_save(chosen)
 
     def set_deleted(r, on):
-        subprocess.run(["notmuch", "tag", "+deleted" if on else "-deleted", "--", *r["mids"]],
-                       check=True)
+        # As id: terms: a bare Message-ID is a query, and the sender picks it (<*> is every mail).
+        subprocess.run(["notmuch", "tag", "+deleted" if on else "-deleted", "--",
+                        *(nm_id(m) for m in r["mids"])], check=True)
         (deleted.update if on else deleted.difference_update)(r["mids"])
 
     def run(scr):
@@ -1223,8 +1224,13 @@ def main():
         return config()
     if cmd == ["sync"]:
         return sync(sys.stdin.isatty())
-    if cmd[:1] == ["send"]:  # aerc gives the recipients as arguments, the mail on stdin
-        os.execve(f"{MSMTPQ}/msmtpq", ["msmtpq", "--read-envelope-from", *cmd[1:]],
+    if cmd[:1] == ["send"]:  # mmm gives the recipients as arguments, the mail on stdin
+        # Addresses come from mail: after --, so none is an msmtp option (--passwordeval,
+        # --host), and none with whitespace, which msmtpq's queue splits when it sends later.
+        bad = [a for a in cmd[1:] if a.startswith("-") or re.search(r"[\s\x00-\x1f\x7f]", a)]
+        if bad:
+            sys.exit(f"deck-mail send: not an address: {bad[0]!r}")
+        os.execve(f"{MSMTPQ}/msmtpq", ["msmtpq", "--read-envelope-from", "--", *cmd[1:]],
                   dict(os.environ, **QUEUE_ENV))
     if cmd == ["unlock"]:
         return 0 if unlocked(accounts(), True) else 1
