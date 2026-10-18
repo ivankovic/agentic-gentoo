@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""deck-vitals: one line of hardware state every 2 s on AC, 10 s on battery.
+"""deck-vitals: one line of hardware state every second on AC, every 10 s on battery.
 
 Run by etc/systemd/system/deck-vitals.service into its own journal namespace ("vitals"), which
 keeps a few days (etc/systemd/journald@vitals.conf). After an unexplained reset, the last lines
@@ -16,7 +16,14 @@ Fields, all optional (a missing sensor is left out):
   psys pkg_w core_w uncore_w  power in W over the last interval (RAPL: whole platform, CPU
                               package, cores, uncore/graphics)
   pl1 pl2                     the package power limits in force, W (the lower of MSR and MMIO)
-  mhz mhz_max gpu_mhz         average and fastest CPU core, graphics frequency
+  mhz mhz_max gpu_mhz         average and fastest CPU core, graphics frequency (0: asleep)
+  gpu_req                     the graphics frequency asked for (by the driver or GuC SLPC)
+  gpu_rc6                     % of the interval the graphics was asleep (RC6)
+  gpu_thr                     why the graphics was held back, when it was: pl1, pl2, pl4 (peak
+                              power), prochot, ratl, thermal, vr_tdc (the voltage regulator's
+                              current limit), vr_thermalert; left out when nothing is
+  gpu_boost gpu_profile       the boost frequency (a wait jumps straight to it) and the SLPC
+                              power profile, every ~60 s
   load                        1-minute load average
   mem_avail swap_used         GiB
   psi_cpu psi_mem psi_io      pressure: % of time stalled over the last 10 s ("some")
@@ -27,7 +34,7 @@ Fields, all optional (a missing sensor is left out):
   ac bat bat_w profile        on AC (1/0), battery %, battery discharge W, platform profile
 
 The EC's sensors (gpu, ec) and the battery go through ACPI at about 1 ms a read, so on AC
-they're in every fifth line; the SSD temperature wakes the drive, so every fifteenth. The fan is in
+they're in every tenth line; the SSD temperature wakes the drive, so every thirtieth. The fan is in
 every line: the EC spinning it up is the one warning a reset below the kernel may give.
 """
 import glob
@@ -145,6 +152,30 @@ def freqs():
     return out
 
 
+GT = next(iter(glob.glob("/sys/class/drm/card*/gt/gt0")), None)
+THROTTLE = ("pl1", "pl2", "pl4", "prochot", "ratl", "thermal", "vr_tdc", "vr_thermalert")
+
+
+def gpu(delta, interval, slow):
+    """The graphics' requested frequency, sleep and throttle reasons; slow: also its settings."""
+    if not GT:
+        return {}
+    out = {"gpu_req": num(GT + "/punit_req_freq_mhz")}
+    rc6 = num(GT + "/rc6_residency_ms")
+    if rc6 is not None:
+        asleep = delta("rc6", rc6)
+        if interval:
+            out["gpu_rc6"] = min(100.0, asleep / 10 / interval)
+    held = [r for r in THROTTLE if read(f"{GT}/throttle_reason_{r}") == "1"]
+    if held:
+        out["gpu_thr"] = ",".join(held)
+    if slow:
+        out["gpu_boost"] = num(GT.rsplit("/gt/", 1)[0] + "/gt_boost_freq_mhz")
+        prof = read(GT + "/slpc_power_profile") or ""
+        out["gpu_profile"] = next((w.strip("[]") for w in prof.split() if w.startswith("[")), None)
+    return out
+
+
 def memory():
     m = {}
     for line in (read("/proc/meminfo") or "").splitlines():
@@ -236,32 +267,33 @@ def idle_off():
 
 def main():
     energy, delta = Energy(), Delta()
-    n = 0
+    n, last = 0, None
     while True:
         now = time.monotonic()
         on_ac = read("/sys/class/power_supply/AC/online") == "1"
-        slow = not on_ac or n % 5 == 0  # EC and battery: every 10 s on AC, every sample on battery
+        slow = not on_ac or n % 10 == 0  # EC and battery: every 10 s on AC, every sample on battery
         f = {}
         f.update(temps(slow))
-        if NVME and n % 15 == 0:  # reading it wakes the SSD: every ~30 s on AC
+        if NVME and n % 30 == 0:  # reading it wakes the SSD: every ~30 s on AC
             f["nvme"] = labelled(NVME, "Composite")
         if FAN:
             f["fan"] = num(FAN + "/fan1_input")
         f.update(energy.sample(now))
         f.update(limits())
         f.update(freqs())
+        f.update(gpu(delta, now - last if last else 0, n % 60 == 0))
         f["load"] = float((read("/proc/loadavg") or "0").split()[0])
         f.update(memory())
         f.update(pressure())
         f["throttle"] = delta("throttle", counter_sum("/sys/devices/system/cpu/cpu*/thermal_throttle/package_throttle_count"))
-        if n % 30 == 0:
+        if n % 60 == 0:
             f["aer"] = delta("aer", counter_sum("/sys/bus/pci/devices/*/aer_dev_*", field=True))
             f.update(idle_off())
         f.update(power_supply(slow))
         if n > 0:  # the first line has no power or deltas yet
             print(fmt(f), flush=True)
-        n += 1
-        time.sleep(2 if on_ac else 10)
+        n, last = n + 1, now
+        time.sleep(1 if on_ac else 10)
 
 
 if __name__ == "__main__":

@@ -315,6 +315,19 @@ files (`i915_edp_psr_status`, the connector's `i915_psr_status` and `i915_psr_si
 answer ENODEV, i915 finds no PSR-capable eDP, and the kernel log never mentions PSR. No boot after a
 reset logged a machine check either, so it isn't a CPU error the next boot could still read.
 
+**GPU ramp test** (from 2026-10-18 ~09:20), on the theory that the reset is power delivery
+tripping when the graphics wakes and jumps to full speed. Firefox draws on the GPU (as in step 1).
+i915 "wait-boosts": a program waiting on the GPU sends it straight to the boost frequency, which
+was 1500 MHz, the maximum. Step A sets it to 300 MHz (RP1, the efficient frequency), so it climbs
+to 1500 only through GuC SLPC's own gradual ramp under load:
+`echo 300 | sudo tee /sys/class/drm/card0/gt_boost_freq_mhz` (not persistent; re-run after each
+boot while the test lasts). Resets carrying on: step B adds `power_saving` in
+`/sys/class/drm/card0/gt/gt0/slpc_power_profile` (slower up, faster down), then step C caps
+`gt_max_freq_mhz` at 500; resets even then put the graphics' frequency out of it (its waking from
+RC6, or the display side, instead). Vitals now samples every second on AC, with `gpu_req`,
+`gpu_rc6`, `gpu_thr` (pl4 and vr_tdc are the power-delivery limits) and `gpu_boost`/`gpu_profile`,
+so the last second before a reset shows what the graphics was doing.
+
 **Terminals come back after a crash or a flat battery.**
 [deck-terminals](usr-local/bin/deck-terminals), run by the user service
 [deck-terminals.service](home/.config/systemd/user/deck-terminals.service), records every 10 s each
