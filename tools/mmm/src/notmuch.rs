@@ -132,7 +132,8 @@ pub fn forget_gone() -> Result<()> {
     notmuch(&["new", "--quiet", "--no-hooks"]).map(|_| ())
 }
 
-/// Every message of a thread, in thread order, replies after what they answer.
+/// Every message of a thread, oldest first. Not in thread order: where two replies answer one
+/// message, the whole of the first branch would come before the second's older mail.
 pub fn show_thread(thread: &str) -> Result<Vec<Message>> {
     let args = [
         "show",
@@ -157,6 +158,7 @@ pub fn show_thread(thread: &str) -> Result<Vec<Message>> {
             walk(node, &mut msgs);
         }
     }
+    msgs.sort_by_key(|m| m.timestamp);
     Ok(msgs)
 }
 
