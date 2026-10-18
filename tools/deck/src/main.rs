@@ -121,6 +121,12 @@ enum ReviewCmd {
     },
     /// Security reviews of updates to watched code, within the daily budget (the timer runs it)
     Auto,
+    /// Have an agent check whether the subject's open findings are fixed in the installed version
+    Recheck {
+        subject: String,
+        #[arg(long)]
+        agent: Option<String>,
+    },
     /// Findings and what was decided about them, open ones first, tab-separated
     Findings {
         /// ours/<name> or category/package [default: every subject]
@@ -331,7 +337,15 @@ fn review_cmd(host_dir: &std::path::Path, cmd: &ReviewCmd) -> Result<()> {
                 .iter()
                 .find(|i| i.subject.name() == *subject)
                 .with_context(|| format!("no subject {subject}; deck review list shows them"))?;
-            run_review(&cfg, &repo, item, *kind, agent.as_deref(), *full, false, &usage_db)
+            run_review(&cfg, &repo, item, *kind, agent.as_deref(), *full, false, false, &usage_db)
+        }
+        ReviewCmd::Recheck { subject, agent } => {
+            let items = board()?;
+            let item = items
+                .iter()
+                .find(|i| i.subject.name() == *subject)
+                .with_context(|| format!("no subject {subject}; deck review list shows them"))?;
+            run_review(&cfg, &repo, item, Kind::Security, agent.as_deref(), false, false, true, &usage_db)
         }
         ReviewCmd::Findings { subject, all } => {
             let runs = review::runs();
@@ -357,7 +371,7 @@ fn review_cmd(host_dir: &std::path::Path, cmd: &ReviewCmd) -> Result<()> {
             }
             Ok(())
         }
-        ReviewCmd::Decide { run, index, decision, note } => review::decide(run, *index, decision, note),
+        ReviewCmd::Decide { run, index, decision, note } => review::decide(run, *index, decision, note, ""),
         ReviewCmd::Auto => {
             let today = chrono::Local::now().date_naive();
             let done_today = review::runs()
@@ -374,7 +388,7 @@ fn review_cmd(host_dir: &std::path::Path, cmd: &ReviewCmd) -> Result<()> {
                     break;
                 }
                 if i.subject.tier().is_some() && matches!(i.security, review::Need::Delta { .. }) {
-                    run_review(&cfg, &repo, &i, Kind::Security, None, false, true, &usage_db)?;
+                    run_review(&cfg, &repo, &i, Kind::Security, None, false, true, false, &usage_db)?;
                     left -= 1;
                 }
             }
@@ -392,6 +406,7 @@ fn run_review(
     agent: Option<&str>,
     full: bool,
     auto: bool,
+    recheck: bool,
     usage_db: &std::path::Path,
 ) -> Result<()> {
     let agent = cfg.agent(agent)?;
@@ -406,9 +421,15 @@ fn run_review(
         full,
         auto,
         usage,
+        recheck,
     };
     let r = review::run(repo, req, &item.versions, &mut std::io::stderr())?;
     match r.status.as_str() {
+        "done" if recheck => {
+            let open = review::counts_label(review::open_counts(&review::runs(), &r.subject), "none");
+            println!("{}: rechecked; open now: {open} · {}", r.subject, r.report.display());
+            Ok(())
+        }
         "done" => {
             println!("{}: {} · {}", r.subject, r.counts_label(), r.report.display());
             Ok(())

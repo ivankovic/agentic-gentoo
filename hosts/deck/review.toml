@@ -30,8 +30,8 @@ command = [
 [[local]]
 name = "jail"
 tier = 1
-paths = ["hosts/deck/usr-local/bin/jail"]
-focus = "The sandbox for coding agents and for code under review (bubblewrap). Its whole purpose is to keep a jailed program from the rest of the home, the agents' sockets and the session: any way out of it defeats it."
+paths = ["hosts/deck/usr-local/bin/jail", "hosts/deck/usr-local/bin/git"]
+focus = "The sandbox for coding agents and for code under review (bubblewrap, pasta), and the host git guard that keeps a jailed program's writes to ~/src (git config, hooks) from running on the host. Their whole purpose is to keep a jailed program from the rest of the home, the agents' sockets and the session: any way out defeats it."
 
 [[local]]
 name = "deck-mail"

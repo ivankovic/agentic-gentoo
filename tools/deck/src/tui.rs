@@ -103,6 +103,8 @@ enum Action {
     Push(PathBuf),
     /// Start an agent's review: subject, kind, the whole even if an earlier version was reviewed.
     Review(String, review::Kind, bool),
+    /// Have an agent check whether the subject's open findings are fixed.
+    Recheck(String),
 }
 
 enum Mode {
@@ -164,6 +166,7 @@ const HELP: &[&str] = &[
     "  f                   the subject's findings, open ones first; there:",
     "    x n w o           decide: fixed / doesn't apply here / won't fix / open again, with a note;",
     "                      the next review of it is told, and won't raise it again without a reason",
+    "    c                 have the agent recheck the open ones: it marks what it finds fixed",
     "    Enter  a  Esc     the report at the finding / decided ones too / back",
 ];
 
@@ -608,7 +611,7 @@ impl App {
 
     fn confirm(&mut self, buf: String, then: Then) {
         if let Then::Decide(run, index, decision) = &then {
-            self.status = match review::decide(run, *index, decision, &buf) {
+            self.status = match review::decide(run, *index, decision, &buf, "") {
                 Ok(()) => {
                     self.load_review();
                     self.refilter();
@@ -734,13 +737,24 @@ impl App {
                 Err(e) => format!("not pushed: {e:#} (deck push in the clone shows it all)"),
             },
             Action::Review(subject, kind, full) => {
-                match review::start(&self.m.host_dir, &subject, kind, &self.agent_name(), full) {
+                match review::start(&self.m.host_dir, &subject, kind, &self.agent_name(), full, false) {
                     Ok(()) => {
                         // Its record appears once the unit has started.
                         std::thread::sleep(std::time::Duration::from_millis(500));
                         self.load_review();
                         self.refilter();
                         format!("{} review of {subject} started in the background", kind.label())
+                    }
+                    Err(e) => format!("not started: {e:#}"),
+                }
+            }
+            Action::Recheck(subject) => {
+                match review::start(&self.m.host_dir, &subject, review::Kind::Security, &self.agent_name(), false, true) {
+                    Ok(()) => {
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        self.load_review();
+                        self.refilter();
+                        format!("recheck of {subject} started: what it finds fixed is marked so")
                     }
                     Err(e) => format!("not started: {e:#}"),
                 }
@@ -935,7 +949,7 @@ impl App {
             Line::from(""),
             Line::from("The first review of a subject is of the whole (never). After that, a newer version, installed or waiting as an update, needs a review of the change only (old → new): cheap, and first in line. ✓ means the version that matters was reviewed, with its findings: H high, M medium, L low; • unread."),
             Line::from(""),
-            Line::from("f lists a subject's findings. Decide each: x fixed, n doesn't apply here, w won't fix (each with a note), o open again. The next review is given every earlier finding with its decision: it won't raise what doesn't apply or won't be fixed without saying what changed, and checks the fixes. Open shows what's left to decide; the maintenance tile shows it too."),
+            Line::from("f lists a subject's findings. Every review also checks the open ones and marks what it finds fixed, as fixed (agent), with where; c asks for just that check. Decide the rest: n doesn't apply here, w won't fix, x fixed (each with a note), o open again. The next review is given every earlier finding with its decision: it won't raise what doesn't apply or won't be fixed without saying what changed, and checks the fixes. Open shows what's left to decide; the maintenance tile shows it too."),
             Line::from(""),
             Line::from("Score is how worthwhile it is next: for security, the tier from review.toml (1 our own code … 5); for performance, the share of CPU time and profile samples deck-usaged measured. The list is sorted by it. deck review auto, daily, reviews updates of watched code within the budget in review.toml."),
         ];
@@ -999,6 +1013,27 @@ impl App {
                         then: Then::Decide(run, index, decision),
                     };
                 }
+            }
+            KeyCode::Char('c') if self.view == View::Review && self.findings_of.is_some() => {
+                let Some(subject) = self.findings_of.clone() else { return };
+                let open = review::findings(&self.review_runs, &subject, false).len();
+                if open == 0 {
+                    self.status = "nothing open to recheck".into();
+                    return;
+                }
+                if self.review_runs.iter().any(|r| r.subject == subject && r.status == "running") {
+                    self.status = format!("a review of {subject} is running; it checks the open findings too");
+                    return;
+                }
+                self.mode = Mode::Confirm {
+                    lines: vec![
+                        format!("Have {} recheck the {open} open findings of {subject}?", self.agent_name()),
+                        String::new(),
+                        "It reads the installed version and marks what it finds fixed, with".into(),
+                        "where and how; nothing new is looked for. o reopens any you disagree with.".into(),
+                    ],
+                    action: Action::Recheck(subject),
+                };
             }
             KeyCode::Char('a') if self.view == View::Review && self.findings_of.is_some() => {
                 self.finding_all = !self.finding_all;
@@ -1181,7 +1216,7 @@ impl App {
                     "? explain · S next step upstream · o terminal · m state · U upstream · / search · q quit"
                 }
                 View::Review if self.findings_of.is_some() => {
-                    "Enter report · x fixed · n n/a here · w won't fix · o reopen · a all/open · Esc back"
+                    "c recheck by agent · Enter report · x fixed · n n/a here · w won't fix · o reopen · a all/open · Esc back"
                 }
                 View::Review => {
                     "? explain · s/p review · S/P whole · f findings · Enter report · n next · a agent · q quit"
@@ -1231,7 +1266,7 @@ impl App {
                     Paragraph::new(text)
                         .wrap(Wrap { trim: false })
                         .block(Block::bordered().title(match action {
-                            Action::Review(..) => " Review ",
+                            Action::Review(..) | Action::Recheck(..) => " Review ",
                             _ => " Upstream ",
                         })),
                     area,
@@ -1666,7 +1701,7 @@ impl App {
                 let x = l.finding;
                 Row::new(vec![
                     Cell::from(x.severity.clone()).fg(severity_color(x)),
-                    Cell::from(x.status_label()).fg(if x.is_open() { Color::Yellow } else { Color::DarkGray }),
+                    Cell::from(x.status_text()).fg(if x.is_open() { Color::Yellow } else { Color::DarkGray }),
                     Cell::from(l.run.kind.label()).dark_gray(),
                     Cell::from(l.run.version.clone()).dark_gray(),
                     Cell::from(x.title.clone()),
@@ -1675,7 +1710,7 @@ impl App {
             .collect();
         let shown = list.len();
         let title = format!(
-            " Findings · {subject} · {} · {shown} {} · x fixed  n n/a here  w won't fix  o reopen  a {}  Esc back ",
+            " Findings · {subject} · {} · {shown} {} · c recheck  x fixed  n n/a  w won't fix  o reopen  a {}  Esc ",
             review::counts_label(review::open_counts(&self.review_runs, subject), "none open"),
             if self.finding_all { "in all" } else { "open" },
             if self.finding_all { "open only" } else { "all" },
@@ -1684,7 +1719,7 @@ impl App {
             rows,
             [
                 Constraint::Length(8),
-                Constraint::Length(11),
+                Constraint::Length(16),
                 Constraint::Length(12),
                 Constraint::Length(10),
                 Constraint::Fill(1),
@@ -1705,7 +1740,7 @@ impl App {
                 Span::styled(format!("{:<10}", "severity"), Style::new().dark_gray()),
                 Span::raw(x.severity.clone()).fg(severity_color(x)),
             ]));
-            let mut status = x.status_label().to_string();
+            let mut status = x.status_text();
             if let Some(t) = x.decided {
                 status += &format!(" since {}", usage::when(t));
             }
