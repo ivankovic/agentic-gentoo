@@ -108,7 +108,8 @@ made in the clone, and the patch here is refreshed from it by hand.
 | `j` `k` `d` `u` `g` `G` | move, page, top, bottom (arrows, PgUp/PgDn, Home/End too) |
 | `/`, `Esc` | search by name, clear it |
 | `f` `F` | next / previous package filter |
-| `Enter` | on a patched package: its patches; on a patch: change its state; on usage: the package |
+| `Enter` | on a patched package: its patches; on a patch: change its state (untracked: show it); on usage: the package |
+| `v` (Patches) | the patch, with less in a terminal |
 | `s` | sort packages and usage by name, CPU, active time, peak memory |
 | `p` | usage over the last 1, 7 or 30 days |
 | `m` | change a patch's state: pick it, then URL and note (both optional) |

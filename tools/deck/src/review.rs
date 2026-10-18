@@ -1139,7 +1139,7 @@ pub fn mark_seen(id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Opens a report in a terminal, with less.
+/// Opens a report, or any text file, in a terminal, with less.
 pub fn view(report: &Path) -> Result<()> {
     view_at(report, None)
 }

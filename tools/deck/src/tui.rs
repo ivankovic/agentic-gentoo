@@ -147,7 +147,9 @@ const HELP: &[&str] = &[
     "  Enter               the package's patches",
     "",
     "Patches",
-    "  m, Enter            record a change of state: pick it, then URL and note (both optional)",
+    "  m, Enter            record a change of state: pick it, then URL and note (both optional);",
+    "                      Enter on an untracked patch shows it instead",
+    "  v                   the patch, with less in a terminal",
     "  U                   set the upstream project the patch is meant for",
     "  S                   the next step upstream: stage in ~/3p, commit (by hand), fork, push, PR;",
     "                      fork and push ask first, nothing is public before push",
@@ -855,6 +857,7 @@ impl App {
             ("S", "next step upstream"),
             ("o", "terminal in the clone"),
             ("m", "record a state"),
+            ("v", "the patch"),
             ("U", "upstream project"),
         ];
         let Some(r) = self.selected_patch() else {
@@ -1164,6 +1167,23 @@ impl App {
                     self.refilter();
                 }
             }
+            // Untracked, there's no state to change yet: what it does comes first.
+            KeyCode::Char('v') | KeyCode::Enter
+                if self.view == View::Patches
+                    && (k.code == KeyCode::Char('v')
+                        || self.selected_patch().is_some_and(|r| self.m.last_event(&self.m.rows[r]).is_none())) =>
+            {
+                if let Some(r) = self.selected_patch() {
+                    let row = &self.m.rows[r];
+                    self.status = match row.file.map(|i| &self.m.files[i]) {
+                        Some(f) => match review::view(&self.m.host_dir.join(&f.rel)) {
+                            Ok(()) => format!("{} opened in a terminal", f.rel),
+                            Err(e) => format!("{e:#}"),
+                        },
+                        None => format!("{}: its file is gone", row.id),
+                    };
+                }
+            }
             KeyCode::Char('m') | KeyCode::Enter if self.view == View::Patches => {
                 if let Some(r) = self.selected_patch() {
                     let cur = self.m.last_event(&self.m.rows[r]).map(|e| e.state);
@@ -1245,7 +1265,7 @@ impl App {
                 }
                 View::Usage => "? explain · Enter package · s sort · p period · / search · q quit",
                 View::Patches => {
-                    "? explain · S next step upstream · o terminal · m state · U upstream · / search · q quit"
+                    "? explain · v view · S next step upstream · o terminal · m state · U upstream · / search · q quit"
                 }
                 View::Review if self.findings_of.is_some() => {
                     "c recheck by agent · Enter report · x fixed · n n/a here · w won't fix · o reopen · a all/open · Esc back"
@@ -1581,7 +1601,7 @@ impl App {
                         lines.push(Line::from(spans));
                     }
                 }
-                _ => lines.push(Line::from("not tracked yet — m to record its state").dark_gray()),
+                _ => lines.push(Line::from("not tracked yet — Enter shows it, m records its state").dark_gray()),
             }
         }
         f.render_widget(
