@@ -310,6 +310,10 @@ Reddit. Same as the others: no pstore, no i915 message; the last vitals sample (
 deck was booting again at 09:01:40. WebRender on the GPU is the trigger. A reset with no panic and
 no log, set off by GPU work, is the platform resetting (firmware, power delivery), not the kernel
 crashing. BIOS N3PET33W (1.24) is the newest fwupd knows of.
+Panel self refresh is ruled out: the panel (Innolux N140JCN-EEL) doesn't do it. i915's PSR debugfs
+files (`i915_edp_psr_status`, the connector's `i915_psr_status` and `i915_psr_sink_status`) all
+answer ENODEV, i915 finds no PSR-capable eDP, and the kernel log never mentions PSR. No boot after a
+reset logged a machine check either, so it isn't a CPU error the next boot could still read.
 
 **Terminals come back after a crash or a flat battery.**
 [deck-terminals](usr-local/bin/deck-terminals), run by the user service
