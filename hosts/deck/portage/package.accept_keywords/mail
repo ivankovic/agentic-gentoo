@@ -1,1 +1,2 @@
 mail-client/aerc ~amd64
+sys-auth/pam-gnupg ~amd64

@@ -1,0 +1,9 @@
+# greetd's login: what login does, and pam_gnupg (sys-auth/pam-gnupg) keeps the password typed
+# here to unlock, once the session starts, the GPG keys ~/.pam-gnupg lists (deck-mail config
+# writes it): mail syncs without asking. Optional: if it fails, login works as before.
+auth            include         login
+auth            optional        pam_gnupg.so store-only
+account         include         login
+password        include         login
+session         include         login
+session         optional        pam_gnupg.so

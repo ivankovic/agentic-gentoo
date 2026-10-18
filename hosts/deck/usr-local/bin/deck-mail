@@ -46,8 +46,11 @@ mbsync itself never deletes or uploads on Gmail: it pulls messages and their dis
 pushes only flags. Archive and delete go through Gmail's own IMAP commands (X-GM-LABELS, MOVE),
 whatever the account's IMAP settings say.
 
-Every 5 min deck-mail.timer runs `sync`. It never asks for the passphrase itself: when gpg-agent
-doesn't have it, it notifies once and waits for `deck-mail unlock` (or a `sync` in a terminal).
+Every 5 min deck-mail.timer runs `sync`. It never asks for the passphrase itself: logging in
+(greetd) and unlocking the screen (swaylock) hand the password to gpg-agent through pam_gnupg,
+which unlocks the keys `config` lists in ~/.pam-gnupg (the GPG passphrase is the login password).
+When gpg-agent still doesn't have it, `sync` notifies once and waits for `deck-mail unlock` (or a
+`sync` in a terminal).
 """
 import fcntl
 import imaplib
@@ -311,6 +314,7 @@ def config():
     write(CONFIG / "notmuch/default/config", notmuch(accts))
     write(CONFIG / "aerc/accounts.conf", aerc(accts))
     gpg_agent()
+    pam_gnupg()
     STATE.mkdir(parents=True, exist_ok=True)
     for a in accts:
         (MAIL / a["name"]).mkdir(parents=True, exist_ok=True)
@@ -324,9 +328,10 @@ def config():
     return 0
 
 
-# gpg-agent keeps the passphrase while it's used (a sync every 5 min), at most 12 h. Written here:
-# the repo's hooks keep anything under .gnupg out of it.
-GPG_AGENT = {"default-cache-ttl": "900", "max-cache-ttl": "43200"}
+# gpg-agent keeps the passphrase while it's used (a sync every 5 min), at most 12 h, when typed at
+# its prompt. One pam_gnupg presets at login and screen unlock stays until gpg-agent restarts.
+# Written here: the repo's hooks keep anything under .gnupg out of it.
+GPG_AGENT = {"default-cache-ttl": "900", "max-cache-ttl": "43200", "allow-preset-passphrase": ""}
 
 
 def gpg_agent():
@@ -334,11 +339,31 @@ def gpg_agent():
     conf = gnupg / "gpg-agent.conf"
     lines = conf.read_text().splitlines() if conf.exists() else []
     keep = [l for l in lines if l.split()[:1] not in ([k] for k in GPG_AGENT)]
-    new = keep + [f"{k} {v}" for k, v in GPG_AGENT.items()]
+    new = keep + [f"{k} {v}".rstrip() for k, v in GPG_AGENT.items()]
     if new != lines:
         gnupg.mkdir(mode=0o700, exist_ok=True)
         write(conf, "\n".join(new) + "\n")
         subprocess.run(["gpgconf", "--reload", "gpg-agent"], check=False)
+
+
+def pam_gnupg():
+    """~/.pam-gnupg: the keygrips of the key `pass` encrypts to, for pam_gnupg to unlock."""
+    store = pathlib.Path(os.environ.get("PASSWORD_STORE_DIR") or HOME / ".password-store")
+    try:
+        ids = (store / ".gpg-id").read_text().split()
+    except OSError:
+        return
+    r = subprocess.run(["gpg", "--list-secret-keys", "--with-colons", "--with-keygrip", "--", *ids],
+                       capture_output=True, text=True)
+    grips = [l.split(":")[9] for l in r.stdout.splitlines() if l.startswith("grp:")]
+    if r.returncode or not grips:
+        print("deck-mail: no secret key for ~/.password-store/.gpg-id; ~/.pam-gnupg left as it is")
+        return
+    conf = HOME / ".pam-gnupg"
+    text = "# deck-mail config: the keys pam_gnupg unlocks with the login password\n" + \
+        "".join(g + "\n" for g in grips)
+    if not conf.exists() or conf.read_text() != text:
+        write(conf, text)
 
 
 def passwords_has(name):

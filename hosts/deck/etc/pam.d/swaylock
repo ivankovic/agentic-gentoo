@@ -1,0 +1,5 @@
+# swaylock: what login does, and pam_gnupg (sys-auth/pam-gnupg) hands the password to gpg-agent
+# again for the keys in ~/.pam-gnupg, in case it forgot them (it restarted). Optional: if it fails,
+# unlocking works as before.
+auth            include         login
+auth            optional        pam_gnupg.so
