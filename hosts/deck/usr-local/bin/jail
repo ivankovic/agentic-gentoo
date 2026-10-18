@@ -73,13 +73,23 @@ esac
 [[ -n $chdir ]] && dir=$chdir
 
 if [[ ${JAIL_STAGE-} != inner ]]; then
-	mkdir -p "$jhome/.cargo" "$jhome/go"
-	# Its caches stay out of the hourly snapshots: each its own btrfs subvolume (deck-nosnap). The
-	# jail home is the jail's to change: a symlink there is left alone, not followed by the host.
-	if command -v deck-nosnap >/dev/null; then
-		for d in "$jhome/.cache" "$jhome/.cargo/registry" "$jhome/go/pkg" "$jhome/.npm"; do
-			[[ -L $d || -L ${d%/*} ]] || deck-nosnap "$d" >/dev/null
+	# The jail home's setup: the directories its mounts need, and its caches as their own btrfs
+	# subvolumes, out of the hourly snapshots (deck-nosnap). Once, recorded outside the jail home,
+	# and only while no jail runs: the jail home is the jail's to change, and a jail running could
+	# swap a symlink in between a check here and the work. A symlink found is left alone.
+	setup=${XDG_STATE_HOME:-$HOME/.local/state}/jail/home-set-up
+	if [[ ! -e $setup ]] && [[ $(systemctl --user show -P TasksCurrent jail.slice 2>/dev/null) =~ ^(0|\[not set\])?$ ]]; then
+		done=1
+		for d in "$jhome/.cargo" "$jhome/go"; do
+			if [[ -L $d ]]; then done=; else mkdir -p -- "$d"; fi
 		done
+		if command -v deck-nosnap >/dev/null; then
+			for d in .cache .cargo/registry go/pkg .npm; do
+				d=$jhome/$d
+				if [[ -L $d || -L ${d%/*} ]]; then done=; else deck-nosnap "$d" >/dev/null || done=; fi
+			done
+		fi
+		[[ -n $done ]] && mkdir -p -- "${setup%/*}" && : >"$setup"
 	fi
 	[[ -f $resolv ]] || printf 'nameserver %s\n' "$DNS_ADDR" >"$resolv"
 	# The network: pasta gives the jail its own namespace, with the internet and DNS (forwarded to
@@ -87,7 +97,7 @@ if [[ ${JAIL_STAGE-} != inner ]]; then
 	# ports. Inside it, the user shows as root (mapped to the user): bwrap is told the real ids.
 	# Not exec: this script stays the terminal's foreground process, so deck-terminals can tell a
 	# jailed program apart and reopen it in the jail.
-	JAIL_STAGE=inner JAIL_UID=$(id -u) JAIL_GID=$(id -g) \
+	JAIL_STAGE=inner JAIL_UID=$UID JAIL_GID=${GROUPS[0]} \
 		systemd-run --user --scope --slice=jail.slice --collect --quiet --unit="jail-$$.scope" -- \
 		pasta --quiet --config-net --no-map-gw -t none -u none -T none -U none --dns-forward "$DNS_ADDR" -- \
 		"$0" "${orig[@]}"
@@ -110,7 +120,9 @@ args=(
 )
 # Only with the kernel's legacy TIOCSTI (it's off here): input pushed into the terminal would run
 # in the host shell after the jail, so the jail gets a session of its own.
-[[ $(cat /proc/sys/dev/tty/legacy_tiocsti 2>/dev/null) == 0 ]] || args+=(--new-session)
+tiocsti=
+read -r tiocsti </proc/sys/dev/tty/legacy_tiocsti 2>/dev/null || true
+[[ $tiocsti == 0 ]] || args+=(--new-session)
 [[ -n $nosrc ]] || args+=(--bind "$src" "$src")
 
 ro=(
@@ -127,34 +139,56 @@ args+=("${extra[@]}")
 
 # Repositories up to two levels down: what git on the host executes stays read-only. Nothing from a
 # repository (a jailed program may have written it) becomes a mount source unless it is a real
-# directory or file under ROOT: no symlinks, no paths leading out. It is opened first and checked
-# where it really is, and bwrap mounts that open descriptor: a jail running meanwhile can't swap
-# it for a symlink between the check and the mount.
-bind_ro() { # PATH ROOT
-	local fd r
-	[[ -L $1 ]] && return 1
-	exec {fd}<"$1" 2>/dev/null || return 1
-	r=$(readlink "/proc/self/fd/$fd")
-	if [[ $r/ = "$2"/* ]]; then
-		args+=(--ro-bind-fd "$fd" "$1")
-	else
-		exec {fd}<&-
-		return 1
-	fi
+# directory or file under ROOT. Each is opened first, then checked where it really is, and bwrap
+# mounts that open descriptor: a jail running meanwhile can't swap it for a symlink between the
+# check and the mount. Anything that should be protected and can't be (a symlink, not a plain file
+# or directory, can't be opened, leads out) stops the jail from starting: never a silent gap.
+# No process per repository: one realpath, one readlink, git only for a config naming hooksPath.
+refuse() {
+	echo "jail: $1; not starting" >&2
+	exit 1
 }
-while IFS= read -r git; do
-	repo=$(realpath -e -- "${git%/.git}") || continue
-	[[ -L $git ]] && continue
-	bind_ro "$git/config" "$repo" || true
-	bind_ro "$git/hooks" "$repo" || true
-	# The file itself, read by the real git: no include, nothing run.
-	hooks=$(/usr/bin/git config --file "$git/config" --get core.hooksPath 2>/dev/null || true)
-	if [[ -n $hooks ]]; then
-		[[ $hooks = /* ]] || hooks=$repo/$hooks
-		# Anywhere in ~/src: also the jail's to write.
-		[[ -d $hooks ]] && { bind_ro "$hooks" "$src" || true; }
-	fi
-done < <([[ -n $nosrc ]] || find "$src" -mindepth 2 -maxdepth 3 -name .git -type d -prune 2>/dev/null)
+pinned=() # descriptor, path, root; three entries each
+pin() { # PATH ROOT
+	local fd
+	[[ -L $1 ]] && refuse "$1 is a symlink"
+	[[ -f $1 || -d $1 ]] || refuse "$1 is not a plain file or directory"
+	exec {fd}<"$1" || refuse "can't open $1"
+	pinned+=("$fd" "$1" "$2")
+}
+gits=()
+[[ -n $nosrc ]] || mapfile -d '' gits < <(find "$src" -mindepth 2 -maxdepth 3 -name .git -type d -prune -print0 2>/dev/null)
+if ((${#gits[@]})); then
+	mapfile -d '' repos < <(realpath -m -z -- "${gits[@]%/.git}")
+	for i in "${!gits[@]}"; do
+		git=${gits[i]} repo=${repos[i]}
+		[[ -L $git ]] && refuse "$git is a symlink"
+		[[ -e $git/config || -L $git/config ]] && pin "$git/config" "$repo"
+		[[ -e $git/hooks || -L $git/hooks ]] && pin "$git/hooks" "$repo"
+		cfg=
+		[[ -f $git/config ]] && { IFS= read -rd '' cfg <"$git/config" || true; }
+		if [[ ${cfg,,} == *hookspath* ]]; then
+			# The file itself, read by the real git: no include, nothing run. From /: git would read
+			# the current directory's repository too, whatever its config is (a FIFO hangs it).
+			hooks=$(/usr/bin/git -C / config --file "$git/config" --get core.hooksPath 2>/dev/null || true)
+			[[ -n $hooks && $hooks != /* ]] && hooks=$repo/$hooks
+			# In ~/src it is the jail's to write: protected. Elsewhere the jail can't reach it, or
+			# it's in the jail home, where it is the jail's anyway (the host git guard watches it).
+			if [[ -n $hooks && $(realpath -m -- "$hooks")/ = "$src"/* ]] && [[ -e $hooks || -L $hooks ]]; then
+				pin "$hooks" "$src"
+			fi
+		fi
+	done
+fi
+if ((${#pinned[@]})); then
+	links=()
+	for ((i = 0; i < ${#pinned[@]}; i += 3)); do links+=("/proc/self/fd/${pinned[i]}"); done
+	mapfile -d '' real < <(readlink -z -- "${links[@]}")
+	for ((i = 0, j = 0; i < ${#pinned[@]}; i += 3, j++)); do
+		[[ ${real[j]-}/ = "${pinned[i + 2]}"/* ]] || refuse "${pinned[i + 1]} leads out of ${pinned[i + 2]} (to ${real[j]-?})"
+		args+=(--ro-bind-fd "${pinned[i]}" "${pinned[i + 1]}")
+	done
+fi
 
 # A clean environment: nothing from the session leaks in (agent sockets, tokens, D-Bus).
 env=(--clearenv --setenv HOME "$HOME" --setenv USER "$USER" --setenv LOGNAME "$USER"

@@ -94,7 +94,7 @@ state() {
 	fi
 	# The repository's own config as git reads it, includes followed, with where each line is from.
 	"$real" --git-dir="$gd" config --list --show-origin --includes --local 2>&1
-	[[ -f $gd/config.worktree ]] && "$real" config --file "$gd/config.worktree" --list --show-origin --includes 2>&1
+	[[ -f $gd/config.worktree ]] && "$real" -C / config --file "$gd/config.worktree" --list --show-origin --includes 2>&1
 	hooks=$("$real" --git-dir="$gd" config --get core.hooksPath 2>/dev/null) || hooks=$common/hooks
 	[[ $hooks = /* ]] || hooks=$wt/$hooks
 	echo "hooks $hooks"
@@ -192,6 +192,14 @@ if [[ $sub = clone || $sub = init ]]; then
 fi
 
 guarded "$dir" || exec "$real" "$@"
+
+# What git reads must be plain files: a FIFO, a device or a socket would hang or feed git.
+for f in "$gd/config" "$gd/config.worktree" "$gd/commondir" "$wt/.git"; do
+	if [[ -e $f && ! -f $f && ! -d $f ]]; then
+		echo "git: ${wt#"$HOME"/}: $f is not a plain file; look at it (a jailed program may have made it)" >&2
+		exit 128
+	fi
+done
 
 if [[ -f $record.stamp ]] && [[ $(stamp) == "$(cat -- "$record.stamp")" ]]; then
 	:
