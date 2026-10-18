@@ -20,3 +20,8 @@
 	external = omnidiff
 [difftool]
 	prompt = false
+[safe]
+	# A directory holding HEAD, objects/ and refs/ is a bare repository to git, found on its own
+	# like .git: a jailed program could make one in ~/src with a config that runs commands, and
+	# the host git guard (usr-local/bin/git) only knows .git. Bare repositories only when named.
+	bareRepository = explicit
