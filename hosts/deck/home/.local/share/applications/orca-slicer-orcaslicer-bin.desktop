@@ -1,0 +1,12 @@
+# Overrides /usr/share/applications/orca-slicer-orcaslicer-bin.desktop: on Wayland, Orca crashed in
+# Mesa drawing plate thumbnails while its 3D view was hidden (Device tab, AMS sync). Under X11
+# (xwayland-satellite), as Bambu Studio runs.
+[Desktop Entry]
+Type=Application
+Name=OrcaSlicer
+Comment=G-code generator for 3D printers (Bambu, Prusa, Voron, Creality)
+Icon=orca-slicer
+Categories=Graphics;3DGraphics;Engineering;
+Exec=env GDK_BACKEND=x11 orca-slicer %F
+TryExec=orca-slicer
+MimeType=model/stl;application/vnd.ms-3mfdocument;application/prs.wavefront-obj;application/x-amf;
