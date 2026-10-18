@@ -8,12 +8,15 @@
 #     --ro DIR, --rw DIR one more directory, read-only or writable (repeatable)
 #     --chdir DIR        start there instead of the current directory
 #
-# What the jailed program sees (bubblewrap: its own user, PID, IPC, UTS and cgroup namespaces;
-# the network is shared, so it has full network access):
+# What the jailed program sees (bubblewrap: its own user, PID, IPC, UTS and cgroup namespaces,
+# and its own network through pasta: the internet, but not the host's loopback services or abstract
+# unix sockets, such as Xwayland's):
 #
 #   ~/src                read-write, except each repository's .git/config, .git/hooks and hooks
-#                        directory (core.hooksPath), read-only: git on the host runs those, so a
-#                        jailed program must not be able to change them
+#                        directory (core.hooksPath), read-only: git on the host runs those. That
+#                        alone can't keep host git safe (a new repository, a renamed .git,
+#                        .git/commondir...): /usr/local/bin/git, the host's git, refuses to run in
+#                        a repository whose config or hooks changed until `git trust`
 #   home                 its own, ~/.local/share/jail/home, kept between runs: the tools' logins,
 #                        settings, history and caches (cargo registry, Go modules, sccache, npm)
 #   from the real home   read-only: toolchains (~/.rustup, ~/.cargo/bin, ~/go/bin, ~/.local/bin
@@ -37,10 +40,20 @@ set -euo pipefail
 src=$HOME/src
 jhome=${XDG_DATA_HOME:-$HOME/.local/share}/jail/home
 mkdir -p "$jhome/.cargo" "$jhome/go"
-# Its caches stay out of the hourly snapshots: each its own btrfs subvolume (deck-nosnap).
+# Its caches stay out of the hourly snapshots: each its own btrfs subvolume (deck-nosnap). The jail
+# home is the jail's to change: a symlink there is left alone, not followed by the host.
 if command -v deck-nosnap >/dev/null; then
-	deck-nosnap "$jhome/.cache" "$jhome/.cargo/registry" "$jhome/go/pkg" "$jhome/.npm" >/dev/null
+	for d in "$jhome/.cache" "$jhome/.cargo/registry" "$jhome/go/pkg" "$jhome/.npm"; do
+		[[ -L $d || -L ${d%/*} ]] || deck-nosnap "$d" >/dev/null
+	done
 fi
+
+# The network: pasta gives the jail its own namespace, with the internet and DNS (forwarded to the
+# host's resolver from DNS_ADDR), but not the host's loopback (--no-map-gw) and no forwarded ports.
+DNS_ADDR=169.254.1.1
+resolv=${XDG_RUNTIME_DIR:-/tmp}/jail-resolv.conf
+[[ -f $resolv ]] || printf 'nameserver %s\n' "$DNS_ADDR" >"$resolv"
+net=(pasta --quiet --config-net --no-map-gw -t none -u none -T none -U none --dns-forward "$DNS_ADDR" --)
 
 nosrc= chdir= extra=()
 while (($#)); do
@@ -68,8 +81,9 @@ esac
 [[ -n $chdir ]] && dir=$chdir
 
 args=(
-	--unshare-user --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try
-	--share-net --die-with-parent --hostname jail
+	--unshare-user --uid "$(id -u)" --gid "$(id -g)"
+	--unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try
+	--die-with-parent --hostname jail
 	--ro-bind /usr /usr
 	--symlink usr/bin /bin --symlink usr/sbin /sbin --symlink usr/lib /lib --symlink usr/lib64 /lib64
 	--ro-bind /etc /etc
@@ -77,9 +91,12 @@ args=(
 	--ro-bind /sys /sys
 	--proc /proc --dev /dev
 	--tmpfs /tmp --tmpfs /run --tmpfs /var --dir /var/tmp
-	--ro-bind-try /run/systemd/resolve /run/systemd/resolve
+	--ro-bind "$resolv" /etc/resolv.conf
 	--bind "$jhome" "$HOME"
 )
+# Only with the kernel's legacy TIOCSTI (it's off here): input pushed into the terminal would run
+# in the host shell after the jail, so the jail gets a session of its own.
+[[ $(cat /proc/sys/dev/tty/legacy_tiocsti 2>/dev/null) == 0 ]] || args+=(--new-session)
 [[ -n $nosrc ]] || args+=(--bind "$src" "$src")
 
 ro=(
@@ -91,16 +108,24 @@ for p in "${ro[@]}"; do
 	[[ -e $HOME/$p ]] && args+=(--ro-bind "$HOME/$p" "$HOME/$p")
 done
 
-# Repositories up to two levels down: what git on the host executes stays read-only.
+# Repositories up to two levels down: what git on the host executes stays read-only. Nothing from a
+# repository (a jailed program may have written it) becomes a mount source unless it is a real
+# directory or file inside that repository: no symlinks, no paths leading out.
+inside() { # PATH REPO: PATH resolves to REPO or under it, and isn't a symlink
+	local r
+	[[ ! -L $1 ]] && r=$(realpath -e -- "$1" 2>/dev/null) && [[ $r/ = "$2"/* ]]
+}
 while IFS= read -r git; do
-	repo=${git%/.git}
+	repo=$(realpath -e -- "${git%/.git}") || continue
+	[[ -L $git ]] && continue
 	for p in "$git/config" "$git/hooks"; do
-		[[ -e $p ]] && args+=(--ro-bind "$p" "$p")
+		inside "$p" "$repo" && args+=(--ro-bind "$p" "$p")
 	done
-	hooks=$(git -C "$repo" config --get core.hooksPath 2>/dev/null || true)
+	# The file itself, read by the real git: no include, nothing run.
+	hooks=$(/usr/bin/git config --file "$git/config" --get core.hooksPath 2>/dev/null || true)
 	if [[ -n $hooks ]]; then
 		[[ $hooks = /* ]] || hooks=$repo/$hooks
-		[[ -d $hooks ]] && args+=(--ro-bind "$hooks" "$hooks")
+		[[ -d $hooks ]] && inside "$hooks" "$repo" && args+=(--ro-bind "$hooks" "$hooks")
 	fi
 done < <([[ -n $nosrc ]] || find "$src" -mindepth 2 -maxdepth 3 -name .git -type d -prune 2>/dev/null)
 args+=("${extra[@]}")
@@ -122,4 +147,4 @@ done
 # Not exec: this script stays the terminal's foreground process, so deck-terminals can tell a
 # jailed program apart and reopen it in the jail.
 systemd-run --user --scope --slice=jail.slice --collect --quiet --unit="jail-$$.scope" -- \
-	bwrap "${args[@]}" "${env[@]}" --chdir "$dir" -- "$@"
+	"${net[@]}" bwrap "${args[@]}" "${env[@]}" --chdir "$dir" -- "$@"

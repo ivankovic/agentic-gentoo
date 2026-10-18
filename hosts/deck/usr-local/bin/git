@@ -1,0 +1,218 @@
+#!/bin/bash
+# git, guarded: in ~/src, host git only runs when the repository's git configuration and hooks are
+# as they were when you last used git there. Everything else is /usr/bin/git, unchanged.
+#
+# Why: jailed programs (/usr/local/bin/jail) write ~/src. A repository's own config can make git
+# run commands (core.fsmonitor, core.sshCommand, diff.external, filter drivers, hooks...), and a
+# jailed program can always reach it: a new repository, a renamed .git, .git/commondir, a
+# submodule's config, a change to tracked hooks. Mounts can't close all of that, so the host checks
+# before git runs: the repository's own config (with what it includes), the hooks git would run, and
+# the git directory's layout. Changed (or never seen): git refuses and shows what changed.
+#
+#   git trust [DIR...]   accept the current state of the repository (in DIR, default here), after
+#                        a look at what it shows; --all: every repository in ~/src
+#
+# Git commands that can change the config themselves (config, remote, branch, push, init, clone,
+# submodule, worktree, switch, checkout) record the state afterwards: what you do with host git
+# is trusted. In the jail ($JAIL) this is plain git: the jail is what it guards against.
+#
+# The check is a stat of the relevant files, compared with the last one; only when that differs is
+# the state rebuilt and compared, in ~/.local/state/git-guard.
+set -uo pipefail
+
+real=/usr/bin/git
+[[ -n ${JAIL-} ]] && exec "$real" "$@"
+src=$HOME/src
+store=${XDG_STATE_HOME:-$HOME/.local/state}/git-guard
+
+# The directory git will work in, from the leading -C options (git's own order), and the
+# subcommand: the first argument that isn't a global option.
+dir=$PWD sub= gitdir_opt=${GIT_DIR-}
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+	a=${args[i]}
+	case $a in
+	-C) ((i++)); d=${args[i]-}; [[ $d = /* ]] && dir=$d || dir=$dir/$d ;;
+	-c | --exec-path | --namespace | --config-env | --super-prefix) ((i++)) ;;
+	--git-dir) ((i++)); gitdir_opt=${args[i]-} ;;
+	--git-dir=*) gitdir_opt=${a#--git-dir=} ;;
+	--work-tree) ((i++)) ;;
+	-*) ;;
+	*) sub=$a; break ;;
+	esac
+done
+
+# The worktree and git directory for a directory, found the way git finds them (upwards, a .git
+# directory or a "gitdir:" file); nothing when it isn't a repository.
+locate() {
+	local d
+	d=$(realpath -m -- "$1") || return 1
+	while :; do
+		if [[ -d $d/.git ]]; then
+			wt=$d gd=$d/.git
+			return 0
+		elif [[ -f $d/.git ]]; then
+			local line
+			line=$(head -c 4096 "$d/.git")
+			line=${line#gitdir: }
+			[[ $line = /* ]] || line=$d/$line
+			wt=$d gd=$(realpath -m -- "$line")
+			return 0
+		fi
+		[[ $d = / ]] && return 1
+		d=${d%/*}
+		[[ -z $d ]] && d=/
+	done
+}
+
+# Files whose change means the state must be checked again: inode, size and time each.
+stamp() {
+	local files=("$wt/.git" "$gd/config" "$gd/config.worktree" "$gd/commondir" "$gd/hooks"
+		"$gd/modules" "$gd/worktrees")
+	local f
+	while IFS= read -r f; do files+=("$f"); done < <(extra_files)
+	stat -L -c '%n %i %s %Y' -- "${files[@]}" 2>&1 | sort
+}
+
+# What the last full check found worth watching: the hooks directory and its files, included
+# config files, submodules' config.
+extra_files() {
+	[[ -f $record.files ]] && cat -- "$record.files"
+}
+
+# The state itself: everything in it that can make git run something.
+state() {
+	local common=$gd hooks f
+	echo "worktree $wt"
+	echo "gitdir $gd"
+	[[ -f $wt/.git ]] && echo "gitfile $(head -c 4096 "$wt/.git")"
+	if [[ -f $gd/commondir ]]; then
+		echo "commondir $(head -c 4096 "$gd/commondir")"
+		common=$(realpath -m -- "$gd/$(head -n1 "$gd/commondir")")
+	fi
+	# The repository's own config as git reads it, includes followed, with where each line is from.
+	"$real" --git-dir="$gd" config --list --show-origin --includes --local 2>&1
+	[[ -f $gd/config.worktree ]] && "$real" config --file "$gd/config.worktree" --list --show-origin --includes 2>&1
+	hooks=$("$real" --git-dir="$gd" config --get core.hooksPath 2>/dev/null) || hooks=$common/hooks
+	[[ $hooks = /* ]] || hooks=$wt/$hooks
+	echo "hooks $hooks"
+	{
+		[[ -d $hooks ]] && echo "$hooks"
+		find "$hooks" -maxdepth 1 \( -type f -o -type l \) ! -name '*.sample' 2>/dev/null
+		# Submodules' and other worktrees' own config and hooks.
+		find "$common/modules" "$common/worktrees" \( -name config -o -name config.worktree -o -name commondir \
+			-o -path '*/hooks/*' \) ! -name '*.sample' \( -type f -o -type l \) 2>/dev/null
+		# Files the config includes.
+		"$real" --git-dir="$gd" config --list --show-origin --includes --local 2>/dev/null |
+			sed -n 's/^file:\([^	]*\)	.*/\1/p' | sort -u
+	} | sort -u >"$record.files.new"
+	while IFS= read -r f; do
+		[[ -L $f ]] && echo "link $f -> $(readlink -- "$f")"
+		if [[ -d $f ]]; then
+			echo "dir $f"
+		else
+			echo "file $f $(stat -L -c %a -- "$f" 2>/dev/null) $(sha256sum <"$f" 2>/dev/null | cut -c1-64)"
+		fi
+	done <"$record.files.new"
+}
+
+save() {
+	mkdir -p -- "$store"
+	state >"$record.state.new"
+	mv -- "$record.files.new" "$record.files"
+	mv -- "$record.state.new" "$record.state"
+	stamp >"$record.stamp"
+}
+
+# Sets wt, gd and record for a directory; false when it isn't a repository in ~/src.
+guarded() {
+	if [[ -n $gitdir_opt ]]; then
+		gd=$(realpath -m -- "$gitdir_opt") wt=${gd%/.git}
+	else
+		locate "$1" || return 1
+	fi
+	[[ $wt/ = "$src"/* || $gd/ = "$src"/* ]] || return 1
+	record=$store/$(printf '%s' "$gd" | sha256sum | cut -c1-32)
+}
+
+trust() {
+	local dirs=("$@") d
+	if [[ ${dirs[0]-} = --all ]]; then
+		mapfile -t dirs < <(find "$src" -mindepth 2 -maxdepth 4 -name .git -prune -printf '%h\n' 2>/dev/null)
+	fi
+	((${#dirs[@]})) || dirs=("$PWD")
+	for d in "${dirs[@]}"; do
+		gitdir_opt=
+		guarded "$d" || { echo "git trust: $d is not a repository in $src" >&2; continue; }
+		mkdir -p -- "$store"
+		if [[ -f $record.state ]]; then
+			state | diff -u --label "trusted" --label "now" -- "$record.state" - && { echo "git trust: ${wt#"$HOME"/}: unchanged"; rm -f -- "$record.files.new"; continue; }
+		else
+			echo "git trust: ${wt#"$HOME"/}: first time"
+			# The settings that make git run something, if it has any; and its hooks.
+			state | grep -E -i '^file:[^	]*	[^=]*(fsmonitor|sshcommand|hookspath|\.cmd|\.clean|\.smudge|\.process|external|editor|pager|askpass|program|helper|textconv|include)[^=]*=|^file [^ ]*hooks/' | sed 's/^/  /'
+			rm -f -- "$record.files.new"
+		fi
+		save
+		echo "git trust: ${wt#"$HOME"/}: trusted"
+	done
+}
+
+if [[ $sub = trust ]]; then
+	shift $((i + 1))
+	trust "$@"
+	exit
+fi
+
+# A new repository made by host git is trusted as it comes out.
+if [[ $sub = clone || $sub = init ]]; then
+	"$real" "$@"
+	rc=$?
+	((rc == 0)) || exit "$rc"
+	pos=()
+	for a in "${args[@]:i+1}"; do [[ $a = -* ]] || pos+=("$a"); done
+	if [[ $sub = init ]]; then
+		target=${pos[-1]-.}
+	elif ((${#pos[@]} == 1)); then
+		# Only the URL: git names the directory after its last part.
+		target=${pos[0]%/}; target=${target##*[/:]}; target=${target%.git}
+	else
+		target=${pos[-1]-}
+	fi
+	[[ $target = /* ]] || target=$dir/$target
+	gitdir_opt=
+	guarded "$target" && save
+	exit 0
+fi
+
+guarded "$dir" || exec "$real" "$@"
+
+if [[ -f $record.stamp ]] && [[ $(stamp) == "$(cat -- "$record.stamp")" ]]; then
+	:
+elif [[ -f $record.state ]] && state | cmp -s -- "$record.state" -; then
+	mv -- "$record.files.new" "$record.files"
+	stamp >"$record.stamp"
+else
+	{
+		if [[ -f $record.state ]]; then
+			echo "git: ${wt#"$HOME"/}: its git config, hooks or layout changed since you last used git there:"
+			state | diff -u --label "trusted" --label "now" -- "$record.state" - | head -40
+		else
+			echo "git: ${wt#"$HOME"/}: a repository host git hasn't seen before."
+		fi
+		rm -f -- "$record.files.new"
+		echo "Look at it (a jailed program may have changed it), then: git -C '$wt' trust"
+	} >&2
+	exit 128
+fi
+
+case $sub in
+config | remote | branch | push | submodule | worktree | switch | checkout) ;;
+*) exec "$real" "$@" ;;
+esac
+
+# A command that may change the config: run it, then record what host git left.
+"$real" "$@"
+rc=$?
+((rc == 0)) && save
+exit "$rc"

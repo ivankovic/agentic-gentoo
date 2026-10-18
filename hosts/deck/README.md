@@ -378,7 +378,8 @@ trusted, not tied to any one tool: `jail` (a shell) or `jail <command>`, e.g. `j
 repository's `.git/config`, `.git/hooks` and `core.hooksPath` directory, which git on the host
 runs; its own home in `~/.local/share/jail/home` (logins, settings, history; caches as their own
 subvolumes, out of the snapshots); toolchains and editor and shell settings from the real home
-read-only; `/usr`, `/etc`, `/opt` read-only; full network. Not there: the rest of the home (SSH and
+read-only; `/usr`, `/etc`, `/opt` read-only; the internet through its own network namespace
+(pasta: no host loopback services, no abstract unix sockets such as Xwayland's). Not there: the rest of the home (SSH and
 GPG keys, `gh`, `~/.cargo/credentials.toml`, browser, mail), the SSH and GPG agents, D-Bus,
 Wayland, sudo. So nothing jailed can push, publish or sign: commit inside, review and push outside.
 For untrusted code, `jail --no-src` leaves `~/src` out, and `--ro DIR`, `--rw DIR` and `--chdir DIR`
@@ -387,8 +388,21 @@ programs share [jail.slice](home/.config/systemd/user/jail.slice): CPU weight 20
 the CPU first) and at most 90% of it, 22 GiB memory high, 24 GiB max, 4 GiB of
 swap, 2000 tasks, and systemd-oomd kills inside it after 20 s stalled on memory over half the time. The prompt says `jail`; deck-terminals reopens jailed
 programs in the jail. A jailed tool logs in once on its own (its login lives in the jail home).
-What a jailed program writes in `~/src` and you later run on the host (build scripts, tests,
-tracked hook files) runs with your rights: read the diff first.
+What a jailed program writes in `~/src` and you later run on the host (build scripts, tests)
+runs with your rights: read the diff first.
+
+**Host git is guarded** ([usr-local/bin/git](usr-local/bin/git), first on the PATH). Read-only
+mounts can't keep a repository's git config and hooks from a jailed program: it can make a new
+repository, rename `.git`, add `.git/commondir` or change tracked hooks, and the config can make
+git run commands (`core.fsmonitor`, `core.sshCommand`, filters, hooks). So in `~/src` the host's git
+checks first that the repository's own config (includes followed), the hooks it would run and the
+git directory's layout are as host git last left them, and refuses, showing the difference, when
+they aren't; `git trust` accepts them after a look (`git trust --all`: every repository). Host git
+commands that change config themselves (config, remote, branch, push, clone, init, ...) record the
+new state. It costs about 7 ms a call; inside the jail it's plain git. Found by deck's first
+security review of the jail (2026-10-18), with the jail's other fixes: `core.hooksPath` no longer
+becomes a mount unless it is a real directory in the repository, and the jail home's symlinks are
+never followed by the host.
 
 ## Maintenance
 
