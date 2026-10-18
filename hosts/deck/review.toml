@@ -103,7 +103,8 @@ focus = "As root, parses DHCP and router advertisements from any network joined.
 [[package]]
 atom = "net-wireless/bluez"
 tier = 3
-focus = "bluetoothd, as root: parses what devices in radio range send (pairing, profiles)."
+paths = ["src"]
+focus = "bluetoothd, as root: parses what devices in radio range send (pairing, profiles). src/ is the daemon, with the shared protocol parsers (src/shared: ATT, GATT, SDP, AVDTP...)."
 
 [[package]]
 atom = "gui-apps/swaylock"

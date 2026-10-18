@@ -724,8 +724,10 @@ pub fn prepare(repo: &Path, s: &Subject, version: &str, v: &Versions, log: &mut 
             // `ebuild clean <phase>` in the jail, as the user, with our own temporary and
             // download directories; what is already downloaded is linked from the system's.
             let ebuild_phase = |phase: &str, log: &mut dyn Write| -> Result<bool> {
+                // The installed-package database too: ebuilds ask it what is installed (Rust for a
+                // Rust package, Vala for GMime's prepare), and without it nothing is.
                 let mut c = jail();
-                c.arg("--ro").arg("/var/db/repos").arg("--ro").arg(repo_root);
+                c.args(["--ro", "/var/db/repos", "--ro", "/var/db/pkg"]).arg("--ro").arg(repo_root);
                 if Path::new("/var/cache/distfiles").is_dir() {
                     c.args(["--ro", "/var/cache/distfiles"]);
                 }
@@ -745,7 +747,7 @@ pub fn prepare(repo: &Path, s: &Subject, version: &str, v: &Versions, log: &mut 
                 Ok(out.status.success())
             };
             // prepare applies Gentoo's patches and ours, but some packages' prepare needs build
-            // tools that a package from the binhost never installed: then upstream's source.
+            // tools that a package from the binhost never pulled in: then upstream's source.
             if !ebuild_phase("prepare", log)? {
                 writeln!(log, "deck: prepare failed; unpacking without Gentoo's patches")?;
                 if !ebuild_phase("unpack", log)? {

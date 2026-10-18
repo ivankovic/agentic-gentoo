@@ -121,6 +121,13 @@ enum ReviewCmd {
     },
     /// Security reviews of updates to watched code, within the daily budget (the timer runs it)
     Auto,
+    /// Fetch and unpack a subject's source as a review would read it, without an agent
+    Prepare {
+        subject: String,
+        /// A version other than the one a review would take
+        #[arg(long)]
+        version: Option<String>,
+    },
     /// Have an agent check whether the subject's open findings are fixed in the installed version
     Recheck {
         subject: String,
@@ -338,6 +345,21 @@ fn review_cmd(host_dir: &std::path::Path, cmd: &ReviewCmd) -> Result<()> {
                 .find(|i| i.subject.name() == *subject)
                 .with_context(|| format!("no subject {subject}; deck review list shows them"))?;
             run_review(&cfg, &repo, item, *kind, agent.as_deref(), *full, false, false, &usage_db)
+        }
+        ReviewCmd::Prepare { subject, version } => {
+            let items = board()?;
+            let item = items
+                .iter()
+                .find(|i| i.subject.name() == *subject)
+                .with_context(|| format!("no subject {subject}; deck review list shows them"))?;
+            let v = match version {
+                Some(v) => v.clone(),
+                None => item.versions.target().context("no version")?.to_string(),
+            };
+            let dir = review::prepare(&repo, &item.subject, &v, &item.versions, &mut std::io::stderr())?;
+            let unpatched = dir.with_file_name(format!("{v}.unpatched")).exists();
+            println!("{}{}", dir.display(), if unpatched { " (upstream's source: Gentoo's patches not applied)" } else { "" });
+            Ok(())
         }
         ReviewCmd::Recheck { subject, agent } => {
             let items = board()?;
