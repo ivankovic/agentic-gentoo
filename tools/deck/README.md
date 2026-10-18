@@ -22,6 +22,8 @@ deck review [list]                         # every subject, where its reviews st
 deck review next [--kind security|performance]
 deck review run <subject> [--kind K] [--agent A] [--full]
 deck review auto                           # security reviews of updates, within the daily budget
+deck review findings [<subject>] [--all]   # findings, open ones first, and what was decided
+deck review decide <run> <n> <open|fixed|not-applicable|wont-fix> [--note TEXT]
 ```
 
 It reads the host's directory, `~/src/agentic-gentoo/hosts/$(hostname)` unless `--host-dir` or
@@ -116,6 +118,9 @@ made in the clone, and the patch here is refreshed from it by hand.
 | `S` `P` (Review) | the same, of the whole even when an earlier version was reviewed |
 | `Enter` (Review) | the latest report, with less in a terminal; marks it read |
 | `n` `a` (Review) | the most worthwhile next (the top row) / the next agent |
+| `f` (Review) | the subject's findings, open ones first |
+| `x` `n` `w` `o` (findings) | decide: fixed / doesn't apply here / won't fix / open again, with a note |
+| `Enter` `a` `Esc` (findings) | the report at the finding / decided ones too / back |
 | `?` | explain the selected row and the keys that work on it; `?` again: every key |
 | `r` | reload |
 | `q` | quit |
@@ -155,9 +160,18 @@ code … 5; performance: its measured share of CPU time and profile samples) tim
 unreviewed (a change 1, never reviewed 0.7, current 0.03). The board is sorted by it, and `deck
 review next` names the top one: where spare tokens are best spent.
 
+**Findings** are decided one by one: `f` on a subject lists them, open ones first, worst first,
+and `x` (fixed), `n` (doesn't apply here), `w` (won't fix) or `o` (open again) records a decision
+with a note, in the run's record. The next review of the subject is given every earlier finding
+with its decision and note: it doesn't raise again what doesn't apply or won't be fixed unless
+something changed, checks the fixes, and, for a change, reports only what the change brings. What
+a change fixes it reports with severity `fix`, filed as fixed. A new full review supersedes the
+open findings before it (it reports again what is still there). The Review tab's Open column and
+the maintenance tile count what is still undecided.
+
 **Every day**, `deck-review.timer` (a user timer) runs `deck review auto`: security reviews of
-the changes in watched code, updates first, at most `budget.auto_per_day` a day. Unread reports
-with findings and failed automatic runs show on the maintenance tile (`deck-attention`).
+the changes in watched code, updates first, at most `budget.auto_per_day` a day. Findings
+not decided yet and failed automatic runs show on the maintenance tile (`deck-attention`).
 
 **Reports stay private**: `~/.local/state/deck/reviews/reports/<subject>/`, with the agent's
 errors beside each in a `.log`, and one JSON record per run in `runs/`. A finding may be an

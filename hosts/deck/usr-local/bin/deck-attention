@@ -17,8 +17,8 @@ events (crashes, an unclean shutdown) as seen: the tile drops them until a newer
             (etc/deck-health/portage.py, run as root after syncs and emerges)
   snapshots build output inside the hourly snapshots of @home: a cargo target/ in ~/src, or
             ~/.cache, that isn't its own subvolume (fix: deck-nosnap DIR)
-  reviews   reports of AI reviews (deck review, tools/deck) with findings not read yet, and the
-            daily automatic reviews that failed; read them in deck's Review tab (Enter)
+  reviews   findings of AI reviews (deck review, tools/deck) nobody has decided about yet, and
+            the daily automatic reviews that failed; decide in deck's Review tab (f, then x/n/w)
   disk      / or /efi more than 85% full (btrfs slows down and can fail to write when nearly full;
             a full ESP fails the next kernel install)
 
@@ -204,26 +204,27 @@ def portage():
 
 
 def reviews():
-    """[(tile line, detail)]: unread reports with findings, failed automatic runs."""
-    unread, failed = [], []
+    """[(tile line, detail)]: subjects with findings not decided yet, failed automatic runs."""
+    open_by = collections.defaultdict(list)
+    failed = []
     for f in REVIEWS.glob("*.json"):
         try:
             r = json.loads(f.read_text())
         except (OSError, ValueError):
             continue
-        if r.get("status") == "done" and r.get("findings") and not r.get("seen"):
-            unread.append(r)
+        if r.get("status") == "done":
+            open_by[r["subject"]] += [x for x in r.get("findings", []) if x.get("status", "open") in ("", "open")]
         elif r.get("status") == "failed" and r.get("auto") and time.time() - r.get("started", 0) < 3 * DAY:
             failed.append(r)
+    open_by = {s: xs for s, xs in open_by.items() if xs}
     found = []
-    if unread:
-        def counts(r):
-            sev = [str(x.get("severity", "")).lower() for x in r["findings"]]
-            high = sum(s in ("high", "critical") for s in sev)
-            return f"{high} high of {len(sev)}" if high else plural(len(sev), "finding")
-        found.append((f"Review findings to read: {', '.join(r['subject'] for r in unread)}",
-                      "\n".join(f"  {r['subject']} ({r['kind']}, {r['version']}): {counts(r)}\n    {r['report']}"
-                                for r in unread) + "\n  deck, tab 4 Review: Enter opens a report and marks it read"))
+    if open_by:
+        def counts(xs):
+            high = sum(str(x.get("severity", "")).lower() in ("high", "critical") for x in xs)
+            return f"{high} high of {len(xs)}" if high else plural(len(xs), "finding")
+        found.append((f"Review findings to decide: {', '.join(open_by)}",
+                      "\n".join(f"  {s}: {counts(xs)} open" for s, xs in sorted(open_by.items()))
+                      + "\n  deck, tab 4 Review: f lists them; x fixed, n doesn't apply here, w won't fix"))
     if failed:
         found.append((plural(len(failed), "automatic review") + " failed",
                       "\n".join(f"  {r['subject']} ({r['kind']}): {r.get('error', '')}" for r in failed)))

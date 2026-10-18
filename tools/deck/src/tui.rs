@@ -93,6 +93,8 @@ enum Then {
     Url(State),
     Note(State, String),
     Upstream,
+    /// A decision about a finding: its run, its number there, the decision.
+    Decide(String, usize, &'static str),
 }
 
 /// A step towards upstream that acts on GitHub, so it waits for a yes.
@@ -159,6 +161,10 @@ const HELP: &[&str] = &[
     "  S  P                the same, of the whole even when an earlier version was reviewed",
     "  Enter               the latest report, in a terminal (marks it read)",
     "  n  a                the most worthwhile next (the top row) / the next agent",
+    "  f                   the subject's findings, open ones first; there:",
+    "    x n w o           decide: fixed / doesn't apply here / won't fix / open again, with a note;",
+    "                      the next review of it is told, and won't raise it again without a reason",
+    "    Enter  a  Esc     the report at the finding / decided ones too / back",
 ];
 
 struct App {
@@ -190,6 +196,11 @@ struct App {
     review_rows: Vec<usize>,
     review_tab: TableState,
     agent: usize,
+    /// The subject whose findings the Review tab lists, instead of the subjects.
+    findings_of: Option<String>,
+    finding_tab: TableState,
+    /// Also the decided findings.
+    finding_all: bool,
 }
 
 pub fn run(m: Model) -> Result<()> {
@@ -222,6 +233,9 @@ pub fn run(m: Model) -> Result<()> {
         review_rows: vec![],
         review_tab: TableState::default().with_selected(0),
         agent: 0,
+        findings_of: None,
+        finding_tab: TableState::default().with_selected(0),
+        finding_all: false,
     };
     app.load_usage();
     app.load_review();
@@ -330,6 +344,12 @@ impl App {
             .selected()
             .and_then(|i| self.review_rows.get(i))
             .map(|&i| &self.review_items[i])
+    }
+
+    fn selected_finding(&self) -> Option<review::Listed<'_>> {
+        let subject = self.findings_of.as_ref()?;
+        let i = self.finding_tab.selected()?;
+        review::findings(&self.review_runs, subject, self.finding_all).into_iter().nth(i)
     }
 
     /// The latest finished run of the selected subject: the given kind, or whichever is newer.
@@ -587,6 +607,18 @@ impl App {
     }
 
     fn confirm(&mut self, buf: String, then: Then) {
+        if let Then::Decide(run, index, decision) = &then {
+            self.status = match review::decide(run, *index, decision, &buf) {
+                Ok(()) => {
+                    self.load_review();
+                    self.refilter();
+                    let label = review::DECISIONS.iter().find(|d| d.0 == *decision).map_or("", |d| d.1);
+                    format!("decided: {label} · the next review of it is told")
+                }
+                Err(e) => format!("not saved: {e:#}"),
+            };
+            return;
+        }
         let Some(row) = self.selected_patch() else { return };
         let id = self.m.rows[row].id.clone();
         let res = match then {
@@ -606,6 +638,7 @@ impl App {
                 .m
                 .set_upstream(&id, buf.trim().to_string())
                 .map(|_| format!("{id}: upstream set")),
+            Then::Decide(..) => unreachable!(),
         };
         self.status = match res {
             Ok(s) => format!("saved · {s}"),
@@ -892,6 +925,7 @@ impl App {
         let keys = vec![
             ("s p", "security / performance"),
             ("S P", "the same, whole"),
+            ("f", "findings, to decide"),
             ("Enter", "latest report"),
             ("n", "most worthwhile next"),
             ("a", "next agent"),
@@ -900,6 +934,8 @@ impl App {
             Line::from("An AI agent reads the code as it runs here, in the jail with nothing but that code, and writes a report; findings only warn, nothing is blocked. Reports stay private, in ~/.local/state/deck/reviews, since a finding may be an unreported vulnerability."),
             Line::from(""),
             Line::from("The first review of a subject is of the whole (never). After that, a newer version, installed or waiting as an update, needs a review of the change only (old → new): cheap, and first in line. ✓ means the version that matters was reviewed, with its findings: H high, M medium, L low; • unread."),
+            Line::from(""),
+            Line::from("f lists a subject's findings. Decide each: x fixed, n doesn't apply here, w won't fix (each with a note), o open again. The next review is given every earlier finding with its decision: it won't raise what doesn't apply or won't be fixed without saying what changed, and checks the fixes. Open shows what's left to decide; the maintenance tile shows it too."),
             Line::from(""),
             Line::from("Score is how worthwhile it is next: for security, the tier from review.toml (1 our own code … 5); for performance, the share of CPU time and profile samples deck-usaged measured. The list is sorted by it. deck review auto, daily, reviews updates of watched code within the budget in review.toml."),
         ];
@@ -912,11 +948,15 @@ impl App {
             View::Packages => (&mut self.pkg_tab, self.pkg_rows.len()),
             View::Patches => (&mut self.patch_tab, self.patch_rows.len()),
             View::Usage => (&mut self.usage_tab, self.usage_rows.len()),
+            View::Review if self.findings_of.is_some() => {
+                let n = self.findings_of.as_ref().map_or(0, |s| review::findings(&self.review_runs, s, self.finding_all).len());
+                (&mut self.finding_tab, n)
+            }
             View::Review => (&mut self.review_tab, self.review_rows.len()),
         };
         self.status.clear();
         match k.code {
-            KeyCode::Char('q') => self.quit = true,
+            KeyCode::Char('q') if !(self.view == View::Review && self.findings_of.is_some()) => self.quit = true,
             KeyCode::Tab => {
                 self.view = match self.view {
                     View::Packages => View::Patches,
@@ -937,6 +977,48 @@ impl App {
             KeyCode::Char('2') => self.view = View::Patches,
             KeyCode::Char('3') => self.view = View::Usage,
             KeyCode::Char('4') => self.view = View::Review,
+            KeyCode::Esc | KeyCode::Char('q' | 'f') if self.view == View::Review && self.findings_of.is_some() => {
+                self.findings_of = None;
+            }
+            KeyCode::Char(c @ ('x' | 'n' | 'w' | 'o')) if self.view == View::Review && self.findings_of.is_some() => {
+                let decision = match c {
+                    'x' => "fixed",
+                    'n' => "not-applicable",
+                    'w' => "wont-fix",
+                    _ => "open",
+                };
+                if let Some((run, index, note)) = self.selected_finding().map(|l| (l.run.id.clone(), l.index, l.finding.note.clone())) {
+                    self.mode = Mode::Input {
+                        prompt: match decision {
+                            "fixed" => "Fixed: how, or the commit (Enter to skip)",
+                            "not-applicable" => "Doesn't apply here: why (Enter to skip)",
+                            "wont-fix" => "Won't fix: why (Enter to skip)",
+                            _ => "Reopened: why (Enter to skip)",
+                        },
+                        buf: note,
+                        then: Then::Decide(run, index, decision),
+                    };
+                }
+            }
+            KeyCode::Char('a') if self.view == View::Review && self.findings_of.is_some() => {
+                self.finding_all = !self.finding_all;
+                step(&mut self.finding_tab, 0, 0);
+                self.finding_tab.select(Some(0));
+                self.status = if self.finding_all { "all findings, decided ones too".into() } else { "open findings".into() };
+            }
+            KeyCode::Enter if self.view == View::Review && self.findings_of.is_some() => {
+                let Some((report, line)) = self.selected_finding().map(|l| (l.run.report.clone(), finding_line(&l))) else { return };
+                self.status = match review::view_at(&report, line) {
+                    Ok(()) => format!("{} opened in a terminal", tilde(&report)),
+                    Err(e) => format!("{e:#}"),
+                };
+            }
+            KeyCode::Char('f') if self.view == View::Review => {
+                if let Some(name) = self.selected_item().map(|i| i.subject.name()) {
+                    self.findings_of = Some(name);
+                    self.finding_tab.select(Some(0));
+                }
+            }
             KeyCode::Char('s') if self.view == View::Review => self.ask_review(review::Kind::Security, false),
             KeyCode::Char('S') if self.view == View::Review => self.ask_review(review::Kind::Security, true),
             KeyCode::Char('p') if self.view == View::Review => self.ask_review(review::Kind::Performance, false),
@@ -1098,8 +1180,11 @@ impl App {
                 View::Patches => {
                     "? explain · S next step upstream · o terminal · m state · U upstream · / search · q quit"
                 }
+                View::Review if self.findings_of.is_some() => {
+                    "Enter report · x fixed · n n/a here · w won't fix · o reopen · a all/open · Esc back"
+                }
                 View::Review => {
-                    "? explain · s/p security/performance review · S/P whole · Enter report · n next · a agent · q quit"
+                    "? explain · s/p review · S/P whole · f findings · Enter report · n next · a agent · q quit"
                 }
             })
             .dark_gray(),
@@ -1573,7 +1658,88 @@ impl App {
         );
     }
 
+    fn draw_findings(&mut self, f: &mut Frame, body: Rect, detail: Rect, subject: &str) {
+        let list = review::findings(&self.review_runs, subject, self.finding_all);
+        let rows: Vec<Row> = list
+            .iter()
+            .map(|l| {
+                let x = l.finding;
+                Row::new(vec![
+                    Cell::from(x.severity.clone()).fg(severity_color(x)),
+                    Cell::from(x.status_label()).fg(if x.is_open() { Color::Yellow } else { Color::DarkGray }),
+                    Cell::from(l.run.kind.label()).dark_gray(),
+                    Cell::from(l.run.version.clone()).dark_gray(),
+                    Cell::from(x.title.clone()),
+                ])
+            })
+            .collect();
+        let shown = list.len();
+        let title = format!(
+            " Findings · {subject} · {} · {shown} {} · x fixed  n n/a here  w won't fix  o reopen  a {}  Esc back ",
+            review::counts_label(review::open_counts(&self.review_runs, subject), "none open"),
+            if self.finding_all { "in all" } else { "open" },
+            if self.finding_all { "open only" } else { "all" },
+        );
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(8),
+                Constraint::Length(11),
+                Constraint::Length(12),
+                Constraint::Length(10),
+                Constraint::Fill(1),
+            ],
+        )
+        .header(Row::new(["Severity", "Status", "Kind", "Found in", "Finding"]).bold())
+        .block(Block::bordered().title(title))
+        .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED));
+        step(&mut self.finding_tab, shown, 0);
+        f.render_stateful_widget(table, body, &mut self.finding_tab);
+
+        let mut lines = vec![];
+        if let Some(l) = self.finding_tab.selected().and_then(|i| list.get(i)) {
+            let x = l.finding;
+            lines.push(Line::from(x.title.clone()).bold());
+            lines.push(kv("where", x.place.clone()));
+            lines.push(Line::from(vec![
+                Span::styled(format!("{:<10}", "severity"), Style::new().dark_gray()),
+                Span::raw(x.severity.clone()).fg(severity_color(x)),
+            ]));
+            let mut status = x.status_label().to_string();
+            if let Some(t) = x.decided {
+                status += &format!(" since {}", usage::when(t));
+            }
+            if !x.note.is_empty() {
+                status += &format!(": {}", x.note);
+            }
+            lines.push(kv("status", status));
+            lines.push(kv(
+                "found",
+                format!(
+                    "{} review of {}{} by {}, {}",
+                    l.run.kind.label(),
+                    l.run.from.as_deref().map(|f| format!("{f} → ")).unwrap_or_default(),
+                    l.run.version,
+                    l.run.agent,
+                    usage::when(l.run.finished.unwrap_or(l.run.started))
+                ),
+            ));
+            lines.push(kv("report", format!("{}  (Enter opens it there)", tilde(&l.run.report))));
+        } else {
+            lines.push(Line::from(if self.finding_all {
+                "No findings for it yet."
+            } else {
+                "Nothing open. a shows the decided ones."
+            }).dark_gray());
+        }
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(Block::bordered()), detail);
+    }
+
     fn draw_review(&mut self, f: &mut Frame, body: Rect, detail: Rect) {
+        if let Some(subject) = self.findings_of.clone() {
+            self.draw_findings(f, body, detail, &subject);
+            return;
+        }
         if self.review_cfg.is_none() {
             f.render_widget(
                 Paragraph::new(vec![
@@ -1619,6 +1785,10 @@ impl App {
                     Cell::from(it.versions.update.clone().unwrap_or_default()).yellow(),
                     cell(&it.security, sec),
                     cell(&it.performance, perf),
+                    {
+                        let c = review::open_counts(&self.review_runs, &name);
+                        Cell::from(review::counts_label(c, "")).fg(if c[0] > 0 { Color::Red } else { Color::Yellow })
+                    },
                     Cell::from(if it.cpu_pct + it.code_pct > 0.05 {
                         format!("{:.1}%", it.cpu_pct.max(it.code_pct))
                     } else {
@@ -1637,10 +1807,11 @@ impl App {
                 Constraint::Length(10),
                 Constraint::Length(22),
                 Constraint::Length(22),
+                Constraint::Length(10),
                 Constraint::Length(6),
             ],
         )
-        .header(Row::new(["Score", "Subject", "Tier", "Installed", "Update", "Security", "Performance", "CPU"]).bold())
+        .header(Row::new(["Score", "Subject", "Tier", "Installed", "Update", "Security", "Performance", "Open", "CPU"]).bold())
         .block(Block::bordered().title(self.title("Review", self.review_rows.len(), self.review_items.len())))
         .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED));
         f.render_stateful_widget(table, body, &mut self.review_tab);
@@ -1700,11 +1871,7 @@ impl App {
                     for x in r.findings.iter().take(4) {
                         lines.push(Line::from(vec![
                             Span::raw("            "),
-                            Span::raw(format!("{:<7}", x.severity)).fg(match x.severity.as_str() {
-                                "high" | "critical" => Color::Red,
-                                "medium" => Color::Yellow,
-                                _ => Color::DarkGray,
-                            }),
+                            Span::raw(format!("{:<7}", x.severity)).fg(severity_color(x)),
                             Span::raw(format!("{}  ", x.title)),
                             Span::raw(x.place.clone()).dark_gray(),
                         ]));
@@ -1719,6 +1886,29 @@ impl App {
             detail,
         );
     }
+}
+
+fn severity_color(x: &review::Finding) -> Color {
+    if x.is_fix() {
+        return Color::Green;
+    }
+    match x.rank() {
+        0 => Color::Red,
+        1 => Color::Yellow,
+        _ => Color::DarkGray,
+    }
+}
+
+/// The report's line where a finding is written up: its place, or its title's start.
+fn finding_line(l: &review::Listed) -> Option<usize> {
+    let text = std::fs::read_to_string(&l.run.report).ok()?;
+    let title: String = l.finding.title.chars().take(30).collect();
+    let needles = [l.finding.place.as_str(), title.as_str()];
+    needles
+        .iter()
+        .filter(|n| n.len() > 3)
+        .find_map(|n| text.lines().position(|line| line.contains(*n) && !line.contains("\"title\"")))
+        .map(|i| i + 1)
 }
 
 /// `~/…` for a path in the home directory.

@@ -121,6 +121,24 @@ enum ReviewCmd {
     },
     /// Security reviews of updates to watched code, within the daily budget (the timer runs it)
     Auto,
+    /// Findings and what was decided about them, open ones first, tab-separated
+    Findings {
+        /// ours/<name> or category/package [default: every subject]
+        subject: Option<String>,
+        /// Also the decided ones
+        #[arg(long)]
+        all: bool,
+    },
+    /// Decide about a finding (the next review is told): open, fixed, not-applicable, wont-fix
+    Decide {
+        /// The run, as deck review findings prints it
+        run: String,
+        /// The finding's number in that run, as deck review findings prints it
+        index: usize,
+        decision: String,
+        #[arg(long, default_value = "")]
+        note: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -315,6 +333,31 @@ fn review_cmd(host_dir: &std::path::Path, cmd: &ReviewCmd) -> Result<()> {
                 .with_context(|| format!("no subject {subject}; deck review list shows them"))?;
             run_review(&cfg, &repo, item, *kind, agent.as_deref(), *full, false, &usage_db)
         }
+        ReviewCmd::Findings { subject, all } => {
+            let runs = review::runs();
+            let mut subjects: Vec<String> = runs.iter().map(|r| r.subject.clone()).collect();
+            subjects.sort();
+            subjects.dedup();
+            println!("subject\trun\tindex\tkind\tseverity\tstatus\tversion\ttitle\twhere\tnote");
+            for name in subjects.iter().filter(|n| subject.as_ref().is_none_or(|s| s == *n)) {
+                for l in review::findings(&runs, name, *all) {
+                    println!(
+                        "{name}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                        l.run.id,
+                        l.index,
+                        l.run.kind.label(),
+                        l.finding.severity,
+                        l.finding.status_label(),
+                        l.run.version,
+                        l.finding.title,
+                        l.finding.place,
+                        l.finding.note
+                    );
+                }
+            }
+            Ok(())
+        }
+        ReviewCmd::Decide { run, index, decision, note } => review::decide(run, *index, decision, note),
         ReviewCmd::Auto => {
             let today = chrono::Local::now().date_naive();
             let done_today = review::runs()

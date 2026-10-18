@@ -313,6 +313,48 @@ pub struct Finding {
     pub title: String,
     #[serde(default, rename = "where")]
     pub place: String,
+    /// What was decided about it: empty or open, fixed, not-applicable, wont-fix, or superseded (a
+    /// later full review of the same subject replaced it).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub status: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided: Option<i64>,
+}
+
+/// The decisions a finding can get, with their labels.
+pub const DECISIONS: &[(&str, &str)] = &[
+    ("open", "open"),
+    ("fixed", "fixed"),
+    ("not-applicable", "n/a here"),
+    ("wont-fix", "won't fix"),
+    ("superseded", "superseded"),
+];
+
+impl Finding {
+    pub fn is_open(&self) -> bool {
+        self.status.is_empty() || self.status == "open"
+    }
+
+    /// What a change fixed or improved, reported as such: settled from the start.
+    pub fn is_fix(&self) -> bool {
+        self.severity.eq_ignore_ascii_case("fix")
+    }
+
+    pub fn status_label(&self) -> &'static str {
+        let s = if self.status.is_empty() { "open" } else { self.status.as_str() };
+        DECISIONS.iter().find(|d| d.0 == s).map_or("open", |d| d.1)
+    }
+
+    /// 0 high (critical too), 1 medium, 2 low and anything else.
+    pub fn rank(&self) -> usize {
+        match self.severity.to_ascii_lowercase().as_str() {
+            "critical" | "high" => 0,
+            "medium" => 1,
+            _ => 2,
+        }
+    }
 }
 
 /// One run of an agent on one subject, kept as `runs/<id>.json`.
@@ -357,29 +399,99 @@ impl Run {
         Ok(())
     }
 
-    /// Findings by severity: high, medium, low (anything else counts as low).
+    /// Findings by severity: high, medium, low (anything else counts as low); not what it fixed.
     pub fn counts(&self) -> [usize; 3] {
         let mut c = [0; 3];
-        for f in &self.findings {
-            match f.severity.to_ascii_lowercase().as_str() {
-                "critical" | "high" => c[0] += 1,
-                "medium" => c[1] += 1,
-                _ => c[2] += 1,
-            }
+        for f in self.findings.iter().filter(|f| !f.is_fix()) {
+            c[f.rank()] += 1;
         }
         c
     }
 
     pub fn counts_label(&self) -> String {
-        let [h, m, l] = self.counts();
-        let mut parts = vec![];
-        for (n, s) in [(h, "H"), (m, "M"), (l, "L")] {
-            if n > 0 {
-                parts.push(format!("{n}{s}"));
-            }
-        }
-        if parts.is_empty() { "clean".into() } else { parts.join(" ") }
+        counts_label(self.counts(), "clean")
     }
+}
+
+/// `2H 1M`, or `none` when all are zero.
+pub fn counts_label(c: [usize; 3], none: &str) -> String {
+    let parts: Vec<String> = c
+        .iter()
+        .zip(["H", "M", "L"])
+        .filter(|(n, _)| **n > 0)
+        .map(|(n, s)| format!("{n}{s}"))
+        .collect();
+    if parts.is_empty() { none.into() } else { parts.join(" ") }
+}
+
+/// A finding as listed: which run it came from and its place in that run.
+pub struct Listed<'a> {
+    pub run: &'a Run,
+    pub index: usize,
+    pub finding: &'a Finding,
+}
+
+/// A subject's findings from every finished review: the open ones first, worst first, then the
+/// decided ones (when `all`), latest decision first.
+pub fn findings<'a>(runs: &'a [Run], subject: &str, all: bool) -> Vec<Listed<'a>> {
+    let mut out: Vec<Listed> = runs
+        .iter()
+        .filter(|r| r.subject == subject && r.status == "done")
+        .flat_map(|r| r.findings.iter().enumerate().map(move |(index, finding)| Listed { run: r, index, finding }))
+        .filter(|l| all || l.finding.is_open())
+        .collect();
+    out.sort_by(|a, b| {
+        b.finding
+            .is_open()
+            .cmp(&a.finding.is_open())
+            .then(a.finding.rank().cmp(&b.finding.rank()))
+            .then(b.finding.decided.cmp(&a.finding.decided))
+            .then(b.run.finished.cmp(&a.run.finished))
+    });
+    out
+}
+
+/// Open findings of a subject, by severity.
+pub fn open_counts(runs: &[Run], subject: &str) -> [usize; 3] {
+    let mut c = [0; 3];
+    for l in findings(runs, subject, false) {
+        c[l.finding.rank()] += 1;
+    }
+    c
+}
+
+/// Records a decision about finding `index` of run `id`.
+pub fn decide(id: &str, index: usize, status: &str, note: &str) -> Result<()> {
+    if !DECISIONS.iter().any(|d| d.0 == status) {
+        bail!("no decision {status}: {}", DECISIONS.iter().map(|d| d.0).collect::<Vec<_>>().join(", "));
+    }
+    let path = state_dir().join("runs").join(format!("{id}.json"));
+    let mut r: Run = serde_json::from_slice(&std::fs::read(&path).with_context(|| format!("no run {id}"))?)?;
+    let f = r.findings.get_mut(index).with_context(|| format!("run {id} has no finding {index}"))?;
+    f.status = if status == "open" { String::new() } else { status.into() };
+    f.note = note.trim().to_string();
+    f.decided = Some(chrono::Local::now().timestamp());
+    r.save()
+}
+
+/// For the next prompt: what earlier reviews of this kind found, and what was decided.
+fn known(runs: &[Run], subject: &str, kind: Kind) -> String {
+    let mut t = String::new();
+    for l in findings(runs, subject, true) {
+        if l.run.kind != kind || l.finding.status == "superseded" {
+            continue;
+        }
+        t += &format!(
+            "- [{}] {} ({}, found at {}): {}{}\n",
+            l.finding.status_label(),
+            l.finding.title,
+            l.finding.severity,
+            l.run.version,
+            l.finding.place,
+            if l.finding.note.is_empty() { String::new() } else { format!(" — decided: {}", l.finding.note) }
+        );
+    }
+    t
 }
 
 /// Every run recorded; one whose process is gone while it says running is marked failed.
@@ -634,11 +746,19 @@ say so when a finding is uncertain. No style remarks.
 Write the report in Markdown: a short summary first, then one section per finding with where it is \
 (file:line), how it is reached, a concrete scenario and a suggested fix. End the report with a \
 fenced code block tagged `findings` holding a JSON array, one object per finding: \
-{\"severity\": \"high|medium|low\", \"title\": \"...\", \"where\": \"file:line\"}, or [] when there \
-are none.";
+{\"severity\": \"high|medium|low|fix\", \"title\": \"...\", \"where\": \"file:line\"}, or [] when there \
+are none. Severity fix is only for what a change fixes or improves.";
 
 /// The prompt for one review.
-pub fn prompt(s: &Subject, kind: Kind, version: &str, from: Option<(&str, u64)>, usage: &str, unpatched: bool) -> String {
+pub fn prompt(
+    s: &Subject,
+    kind: Kind,
+    version: &str,
+    from: Option<(&str, u64)>,
+    usage: &str,
+    unpatched: bool,
+    known: &str,
+) -> String {
     let mut p = String::new();
     let what = match s {
         Subject::Local(_) => format!("{}, our own code at commit {version}", s.name()),
@@ -676,9 +796,9 @@ pub fn prompt(s: &Subject, kind: Kind, version: &str, from: Option<(&str, u64)>,
              in parsers, unsafe defaults. Severity is how bad it is if exploited here."
         }
         (Kind::Security, true) => {
-            "Find what the change does to security: vulnerabilities it introduces, and ones it \
-             fixes (a fix makes installing the update urgent: say so, as a finding). Severity is \
-             how much it matters here."
+            "Find what the change does to security: vulnerabilities it introduces (severity: how \
+             much it matters here), and ones it fixes, each as a finding with severity fix (a fix \
+             can make installing the update urgent: say so in its title)."
         }
         (Kind::Performance, false) => {
             "Find performance problems that matter for how it is used here: work on hot paths, \
@@ -686,13 +806,27 @@ pub fn prompt(s: &Subject, kind: Kind, version: &str, from: Option<(&str, u64)>,
              algorithms that grow badly. Severity is the likely gain from fixing it."
         }
         (Kind::Performance, true) => {
-            "Find what the change does to performance: regressions and improvements, for how it is \
-             used here. Severity is the size of the effect."
+            "Find what the change does to performance, for how it is used here: regressions \
+             (severity: the size of the effect), and improvements, each as a finding with severity fix."
         }
     };
     p += "\n\n";
     if kind == Kind::Performance && !usage.is_empty() {
         p += &format!("How it was used on this machine (measured):\n{usage}\n\n");
+    }
+    if !known.is_empty() {
+        p += &format!(
+            "Earlier reviews found these, and the owner decided what each is (open: not decided \
+             yet; fixed; n/a here: does not apply on this machine, with why; won't fix):\n{known}\n\
+             Do not report again what is n/a here or won't fix, unless something has changed that \
+             makes it matter; then say what. For each fixed one, check the fix where you can and \
+             report it again if it is incomplete. {}\n\n",
+            if from.is_some() {
+                "Report only what the change brings: the open ones stay open on their own."
+            } else {
+                "Report the open ones again if they are still there: this review replaces them."
+            }
+        );
     }
     p += RULES;
     p
@@ -791,7 +925,7 @@ pub fn run(repo: &Path, req: Request, v: &Versions, log: &mut dyn Write) -> Resu
             writeln!(log, "deck: {old} → {target}: no change, nothing to review")?;
             return Ok(vec![]);
         }
-        let text = prompt(s, req.kind, &target, diffed, &req.usage, unpatched);
+        let text = prompt(s, req.kind, &target, diffed, &req.usage, unpatched, &known(&all, &s.name(), req.kind));
         let out = std::fs::File::create(&report)?;
         let err = std::fs::File::create(report.with_extension("log"))?;
         writeln!(log, "deck: {} reviewing {} ({}) in {}", req.agent.name, s.name(), req.kind.label(), dir.display())?;
@@ -815,7 +949,12 @@ pub fn run(repo: &Path, req: Request, v: &Versions, log: &mut dyn Write) -> Resu
     })();
     r.finished = Some(chrono::Local::now().timestamp());
     match res {
-        Ok(f) => {
+        Ok(mut f) => {
+            for x in f.iter_mut().filter(|x| x.is_fix()) {
+                x.status = "fixed".into();
+                x.note = "the change fixes it".into();
+                x.decided = r.finished;
+            }
             r.findings = f;
             r.status = "done".into();
         }
@@ -825,6 +964,21 @@ pub fn run(repo: &Path, req: Request, v: &Versions, log: &mut dyn Write) -> Resu
         }
     }
     r.save()?;
+    // A full review looked at everything again: earlier open findings it didn't repeat are gone or
+    // were reported anew, so they give way to it.
+    if r.status == "done" && r.from.is_none() {
+        for mut old in runs().into_iter().filter(|o| o.subject == r.subject && o.kind == r.kind && o.id != r.id) {
+            let mut changed = false;
+            for f in old.findings.iter_mut().filter(|f| f.is_open()) {
+                f.status = "superseded".into();
+                f.decided = r.finished;
+                changed = true;
+            }
+            if changed {
+                old.save()?;
+            }
+        }
+    }
     Ok(r)
 }
 
@@ -868,6 +1022,11 @@ pub fn mark_seen(id: &str) -> Result<()> {
 
 /// Opens a report in a terminal, with less.
 pub fn view(report: &Path) -> Result<()> {
+    view_at(report, None)
+}
+
+/// Opens a report in a terminal, with less, at a line.
+pub fn view_at(report: &Path, line: Option<usize>) -> Result<()> {
     let unit = format!(
         "--unit=app-foot-deck-review-{}.scope",
         chrono::Local::now().format("%H%M%S%f")
@@ -876,6 +1035,7 @@ pub fn view(report: &Path) -> Result<()> {
         .args(["--user", "--scope", "--slice=app.slice", "--collect", "--quiet"])
         .arg(&unit)
         .args(["--", "foot", "--", "less", "-R"])
+        .args(line.map(|n| format!("+{n}g")))
         .arg(report)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
