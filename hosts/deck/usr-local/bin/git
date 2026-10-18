@@ -65,13 +65,15 @@ locate() {
 	done
 }
 
-# Files whose change means the state must be checked again: inode, size and time each.
+# Files whose change means the state must be checked again: inode, size and change time (ctime,
+# with nanoseconds) each. Not the modification time: anyone who can write a file can set that back.
+# The ctime only the kernel sets.
 stamp() {
 	local files=("$wt/.git" "$gd/config" "$gd/config.worktree" "$gd/commondir" "$gd/hooks"
 		"$gd/modules" "$gd/worktrees")
 	local f
 	while IFS= read -r f; do files+=("$f"); done < <(extra_files)
-	stat -L -c '%n %i %s %Y' -- "${files[@]}" 2>&1 | sort
+	stat -L -c '%n %i %s %z' -- "${files[@]}" 2>&1 | sort
 }
 
 # What the last full check found worth watching: the hooks directory and its files, included
