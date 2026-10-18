@@ -83,8 +83,22 @@ pub fn draft_message_id(id: &str) -> String {
     format!("mmm-draft-{id}@mmm")
 }
 
+/// Only an id `new_id` makes: a Message-ID is the sender's to choose, and a draft id names files
+/// (mmm-draft-../../x@mmm would reach out of the drafts folder).
 pub fn draft_of(message_id: &str) -> Option<&str> {
-    message_id.strip_prefix("mmm-draft-")?.strip_suffix("@mmm")
+    let id = message_id.strip_prefix("mmm-draft-")?.strip_suffix("@mmm")?;
+    is_draft_id(id).then_some(id)
+}
+
+/// 20261018-113015-4242-0: date, time, process, counter.
+fn is_draft_id(id: &str) -> bool {
+    let parts: Vec<&str> = id.split('-').collect();
+    parts.len() == 4
+        && parts[0].len() == 8
+        && parts[1].len() == 6
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
 fn home() -> PathBuf {
@@ -356,12 +370,18 @@ impl Draft {
 
     /// The draft as the editor shows it, and the line the cursor starts on.
     pub fn text(&self) -> (String, usize) {
+        // One line each: a subject or address from a mail with a line break in it would add
+        // header lines of its own (Bcc:, Attach: ~/.ssh/...).
         let mut t = format!(
             "From: {}\nTo: {}\nCc: {}\nBcc: {}\nSubject: {}\n",
-            self.from, self.to, self.cc, self.bcc, self.subject
+            one_line(&self.from),
+            one_line(&self.to),
+            one_line(&self.cc),
+            one_line(&self.bcc),
+            one_line(&self.subject)
         );
         for a in &self.attach {
-            t += &format!("Attach: {}\n", tilde(a));
+            t += &format!("Attach: {}\n", one_line(&tilde(a)));
         }
         if self.attach.is_empty() {
             t += "Attach: \n";
@@ -438,9 +458,15 @@ impl Draft {
     /// A draft kept with `save`, back: from its JSON, or from the editor's file when that's
     /// newer (mmm stopped while the editor was open).
     pub fn load(id: &str) -> Result<Draft> {
+        if !is_draft_id(id) {
+            bail!("not a draft of mmm's: {id}");
+        }
         let json = drafts_dir().join(format!("{id}.json"));
         let mut d: Draft = serde_json::from_slice(&std::fs::read(&json).context("no such draft")?)
             .context("reading the draft")?;
+        // Its files from its id, not from what the JSON says: they are written and removed.
+        d.file = drafts_dir().join(format!("{id}.txt"));
+        d.id = id.to_string();
         d.lang = d
             .lang_code
             .as_deref()
@@ -607,7 +633,11 @@ impl Draft {
         match self.recipients() {
             Ok(r) if r.is_empty() => errors.push("no one to send it to: To is empty".into()),
             Ok(r) => {
-                if let Some(bad) = r.iter().find(|a| !a.contains('@') || a.starts_with('-')) {
+                if let Some(bad) = r.iter().find(|a| {
+                    !a.contains('@')
+                        || a.starts_with('-')
+                        || a.chars().any(|c| c.is_whitespace() || c.is_control())
+                }) {
                     errors.push(format!("not an address: {bad}"));
                 }
             }
@@ -821,6 +851,11 @@ pub fn addresses(v: &str) -> Result<Vec<(Option<String>, String)>> {
         }
     }
     Ok(out)
+}
+
+/// Control characters (line breaks among them) as spaces.
+fn one_line(s: &str) -> String {
+    s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
 }
 
 pub fn tilde(p: &Path) -> String {
@@ -1136,5 +1171,46 @@ mod tests {
             "{de}"
         );
         assert!(attribution(Some("hr"), "Ana", 0).starts_with("1. 1. 1970. u "));
+    }
+
+    #[test]
+    fn only_its_own_draft_ids() {
+        assert_eq!(
+            draft_of("mmm-draft-20261018-113015-4242-0@mmm"),
+            Some("20261018-113015-4242-0")
+        );
+        for bad in [
+            "mmm-draft-../../../run/user/1000/mmm/evil@mmm",
+            "mmm-draft-20261018-113015-4242-0/../x@mmm",
+            "mmm-draft-20261018-113015-4242@mmm",
+            "mmm-draft-@mmm",
+        ] {
+            assert_eq!(draft_of(bad), None, "{bad}");
+        }
+        assert!(Draft::load("../x").is_err());
+    }
+
+    #[test]
+    fn a_line_break_from_a_mail_adds_no_header() {
+        let mut d = draft(Kind::Reply);
+        d.to = "Ana <ana@example.org>".into();
+        d.subject = "Hi\nBcc: evil@example.org\nAttach: ~/.ssh/id_ed25519".into();
+        d.cc = "x@example.org\r\nBcc: evil@example.org".into();
+        let (text, _) = d.text();
+        let mut back = draft(Kind::Reply);
+        back.parse(&text);
+        assert_eq!(back.bcc, "", "{text}");
+        assert!(back.attach.is_empty(), "{text}");
+        assert!(back.subject.starts_with("Hi "), "{text}");
+    }
+
+    #[test]
+    fn an_address_with_a_space_cant_go() {
+        let mut d = draft(Kind::New);
+        d.to = "\"a --host=evil.example\"@example.org".into();
+        d.subject = "x".into();
+        d.body = "x".into();
+        let (errors, _) = d.check();
+        assert!(!errors.is_empty());
     }
 }
