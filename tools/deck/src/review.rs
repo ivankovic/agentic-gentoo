@@ -1217,29 +1217,44 @@ pub fn board(cfg: &Config, repo: &Path, pkgs: &[crate::vdb::Pkg], usage: Option<
         });
     let subjects = subjects(cfg, busy);
     let versions = versions(repo, &subjects);
-    let all = runs();
     let mut items: Vec<Item> = subjects
         .into_iter()
         .map(|s| {
-            let name = s.name();
-            let v = versions.get(&name).cloned().unwrap_or_default();
+            let v = versions.get(&s.name()).cloned().unwrap_or_default();
             let (cpu_pct, code_pct) = s.usage_label().map_or((0.0, 0.0), share);
-            let security = need(&all, &name, Kind::Security, &v);
-            let performance = need(&all, &name, Kind::Performance, &v);
             Item {
-                security_score: score(&security, security_stake(s.tier())),
-                performance_score: score(&performance, performance_stake(cpu_pct, code_pct)),
                 subject: s,
                 versions: v,
-                security,
-                performance,
+                security: Need::Unknown,
+                performance: Need::Unknown,
+                security_score: 0.0,
+                performance_score: 0.0,
                 cpu_pct,
                 code_pct,
             }
         })
         .collect();
-    items.sort_by(|a, b| b.score().total_cmp(&a.score()).then(a.subject.name().cmp(&b.subject.name())));
+    rescore(&mut items, &runs());
     items
+}
+
+/// What each subject needs and its scores, from the runs recorded, best next first. Cheap: for
+/// when only the runs changed (a review finished, a finding was decided).
+pub fn rescore(items: &mut [Item], runs: &[Run]) {
+    for i in items.iter_mut() {
+        let name = i.subject.name();
+        i.security = need(runs, &name, Kind::Security, &i.versions);
+        i.performance = need(runs, &name, Kind::Performance, &i.versions);
+        i.security_score = score(&i.security, security_stake(i.subject.tier()));
+        i.performance_score = score(&i.performance, performance_stake(i.cpu_pct, i.code_pct));
+    }
+    items.sort_by(|a, b| b.score().total_cmp(&a.score()).then(a.subject.name().cmp(&b.subject.name())));
+}
+
+/// When the run records last changed: saving one renames it into place, which changes the
+/// directory's modification time.
+pub fn runs_changed() -> Option<std::time::SystemTime> {
+    std::fs::metadata(state_dir().join("runs")).and_then(|m| m.modified()).ok()
 }
 
 /// How a package was used, as deck-usaged measured it, for the performance prompt.

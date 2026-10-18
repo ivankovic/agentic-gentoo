@@ -199,6 +199,8 @@ struct App {
     review_rows: Vec<usize>,
     review_tab: TableState,
     agent: usize,
+    /// When the review runs' records last changed, as last loaded.
+    runs_seen: Option<std::time::SystemTime>,
     /// The subject whose findings the Review tab lists, instead of the subjects.
     findings_of: Option<String>,
     finding_tab: TableState,
@@ -236,6 +238,7 @@ pub fn run(m: Model) -> Result<()> {
         review_rows: vec![],
         review_tab: TableState::default().with_selected(0),
         agent: 0,
+        runs_seen: None,
         findings_of: None,
         finding_tab: TableState::default().with_selected(0),
         finding_all: false,
@@ -298,11 +301,12 @@ impl App {
     fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         while !self.quit {
             terminal.draw(|f| self.draw(f))?;
-            // While a review runs, look again every few seconds for it to finish.
-            let running = self.review_runs.iter().any(|r| r.status == "running");
-            if running && !event::poll(std::time::Duration::from_secs(3))? {
-                self.load_review();
-                self.refilter();
+            // Every two seconds without a key, whether the reviews' records changed: a review
+            // started, finished or decided anywhere (the timer, a terminal, an agent) shows here.
+            if !event::poll(std::time::Duration::from_secs(2))? {
+                if review::runs_changed() != self.runs_seen {
+                    self.reload_runs();
+                }
                 continue;
             }
             if let Event::Key(k) = event::read()?
@@ -314,7 +318,26 @@ impl App {
         Ok(())
     }
 
+    /// Only the runs again, and what they change: needs, scores, order, findings. The selected
+    /// subject stays selected.
+    fn reload_runs(&mut self) {
+        self.runs_seen = review::runs_changed();
+        let selected = self.selected_item().map(|i| i.subject.name());
+        self.review_runs = review::runs();
+        review::rescore(&mut self.review_items, &self.review_runs);
+        self.refilter();
+        if let Some(name) = selected
+            && let Some(pos) = self
+                .review_rows
+                .iter()
+                .position(|&i| self.review_items[i].subject.name() == name)
+        {
+            self.review_tab.select(Some(pos));
+        }
+    }
+
     fn load_review(&mut self) {
+        self.runs_seen = review::runs_changed();
         match review::Config::load(&self.m.host_dir) {
             Ok(cfg) => {
                 let repo = self.m.host_dir.ancestors().nth(2).unwrap_or(&self.m.host_dir).to_path_buf();
