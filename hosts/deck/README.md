@@ -295,6 +295,15 @@ builds. That is three times the longest gap since the resets sped up on 2026-10-
 but not yet past the gaps before it (about 2 days), so not conclusive. The cost shows in
 deck-usaged: Firefox drawing on the CPU took a quarter to half of all CPU time (pixman in the
 profile), often above one core.
+Result (2026-10-18 08:20): no reset in 3.4 days (56 h, ended by upower's power-off on a flat
+battery, then 23 h and counting), past every gap before the test, and nothing in pstore. Firefox's
+GPU use is the trigger; which half is the next test.
+
+**Step 1** (from 2026-10-18 ~08:20): pages drawn on the GPU again (`gfx.webrender.software=false`,
+set explicitly: prefs.js keeps the old value), video still decoded on the CPU. About 3 days. Resets
+coming back: WebRender on i915 triggers them, and the next things to try are on the kernel side
+(i915 panel self refresh and display power states, a newer kernel, the `xe` driver). No reset:
+video decoding (VA-API) back on as step 2.
 
 **Terminals come back after a crash or a flat battery.**
 [deck-terminals](usr-local/bin/deck-terminals), run by the user service
