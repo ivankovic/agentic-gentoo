@@ -381,8 +381,10 @@ subvolumes, out of the snapshots); toolchains and editor and shell settings from
 read-only; `/usr`, `/etc`, `/opt` read-only; full network. Not there: the rest of the home (SSH and
 GPG keys, `gh`, `~/.cargo/credentials.toml`, browser, mail), the SSH and GPG agents, D-Bus,
 Wayland, sudo. So nothing jailed can push, publish or sign: commit inside, review and push outside.
-All jailed programs share [jail.slice](home/.config/systemd/user/jail.slice): CPU weight 20
-(the desktop gets the CPU first) and at most 90% of it, 22 GiB memory high, 24 GiB max, 4 GiB of
+For untrusted code, `jail --no-src` leaves `~/src` out, and `--ro DIR`, `--rw DIR` and `--chdir DIR`
+mount just what a program needs (deck's reviews: the code under review, read-only). All jailed
+programs share [jail.slice](home/.config/systemd/user/jail.slice): CPU weight 20 (the desktop gets
+the CPU first) and at most 90% of it, 22 GiB memory high, 24 GiB max, 4 GiB of
 swap, 2000 tasks, and systemd-oomd kills inside it after 20 s stalled on memory over half the time. The prompt says `jail`; deck-terminals reopens jailed
 programs in the jail. A jailed tool logs in once on its own (its login lives in the jail home).
 What a jailed program writes in `~/src` and you later run on the host (build scripts, tests,
@@ -425,6 +427,13 @@ it opens a terminal with the details and the failed units' logs.
   `emerge -p --depclean` is blocked, in `/var/lib/deck-health/portage.json`. The panel says so
   when @world is more than 14 days behind, a `@preserved-rebuild` is due, depclean is blocked or
   Gentoo news is unread.
+- **Code reviews.** AI agents review our own code and the installed packages that matter for
+  security and performance ([review.toml](review.toml); `deck review` and deck's Review tab,
+  [tools/deck](../../tools/deck/README.md#reviews)). The first review of each is a baseline;
+  after that each update gets a review of its change, daily for security
+  ([deck-review.timer](home/.config/systemd/user/deck-review.timer), a user timer, enabled with
+  `systemctl --user enable`), within a daily budget. Findings only warn: unread ones are on the
+  tile. Reports stay private in `~/.local/state/deck/reviews`.
 - **Firmware.** A user timer refreshes fwupd's metadata daily
   ([systemd/user/fwupd-refresh.timer](home/.config/systemd/user/fwupd-refresh.timer), enabled with
   `systemctl --user enable`); the panel asks `fwupdmgr get-updates` at most hourly. The system

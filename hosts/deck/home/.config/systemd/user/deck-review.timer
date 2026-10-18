@@ -1,0 +1,12 @@
+# Daily, a few hours after the Gentoo sync (gentoo-sync.timer, daily); a missed run happens at the
+# next boot. Enable once: systemctl --user enable --now deck-review.timer
+[Unit]
+Description=Daily security reviews of updates to watched code
+
+[Timer]
+OnCalendar=*-*-* 04:00
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

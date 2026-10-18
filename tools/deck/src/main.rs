@@ -3,15 +3,17 @@
 
 mod model;
 mod patches;
+mod review;
 mod send;
 mod track;
 mod tui;
 mod usage;
 mod vdb;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use model::{Model, date, default_host_dir};
+use review::Kind;
 use std::path::PathBuf;
 use track::State;
 use vdb::Filter;
@@ -31,6 +33,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Security and performance reviews by AI agents, as review.toml lists them [default: list]
+    Review {
+        #[command(subcommand)]
+        cmd: Option<ReviewCmd>,
+    },
     /// Print installed packages, tab-separated
     Packages {
         #[arg(long, value_enum, default_value_t = Filter::All)]
@@ -90,6 +97,32 @@ enum Cmd {
     },
 }
 
+#[derive(Subcommand)]
+enum ReviewCmd {
+    /// Every subject and where its reviews stand, the most worthwhile next first, tab-separated
+    List,
+    /// The most worthwhile review to run next, and why
+    Next {
+        #[arg(long, value_enum)]
+        kind: Option<Kind>,
+    },
+    /// Run one review now: the difference from the last reviewed version, or the whole
+    Run {
+        /// ours/<name> or category/package, as deck review list prints it
+        subject: String,
+        #[arg(long, value_enum, default_value = "security")]
+        kind: Kind,
+        /// One of review.toml's agents [default: its default]
+        #[arg(long)]
+        agent: Option<String>,
+        /// Review the whole, even when an earlier version was reviewed
+        #[arg(long)]
+        full: bool,
+    },
+    /// Security reviews of updates to watched code, within the daily budget (the timer runs it)
+    Auto,
+}
+
 fn main() -> Result<()> {
     // Die quietly on a closed pipe (`deck usage | head`), as command-line tools do.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
@@ -114,6 +147,9 @@ fn main() -> Result<()> {
             (None, true) => usage::print_spikes(db, *days, None),
             (None, false) => usage::print_totals(db, *days),
         };
+    }
+    if let Some(Cmd::Review { cmd }) = &cli.cmd {
+        return review_cmd(&host_dir, cmd.as_ref().unwrap_or(&ReviewCmd::List));
     }
     match &cli.cmd {
         Some(Cmd::Fork { dir }) => {
@@ -205,6 +241,135 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Some(Cmd::Usage { .. } | Cmd::Fork { .. } | Cmd::Push { .. }) => unreachable!(),
+        Some(Cmd::Usage { .. } | Cmd::Fork { .. } | Cmd::Push { .. } | Cmd::Review { .. }) => unreachable!(),
+    }
+}
+
+/// The repository a host directory is in: `<repo>/hosts/<host>`.
+fn repo_of(host_dir: &std::path::Path) -> PathBuf {
+    host_dir.ancestors().nth(2).map_or_else(|| host_dir.to_path_buf(), PathBuf::from)
+}
+
+fn review_cmd(host_dir: &std::path::Path, cmd: &ReviewCmd) -> Result<()> {
+    let cfg = review::Config::load(host_dir)?;
+    let repo = repo_of(host_dir);
+    let usage_db = std::env::var_os("DECK_USAGE_DB").map_or_else(|| PathBuf::from(deck::USAGE_DB), PathBuf::from);
+    let usage = usage::load(&usage_db, 7.0).ok();
+    let board = || -> Result<Vec<review::Item>> {
+        Ok(review::board(&cfg, &repo, &vdb::load()?, usage.as_ref()))
+    };
+    match cmd {
+        ReviewCmd::List => {
+            let all = review::runs();
+            println!("score\tsubject\ttier\tinstalled\tupdate\tsecurity\tperformance\tcpu%");
+            for i in board()? {
+                let name = i.subject.name();
+                let (sec, _) = review::latest(&all, &name, Kind::Security);
+                let (perf, _) = review::latest(&all, &name, Kind::Performance);
+                println!(
+                    "{:.0}\t{name}\t{}\t{}\t{}\t{}\t{}\t{:.1}",
+                    i.score(),
+                    i.subject.tier().map_or(String::new(), |t| t.to_string()),
+                    i.versions.installed.clone().unwrap_or_default(),
+                    i.versions.update.clone().unwrap_or_default(),
+                    review::need_label(&i.security, sec),
+                    review::need_label(&i.performance, perf),
+                    i.cpu_pct,
+                );
+            }
+            Ok(())
+        }
+        ReviewCmd::Next { kind } => {
+            let items = board()?;
+            let best = items
+                .iter()
+                .map(|i| match kind {
+                    Some(Kind::Security) => (i, Kind::Security, i.security_score),
+                    Some(Kind::Performance) => (i, Kind::Performance, i.performance_score),
+                    None => (i, i.best_kind(), i.score()),
+                })
+                // The first of equals: the board's order breaks ties.
+                .fold(None, |best: Option<(&review::Item, Kind, f64)>, x| match best {
+                    Some(b) if b.2 >= x.2 => Some(b),
+                    _ => Some(x),
+                });
+            match best {
+                Some((i, k, s)) if s > 0.0 => {
+                    let need = if k == Kind::Security { &i.security } else { &i.performance };
+                    let what = match need {
+                        review::Need::Delta { from, to } => format!("the change {from} → {to}"),
+                        _ => "the whole of it, a baseline".into(),
+                    };
+                    println!("{} review of {}: {what} (score {s:.0})", k.label(), i.subject.name());
+                    println!("deck review run {} --kind {}", i.subject.name(), k.label());
+                }
+                _ => println!("nothing to review"),
+            }
+            Ok(())
+        }
+        ReviewCmd::Run { subject, kind, agent, full } => {
+            let items = board()?;
+            let item = items
+                .iter()
+                .find(|i| i.subject.name() == *subject)
+                .with_context(|| format!("no subject {subject}; deck review list shows them"))?;
+            run_review(&cfg, &repo, item, *kind, agent.as_deref(), *full, false, &usage_db)
+        }
+        ReviewCmd::Auto => {
+            let today = chrono::Local::now().date_naive();
+            let done_today = review::runs()
+                .iter()
+                .filter(|r| r.auto)
+                .filter(|r| {
+                    chrono::DateTime::from_timestamp(r.started, 0)
+                        .is_some_and(|t| t.with_timezone(&chrono::Local).date_naive() == today)
+                })
+                .count();
+            let mut left = cfg.budget.auto_per_day.saturating_sub(done_today);
+            for i in board()? {
+                if left == 0 {
+                    break;
+                }
+                if i.subject.tier().is_some() && matches!(i.security, review::Need::Delta { .. }) {
+                    run_review(&cfg, &repo, &i, Kind::Security, None, false, true, &usage_db)?;
+                    left -= 1;
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_review(
+    cfg: &review::Config,
+    repo: &std::path::Path,
+    item: &review::Item,
+    kind: Kind,
+    agent: Option<&str>,
+    full: bool,
+    auto: bool,
+    usage_db: &std::path::Path,
+) -> Result<()> {
+    let agent = cfg.agent(agent)?;
+    let usage = match (kind, item.subject.usage_label()) {
+        (Kind::Performance, Some(l)) => review::usage_text(usage_db, l, 7.0),
+        _ => String::new(),
+    };
+    let req = review::Request {
+        subject: &item.subject,
+        kind,
+        agent,
+        full,
+        auto,
+        usage,
+    };
+    let r = review::run(repo, req, &item.versions, &mut std::io::stderr())?;
+    match r.status.as_str() {
+        "done" => {
+            println!("{}: {} · {}", r.subject, r.counts_label(), r.report.display());
+            Ok(())
+        }
+        _ => anyhow::bail!("{}: {}", r.subject, r.error),
     }
 }

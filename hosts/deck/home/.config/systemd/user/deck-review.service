@@ -1,0 +1,11 @@
+# Reviews updates of watched code for security, within review.toml's daily budget (`deck review
+# auto`, tools/deck): run by deck-review.timer. Findings show on the maintenance tile.
+[Unit]
+Description=Security reviews of updates to watched code (deck review auto)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/deck review auto
+Nice=10

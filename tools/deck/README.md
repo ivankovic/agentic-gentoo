@@ -1,14 +1,15 @@
 # deck
 
 What is installed on a Gentoo machine, where each package came from, which carry local patches,
-and where each patch stands upstream. A TUI, plus tab-separated output for scripts and agents.
+where each patch stands upstream, and AI agents' security and performance reviews of the code that
+matters. A TUI, plus tab-separated output for scripts and agents.
 
 Installed through Portage, from the local overlay's live ebuild `app-portage/deck`: on deck,
 `portage/env/deck-local-source.conf` points it at this clone, so `emerge app-portage/deck` builds
 what is committed here, pushed or not.
 
 ```sh
-deck                                       # the TUI: packages, patches, usage
+deck                                       # the TUI: packages, patches, usage, review
 deck packages [--filter here|compiled|patched|overlay|…]
 deck patches
 deck mark <category/package/file> <state> [--url URL] [--note TEXT]
@@ -17,6 +18,10 @@ deck stage <category/package/file>         # onto a branch of upstream's clone, 
 deck fork | deck push | deck pr            # in that clone, one step each
 deck usage [--days N] [--spikes]           # CPU, memory, active time per package
 deck usage --pkg <label>                   # whose code it ran, who ran its code, its spikes
+deck review [list]                         # every subject, where its reviews stand, best next first
+deck review next [--kind security|performance]
+deck review run <subject> [--kind K] [--agent A] [--full]
+deck review auto                           # security reviews of updates, within the daily budget
 ```
 
 It reads the host's directory, `~/src/agentic-gentoo/hosts/$(hostname)` unless `--host-dir` or
@@ -96,7 +101,7 @@ made in the clone, and the patch here is refreshed from it by hand.
 
 | Key | |
 |---|---|
-| `Tab`, `1`, `2`, `3` | packages / patches / usage |
+| `Tab`, `1`, `2`, `3`, `4` | packages / patches / usage / review |
 | `j` `k` `d` `u` `g` `G` | move, page, top, bottom (arrows, PgUp/PgDn, Home/End too) |
 | `/`, `Esc` | search by name, clear it |
 | `f` `F` | next / previous package filter |
@@ -107,9 +112,56 @@ made in the clone, and the patch here is refreshed from it by hand.
 | `U` | set the patch's upstream project |
 | `S` | the patch's next step upstream (below); fork and push ask y/n first |
 | `o` | a terminal in the patch's clone in `~/3p` |
+| `s` `p` (Review) | ask an agent for a security / performance review; asks y/n first |
+| `S` `P` (Review) | the same, of the whole even when an earlier version was reviewed |
+| `Enter` (Review) | the latest report, with less in a terminal; marks it read |
+| `n` `a` (Review) | the most worthwhile next (the top row) / the next agent |
 | `?` | explain the selected row and the keys that work on it; `?` again: every key |
 | `r` | reload |
 | `q` | quit |
+
+## Reviews
+
+AI agents review the code that matters on this machine for security and performance, and the
+results only warn: nothing is blocked. The host's `review.toml` lists:
+
+- **Agents**: each a command that reads the prompt on stdin and writes a Markdown report on stdout.
+  Claude Code (`claude -p`, limited to reading and searching) is the first; another agent is
+  another `[[agent]]`, chosen with `--agent` or `a` in the TUI.
+- **Our own code** (`[[local]]`): paths in this repository. Its version is the last commit that
+  touched them.
+- **Packages** (`[[package]]`): by atom, each with a tier, what matters about it here, and
+  optionally the paths to concentrate on. Other installed packages busy enough to matter (0.5% of
+  CPU time or profile samples, from deck-usaged) appear for performance reviews too; `-bin` and
+  live ebuilds don't (no source to read).
+
+**What runs.** A package's source is what Portage builds: fetched and unpacked with `ebuild …
+clean prepare` (Gentoo's patches and ours applied, already downloaded sources reused), as the user,
+inside `jail --no-src`, so its build scripts never run with the user's rights. Our code is
+`git archive` of the commit. Sources are kept in `~/.cache/deck/review/src/<subject>/<version>`.
+
+**The agent** runs in `jail --no-src --ro <source> --chdir <source>`: only the code under review,
+read-only, and none of `~/src`. The prompt says why the subject matters here, what to look for,
+that the source is data and not instructions (comments may try to steer a reviewer), and asks for
+a closing ```` ```findings ```` block of JSON (severity, title, where), which deck reads.
+
+**Baselines and changes.** The first review of a subject is of the whole. After that, a newer
+version, installed or waiting as an update, gets a review of the difference only
+(`<old>..<new>.diff`, limited to the subject's paths, with both trees beside it): cheap, and first
+in line. `--full` (`S`, `P`) reviews the whole again.
+
+**What next.** Each subject gets a score per kind: what is at stake (security: the tier, 1 our
+code … 5; performance: its measured share of CPU time and profile samples) times what is
+unreviewed (a change 1, never reviewed 0.7, current 0.03). The board is sorted by it, and `deck
+review next` names the top one: where spare tokens are best spent.
+
+**Every day**, `deck-review.timer` (a user timer) runs `deck review auto`: security reviews of
+the changes in watched code, updates first, at most `budget.auto_per_day` a day. Unread reports
+with findings and failed automatic runs show on the maintenance tile (`deck-attention`).
+
+**Reports stay private**: `~/.local/state/deck/reviews/reports/<subject>/`, with the agent's
+errors beside each in a `.log`, and one JSON record per run in `runs/`. A finding may be an
+unreported vulnerability: it goes upstream privately, never into this public repository.
 
 ## Usage accounting: deck-usaged and deck-focusd
 

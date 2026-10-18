@@ -1,0 +1,146 @@
+# What deck reviews for security and performance, and which AI agents do it (tools/deck: `deck
+# review`, and the Review tab). Reports and findings stay out of this public repository, in
+# ~/.local/state/deck/reviews: a finding may be a vulnerability nobody has reported yet.
+#
+# Tiers, for what to review first: 1 our own code (no one else reads it, some runs as root or on
+# mail from anyone); 2 parses untrusted input on every incoming mail; 3 parses network or radio
+# input as root, or files from strangers; 4 the lock screen; 5 the rest worth a look.
+
+[budget]
+# `deck review auto` (daily, after the sync) reviews pending updates of watched code, at most this
+# many runs a day. Full reviews (baselines) only run when asked for.
+auto_per_day = 3
+
+# An agent reads the prompt on stdin and writes its report, in Markdown, on stdout. It runs in
+# `jail --no-src`, with only the code under review mounted, read-only: no ~/src, no secrets.
+# Another agent is another [[agent]]; `default` picks the one used unless one is named.
+[[agent]]
+name = "claude"
+default = true
+command = [
+    "claude", "-p",
+    "--tools", "Read,Grep,Glob",
+    "--strict-mcp-config",
+    "--no-session-persistence",
+]
+
+# Our own code, from this repository: the version is the last commit that touched its paths.
+# `package` is the installed package it runs as, for its measured usage.
+
+[[local]]
+name = "jail"
+tier = 1
+paths = ["hosts/deck/usr-local/bin/jail"]
+focus = "The sandbox for coding agents and for code under review (bubblewrap). Its whole purpose is to keep a jailed program from the rest of the home, the agents' sockets and the session: any way out of it defeats it."
+
+[[local]]
+name = "deck-mail"
+tier = 1
+paths = ["hosts/deck/usr-local/bin/deck-mail", "hosts/deck/home/.config/notmuch/default/hooks/post-new"]
+focus = "Mail sync, PDF archiving to Nextcloud and sending. Handles mail from anyone: attachment names become paths and file names in Nextcloud, headers reach notmuch queries and msmtp's command line."
+
+[[local]]
+name = "mmm"
+tier = 1
+package = "mail-client/mmm"
+paths = ["tools/mmm"]
+focus = "The mail reader. Shows mail from anyone in a terminal (escape sequences), converts HTML, saves and opens attachments (names, xdg-open), builds outgoing mail, runs the editor and a systemd unit per sent mail."
+
+[[local]]
+name = "deck"
+tier = 1
+package = "app-portage/deck"
+paths = ["tools/deck"]
+focus = "This tool, and deck-usaged, a root daemon that reads every process's /proc entries (names and arguments any program can set) into SQLite. Also runs git, gh and ebuild, and these reviews."
+
+[[local]]
+name = "root scripts"
+tier = 1
+paths = ["hosts/deck/usr-local/sbin/emerge", "hosts/deck/etc/deck-health", "hosts/deck/etc/deck-vitals", "hosts/deck/etc/deck-recovery"]
+focus = "Run as root: the emerge wrapper (under sudo, snapshots before emerge), the health and Portage checks, vitals, the recovery system's refresh."
+
+[[local]]
+name = "session scripts"
+tier = 2
+paths = ["hosts/deck/usr-local/bin/deck-terminals", "hosts/deck/usr-local/bin/deck-attention", "hosts/deck/usr-local/bin/deck-nosnap", "hosts/deck/home/.bashrc"]
+focus = "deck-terminals reruns commands taken from process arguments (any program can set them) through eval in .bashrc after a crash; deck-attention reads system state for the maintenance tile."
+
+# Installed packages, by atom: the source as Portage builds it (Gentoo's patches and ours applied),
+# fetched and unpacked in the jail. `paths` narrows a big package to the code that matters.
+
+[[package]]
+atom = "dev-libs/gmime"
+tier = 2
+focus = "Parses the headers and MIME structure of every incoming mail, from anyone, with no click: notmuch new indexes it all."
+
+[[package]]
+atom = "net-mail/notmuch"
+tier = 3
+focus = "Indexes every incoming mail (through GMime) and answers mmm's and deck-mail's queries, whose terms come from mail headers."
+
+[[package]]
+atom = "app-text/mupdf"
+tier = 3
+paths = ["source/pdf", "source/fitz"]
+focus = "Opens PDFs from mail and bank statements in zathura: the PDF parser, fonts and images."
+
+[[package]]
+atom = "net-wireless/iwd"
+tier = 3
+focus = "Wi-Fi, as root: parses management frames and EAPOL from any access point or station in range."
+
+[[package]]
+atom = "dev-libs/ell"
+tier = 3
+focus = "iwd's library: its netlink, DHCP client, TLS and crypto code parse what the network sends, as root."
+
+[[package]]
+atom = "net-misc/networkmanager"
+tier = 3
+paths = ["src/core/dhcp", "src/n-dhcp4", "src/core/ndisc", "src/libnm-systemd-core"]
+focus = "As root, parses DHCP and router advertisements from any network joined."
+
+[[package]]
+atom = "net-wireless/bluez"
+tier = 3
+focus = "bluetoothd, as root: parses what devices in radio range send (pairing, profiles)."
+
+[[package]]
+atom = "gui-apps/swaylock"
+tier = 4
+focus = "The lock screen: anything that unlocks it, crashes it (which unlocks the session) or leaks the password."
+
+[[package]]
+atom = "gui-libs/greetd"
+tier = 4
+focus = "The login daemon, as root: authentication through PAM and starting the session."
+
+[[package]]
+atom = "gui-apps/tuigreet"
+tier = 4
+focus = "The login screen's greeter, talking to greetd."
+
+[[package]]
+atom = "gui-wm/niri"
+tier = 5
+focus = "The compositor: sees every key and every window; its IPC socket takes commands from any local program."
+
+[[package]]
+atom = "app-misc/cliphist"
+tier = 5
+focus = "Keeps the clipboard history, passwords included: how and where it stores it, and who can read it."
+
+[[package]]
+atom = "gui-apps/quickshell"
+tier = 5
+focus = "The panel and dashboard: runs QML from ~/.config and shows notifications' text."
+
+[[package]]
+atom = "net-mail/isync"
+tier = 5
+focus = "mbsync: IMAP from Gmail over TLS, writing mail files whose names come from the server."
+
+[[package]]
+atom = "mail-mta/msmtp"
+tier = 5
+focus = "Sends mail over SMTP with TLS; deck-mail passes it recipients taken from mail."

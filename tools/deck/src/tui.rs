@@ -1,7 +1,8 @@
-//! The interactive view: packages, patches and usage, with a detail pane under each.
+//! The interactive view: packages, patches, usage and reviews, with a detail pane under each.
 
 use crate::model::{Model, date};
 use crate::patches::Kind;
+use crate::review::{self, Need};
 use crate::send::{self, Step};
 use crate::track::State;
 use crate::usage::{self, Usage, pct};
@@ -23,6 +24,7 @@ enum View {
     Packages,
     Patches,
     Usage,
+    Review,
 }
 
 /// The order of the package and usage lists.
@@ -97,6 +99,8 @@ enum Then {
 enum Action {
     Fork(PathBuf),
     Push(PathBuf),
+    /// Start an agent's review: subject, kind, the whole even if an earlier version was reviewed.
+    Review(String, review::Kind, bool),
 }
 
 enum Mode {
@@ -127,7 +131,7 @@ enum Mode {
 /// before its description.
 const HELP: &[&str] = &[
     "Everywhere",
-    "  1 2 3, Tab          packages / patches / usage (Shift+Tab goes back)",
+    "  1 2 3 4, Tab        packages / patches / usage / review (Shift+Tab goes back)",
     "  j k, arrows         move;  d u, PgDn PgUp  a page;  g G, Home End  top, bottom",
     "  /  Esc              search by name / clear it",
     "  ?                   explain the selected row; ? again: this screen",
@@ -148,6 +152,13 @@ const HELP: &[&str] = &[
     "Usage",
     "  s  p                sort / period, as on Packages",
     "  Enter               the package, on Packages",
+    "",
+    "Review (review.toml; reports stay private, in ~/.local/state/deck/reviews)",
+    "  s  p                a security / performance review by an agent: of the change since the last",
+    "                      reviewed version, or the whole the first time; asks first",
+    "  S  P                the same, of the whole even when an earlier version was reviewed",
+    "  Enter               the latest report, in a terminal (marks it read)",
+    "  n  a                the most worthwhile next (the top row) / the next agent",
 ];
 
 struct App {
@@ -172,6 +183,13 @@ struct App {
     period: usize,
     sort: Sort,
     detail: Option<Detail>,
+    review_cfg: Option<review::Config>,
+    review_err: String,
+    review_items: Vec<review::Item>,
+    review_runs: Vec<review::Run>,
+    review_rows: Vec<usize>,
+    review_tab: TableState,
+    agent: usize,
 }
 
 pub fn run(m: Model) -> Result<()> {
@@ -197,8 +215,16 @@ pub fn run(m: Model) -> Result<()> {
         period: 1,
         sort: Sort::Name,
         detail: None,
+        review_cfg: None,
+        review_err: String::new(),
+        review_items: vec![],
+        review_runs: vec![],
+        review_rows: vec![],
+        review_tab: TableState::default().with_selected(0),
+        agent: 0,
     };
     app.load_usage();
+    app.load_review();
     app.refilter();
     let mut terminal = ratatui::init();
     let res = app.run(&mut terminal);
@@ -255,6 +281,13 @@ impl App {
     fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         while !self.quit {
             terminal.draw(|f| self.draw(f))?;
+            // While a review runs, look again every few seconds for it to finish.
+            let running = self.review_runs.iter().any(|r| r.status == "running");
+            if running && !event::poll(std::time::Duration::from_secs(3))? {
+                self.load_review();
+                self.refilter();
+                continue;
+            }
             if let Event::Key(k) = event::read()?
                 && k.kind == KeyEventKind::Press
             {
@@ -262,6 +295,92 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    fn load_review(&mut self) {
+        match review::Config::load(&self.m.host_dir) {
+            Ok(cfg) => {
+                let repo = self.m.host_dir.ancestors().nth(2).unwrap_or(&self.m.host_dir).to_path_buf();
+                self.review_items = review::board(&cfg, &repo, &self.m.pkgs, self.usage.as_ref());
+                self.review_runs = review::runs();
+                self.agent = self.agent.min(cfg.agents.len().saturating_sub(1));
+                if self.agent == 0 {
+                    self.agent = cfg.agents.iter().position(|a| a.default).unwrap_or(0);
+                }
+                self.review_cfg = Some(cfg);
+                self.review_err.clear();
+            }
+            Err(e) => {
+                self.review_cfg = None;
+                self.review_items.clear();
+                self.review_err = format!("{e:#}");
+            }
+        }
+    }
+
+    fn agent_name(&self) -> String {
+        self.review_cfg
+            .as_ref()
+            .and_then(|c| c.agents.get(self.agent))
+            .map_or(String::new(), |a| a.name.clone())
+    }
+
+    fn selected_item(&self) -> Option<&review::Item> {
+        self.review_tab
+            .selected()
+            .and_then(|i| self.review_rows.get(i))
+            .map(|&i| &self.review_items[i])
+    }
+
+    /// The latest finished run of the selected subject: the given kind, or whichever is newer.
+    fn latest_run(&self, name: &str, kind: Option<review::Kind>) -> Option<&review::Run> {
+        let pick = |k| review::latest(&self.review_runs, name, k).0;
+        match kind {
+            Some(k) => pick(k),
+            None => [pick(review::Kind::Security), pick(review::Kind::Performance)]
+                .into_iter()
+                .flatten()
+                .max_by_key(|r| r.finished),
+        }
+    }
+
+    /// `s`, `p` (and capitals, whole): ask before starting a review, which costs tokens.
+    fn ask_review(&mut self, kind: review::Kind, full: bool) {
+        let Some(i) = self.selected_item() else { return };
+        let name = i.subject.name();
+        let need = match kind {
+            review::Kind::Security => &i.security,
+            review::Kind::Performance => &i.performance,
+        };
+        let what = match (need, full) {
+            (Need::Running, _) => {
+                self.status = format!("a {} review of {name} is running", kind.label());
+                return;
+            }
+            (Need::Unknown, _) => {
+                self.status = format!("{name}: no version to review (not installed?)");
+                return;
+            }
+            (Need::Delta { from, to }, false) => format!("the change {from} → {to}"),
+            (Need::Current, false) => {
+                self.status = format!(
+                    "{name}: {} reviewed at this version; {} reviews the whole again",
+                    kind.label(),
+                    if kind == review::Kind::Security { "S" } else { "P" }
+                );
+                return;
+            }
+            _ => format!("the whole of {}", i.versions.target().unwrap_or("it")),
+        };
+        self.mode = Mode::Confirm {
+            lines: vec![
+                format!("Start a {} review of {name} by {}?", kind.label(), self.agent_name()),
+                String::new(),
+                format!("It reviews {what}, in the jail, in the background."),
+                "It costs tokens; the report stays private. Enter on the row opens it.".into(),
+            ],
+            action: Action::Review(name, kind, full),
+        };
     }
 
     fn load_usage(&mut self) {
@@ -330,7 +449,11 @@ impl App {
         };
         step(&mut self.pkg_tab, self.pkg_rows.len(), 0);
         step(&mut self.patch_tab, self.patch_rows.len(), 0);
+        self.review_rows = (0..self.review_items.len())
+            .filter(|&i| self.review_items[i].subject.name().to_lowercase().contains(&q))
+            .collect();
         step(&mut self.usage_tab, self.usage_rows.len(), 0);
+        step(&mut self.review_tab, self.review_rows.len(), 0);
     }
 
     fn selected_usage(&self) -> Option<&usage::Row> {
@@ -358,6 +481,7 @@ impl App {
             Ok(m) => {
                 self.m = m;
                 self.load_usage();
+                self.load_review();
                 self.refilter();
                 self.status = "reloaded".into();
             }
@@ -576,6 +700,18 @@ impl App {
                 Ok(()) => "pushed · S opens the pull request in the browser".into(),
                 Err(e) => format!("not pushed: {e:#} (deck push in the clone shows it all)"),
             },
+            Action::Review(subject, kind, full) => {
+                match review::start(&self.m.host_dir, &subject, kind, &self.agent_name(), full) {
+                    Ok(()) => {
+                        // Its record appears once the unit has started.
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        self.load_review();
+                        self.refilter();
+                        format!("{} review of {subject} started in the background", kind.label())
+                    }
+                    Err(e) => format!("not started: {e:#}"),
+                }
+            }
         };
     }
 
@@ -585,6 +721,7 @@ impl App {
             View::Packages => self.explain_package(),
             View::Patches => self.explain_patch(),
             View::Usage => self.explain_usage(),
+            View::Review => self.explain_review(),
         };
         Mode::Explain {
             title,
@@ -751,11 +888,31 @@ impl App {
         (title, body, keys)
     }
 
+    fn explain_review(&self) -> (String, Vec<Line<'static>>, Vec<(&'static str, &'static str)>) {
+        let keys = vec![
+            ("s p", "security / performance"),
+            ("S P", "the same, whole"),
+            ("Enter", "latest report"),
+            ("n", "most worthwhile next"),
+            ("a", "next agent"),
+        ];
+        let body = vec![
+            Line::from("An AI agent reads the code as it runs here, in the jail with nothing but that code, and writes a report; findings only warn, nothing is blocked. Reports stay private, in ~/.local/state/deck/reviews, since a finding may be an unreported vulnerability."),
+            Line::from(""),
+            Line::from("The first review of a subject is of the whole (never). After that, a newer version, installed or waiting as an update, needs a review of the change only (old → new): cheap, and first in line. ✓ means the version that matters was reviewed, with its findings: H high, M medium, L low; • unread."),
+            Line::from(""),
+            Line::from("Score is how worthwhile it is next: for security, the tier from review.toml (1 our own code … 5); for performance, the share of CPU time and profile samples deck-usaged measured. The list is sorted by it. deck review auto, daily, reviews updates of watched code within the budget in review.toml."),
+        ];
+        let title = self.selected_item().map_or("Review".into(), |i| i.subject.name());
+        (title, body, keys)
+    }
+
     fn key_normal(&mut self, k: KeyEvent) {
         let (tab, len) = match self.view {
             View::Packages => (&mut self.pkg_tab, self.pkg_rows.len()),
             View::Patches => (&mut self.patch_tab, self.patch_rows.len()),
             View::Usage => (&mut self.usage_tab, self.usage_rows.len()),
+            View::Review => (&mut self.review_tab, self.review_rows.len()),
         };
         self.status.clear();
         match k.code {
@@ -764,19 +921,49 @@ impl App {
                 self.view = match self.view {
                     View::Packages => View::Patches,
                     View::Patches => View::Usage,
-                    View::Usage => View::Packages,
+                    View::Usage => View::Review,
+                    View::Review => View::Packages,
                 }
             }
             KeyCode::BackTab => {
                 self.view = match self.view {
-                    View::Packages => View::Usage,
+                    View::Packages => View::Review,
                     View::Patches => View::Packages,
                     View::Usage => View::Patches,
+                    View::Review => View::Usage,
                 }
             }
             KeyCode::Char('1') => self.view = View::Packages,
             KeyCode::Char('2') => self.view = View::Patches,
             KeyCode::Char('3') => self.view = View::Usage,
+            KeyCode::Char('4') => self.view = View::Review,
+            KeyCode::Char('s') if self.view == View::Review => self.ask_review(review::Kind::Security, false),
+            KeyCode::Char('S') if self.view == View::Review => self.ask_review(review::Kind::Security, true),
+            KeyCode::Char('p') if self.view == View::Review => self.ask_review(review::Kind::Performance, false),
+            KeyCode::Char('P') if self.view == View::Review => self.ask_review(review::Kind::Performance, true),
+            KeyCode::Char('n') if self.view == View::Review => step(tab, len, isize::MIN / 2),
+            KeyCode::Char('a') if self.view == View::Review => {
+                let n = self.review_cfg.as_ref().map_or(0, |c| c.agents.len());
+                if n > 0 {
+                    self.agent = (self.agent + 1) % n;
+                }
+                self.status = format!("reviews by {}", self.agent_name());
+            }
+            KeyCode::Enter if self.view == View::Review => {
+                let Some(name) = self.selected_item().map(|i| i.subject.name()) else { return };
+                let Some(r) = self.latest_run(&name, None).cloned() else {
+                    self.status = format!("{name}: no report yet; s or p starts a review");
+                    return;
+                };
+                self.status = match review::view(&r.report) {
+                    Ok(()) => {
+                        let _ = review::mark_seen(&r.id);
+                        self.load_review();
+                        format!("{} opened in a terminal", tilde(&r.report))
+                    }
+                    Err(e) => format!("{e:#}"),
+                };
+            }
             KeyCode::Char('s') if self.view != View::Patches => {
                 self.sort = self.sort.next();
                 self.refilter();
@@ -879,13 +1066,14 @@ impl App {
         ])
         .areas(f.area());
 
-        let [tabs, summary] = Layout::horizontal([Constraint::Length(36), Constraint::Fill(1)]).areas(top);
+        let [tabs, summary] = Layout::horizontal([Constraint::Length(46), Constraint::Fill(1)]).areas(top);
         f.render_widget(
-            Tabs::new(["1 Packages", "2 Patches", "3 Usage"])
+            Tabs::new(["1 Packages", "2 Patches", "3 Usage", "4 Review"])
                 .select(match self.view {
                     View::Packages => 0,
                     View::Patches => 1,
                     View::Usage => 2,
+                    View::Review => 3,
                 })
                 .highlight_style(Style::new().bold().reversed()),
             tabs,
@@ -896,6 +1084,7 @@ impl App {
             View::Packages => self.draw_packages(f, body, detail),
             View::Patches => self.draw_patches(f, body, detail),
             View::Usage => self.draw_usage(f, body, detail),
+            View::Review => self.draw_review(f, body, detail),
         }
 
         let footer = match &self.mode {
@@ -908,6 +1097,9 @@ impl App {
                 View::Usage => "? explain · Enter package · s sort · p period · / search · q quit",
                 View::Patches => {
                     "? explain · S next step upstream · o terminal · m state · U upstream · / search · q quit"
+                }
+                View::Review => {
+                    "? explain · s/p security/performance review · S/P whole · Enter report · n next · a agent · q quit"
                 }
             })
             .dark_gray(),
@@ -938,7 +1130,7 @@ impl App {
                     list,
                 );
             }
-            Mode::Confirm { lines, .. } => {
+            Mode::Confirm { lines, action } => {
                 let area = centered(f.area(), 72, lines.len() as u16 + 4);
                 let mut text: Vec<Line> = lines.iter().map(|l| Line::from(l.clone())).collect();
                 text[0] = text[0].clone().bold();
@@ -953,7 +1145,10 @@ impl App {
                 f.render_widget(
                     Paragraph::new(text)
                         .wrap(Wrap { trim: false })
-                        .block(Block::bordered().title(" Upstream ")),
+                        .block(Block::bordered().title(match action {
+                            Action::Review(..) => " Review ",
+                            _ => " Upstream ",
+                        })),
                     area,
                 );
             }
@@ -1026,7 +1221,9 @@ impl App {
         if what == "Packages" {
             t += &format!(" · filter: {}", self.filter.label());
         }
-        if what != "Patches" {
+        if what == "Review" {
+            t += &format!(" · agent: {} · usage over {} days", self.agent_name(), PERIODS[self.period]);
+        } else if what != "Patches" {
             t += &format!(" · {} days · sort: {}", PERIODS[self.period], self.sort.label());
         }
         if !self.query.is_empty() {
@@ -1367,6 +1564,153 @@ impl App {
                     s.ctx
                 ),
             ));
+        }
+        f.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .block(Block::bordered()),
+            detail,
+        );
+    }
+
+    fn draw_review(&mut self, f: &mut Frame, body: Rect, detail: Rect) {
+        if self.review_cfg.is_none() {
+            f.render_widget(
+                Paragraph::new(vec![
+                    Line::from("No review.toml.").bold(),
+                    Line::from(self.review_err.clone()),
+                ])
+                .wrap(Wrap { trim: false })
+                .block(Block::bordered().title(" Review ")),
+                body,
+            );
+            return;
+        }
+        let cell = |n: &Need, last: Option<&review::Run>| -> Cell<'static> {
+            let mut label = review::need_label(n, last);
+            if matches!(n, Need::Current | Need::Delta { .. })
+                && last.is_some_and(|r| !r.seen)
+            {
+                label += " •";
+            }
+            let color = match n {
+                Need::Running => Color::Blue,
+                Need::Baseline => Color::DarkGray,
+                Need::Delta { .. } => Color::Yellow,
+                Need::Current if last.is_some_and(|r| r.counts()[0] > 0) => Color::Red,
+                Need::Current => Color::Green,
+                Need::Unknown => Color::DarkGray,
+            };
+            Cell::from(label).fg(color)
+        };
+        let rows: Vec<Row> = self
+            .review_rows
+            .iter()
+            .map(|&i| {
+                let it = &self.review_items[i];
+                let name = it.subject.name();
+                let (sec, _) = review::latest(&self.review_runs, &name, review::Kind::Security);
+                let (perf, _) = review::latest(&self.review_runs, &name, review::Kind::Performance);
+                Row::new(vec![
+                    Cell::from(format!("{:.0}", it.score())),
+                    Cell::from(name.clone()).fg(if name.starts_with("ours/") { Color::Cyan } else { Color::Reset }),
+                    Cell::from(it.subject.tier().map_or(String::new(), |t| t.to_string())),
+                    Cell::from(it.versions.installed.clone().unwrap_or_default()).dark_gray(),
+                    Cell::from(it.versions.update.clone().unwrap_or_default()).yellow(),
+                    cell(&it.security, sec),
+                    cell(&it.performance, perf),
+                    Cell::from(if it.cpu_pct + it.code_pct > 0.05 {
+                        format!("{:.1}%", it.cpu_pct.max(it.code_pct))
+                    } else {
+                        String::new()
+                    }),
+                ])
+            })
+            .collect();
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(5),
+                Constraint::Fill(1),
+                Constraint::Length(4),
+                Constraint::Length(16),
+                Constraint::Length(10),
+                Constraint::Length(22),
+                Constraint::Length(22),
+                Constraint::Length(6),
+            ],
+        )
+        .header(Row::new(["Score", "Subject", "Tier", "Installed", "Update", "Security", "Performance", "CPU"]).bold())
+        .block(Block::bordered().title(self.title("Review", self.review_rows.len(), self.review_items.len())))
+        .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED));
+        f.render_stateful_widget(table, body, &mut self.review_tab);
+
+        let mut lines = vec![];
+        if let Some(it) = self.selected_item() {
+            let name = it.subject.name();
+            lines.push(Line::from(name.clone()).bold());
+            if !it.subject.focus().is_empty() {
+                lines.push(kv("why", it.subject.focus().to_string()));
+            }
+            if !it.subject.paths().is_empty() {
+                lines.push(kv("paths", it.subject.paths().join("  ")));
+            }
+            if it.cpu_pct + it.code_pct > 0.0 {
+                lines.push(kv(
+                    "usage",
+                    format!("{:.1}% of CPU time, {:.1}% of profile samples in its code", it.cpu_pct, it.code_pct),
+                ));
+            }
+            for kind in [review::Kind::Security, review::Kind::Performance] {
+                let (done, running) = review::latest(&self.review_runs, &name, kind);
+                let failed = self
+                    .review_runs
+                    .iter()
+                    .filter(|r| r.subject == name && r.kind == kind && r.status == "failed")
+                    .max_by_key(|r| r.started)
+                    .filter(|f| done.is_none_or(|d| f.started > d.started));
+                let label = format!("{:<12}", kind.label());
+                let mut spans = vec![Span::styled(label, Style::new().dark_gray())];
+                if let Some(r) = running {
+                    spans.push(Span::raw(format!(
+                        "running since {} ({}{}){}",
+                        usage::when(r.started),
+                        r.from.as_deref().map(|f| format!("{f} → ")).unwrap_or_default(),
+                        r.version,
+                        format_args!(", by {}", r.agent)
+                    )).blue());
+                } else if let Some(r) = done {
+                    spans.push(Span::raw(format!(
+                        "{} · {}{} by {} on {}{}",
+                        r.counts_label(),
+                        r.from.as_deref().map(|f| format!("{f} → ")).unwrap_or_default(),
+                        r.version,
+                        r.agent,
+                        usage::when(r.finished.unwrap_or(r.started)),
+                        if r.seen { "" } else { " · unread" }
+                    )));
+                } else {
+                    spans.push(Span::raw("not reviewed yet").dark_gray());
+                }
+                lines.push(Line::from(spans));
+                if let Some(f) = failed {
+                    lines.push(Line::from(format!("            last attempt failed: {}", f.error)).red());
+                }
+                if let Some(r) = done {
+                    for x in r.findings.iter().take(4) {
+                        lines.push(Line::from(vec![
+                            Span::raw("            "),
+                            Span::raw(format!("{:<7}", x.severity)).fg(match x.severity.as_str() {
+                                "high" | "critical" => Color::Red,
+                                "medium" => Color::Yellow,
+                                _ => Color::DarkGray,
+                            }),
+                            Span::raw(format!("{}  ", x.title)),
+                            Span::raw(x.place.clone()).dark_gray(),
+                        ]));
+                    }
+                }
+            }
         }
         f.render_widget(
             Paragraph::new(lines)

@@ -3,6 +3,10 @@
 #
 #   jail                 a shell in the jail, in the current directory if it is under ~/src
 #   jail claude          any program, e.g. a coding agent
+#   jail [OPTIONS] [--] COMMAND
+#     --no-src           without ~/src: for programs that read untrusted code (deck review)
+#     --ro DIR, --rw DIR one more directory, read-only or writable (repeatable)
+#     --chdir DIR        start there instead of the current directory
 #
 # What the jailed program sees (bubblewrap: its own user, PID, IPC, UTS and cgroup namespaces;
 # the network is shared, so it has full network access):
@@ -38,10 +42,30 @@ if command -v deck-nosnap >/dev/null; then
 	deck-nosnap "$jhome/.cache" "$jhome/.cargo/registry" "$jhome/go/pkg" "$jhome/.npm" >/dev/null
 fi
 
+nosrc= chdir= extra=()
+while (($#)); do
+	case $1 in
+	--no-src) nosrc=1 ;;
+	--ro | --rw)
+		[[ -d ${2-} ]] || { echo "jail: $1 needs a directory" >&2; exit 2; }
+		d=$(realpath "$2")
+		[[ $1 = --ro ]] && extra+=(--ro-bind "$d" "$d") || extra+=(--bind "$d" "$d")
+		shift ;;
+	--chdir)
+		chdir=$(realpath "${2:?jail: --chdir needs a directory}")
+		shift ;;
+	--) shift; break ;;
+	*) break ;;
+	esac
+	shift
+done
+
 case $PWD/ in
 "$src"/*) dir=$PWD ;;
 *) dir=$src ;;
 esac
+[[ -n $nosrc ]] && dir=$HOME
+[[ -n $chdir ]] && dir=$chdir
 
 args=(
 	--unshare-user --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try
@@ -55,8 +79,8 @@ args=(
 	--tmpfs /tmp --tmpfs /run --tmpfs /var --dir /var/tmp
 	--ro-bind-try /run/systemd/resolve /run/systemd/resolve
 	--bind "$jhome" "$HOME"
-	--bind "$src" "$src"
 )
+[[ -n $nosrc ]] || args+=(--bind "$src" "$src")
 
 ro=(
 	.rustup .cargo/bin .cargo/config.toml .cargo/env go/bin
@@ -78,7 +102,8 @@ while IFS= read -r git; do
 		[[ $hooks = /* ]] || hooks=$repo/$hooks
 		[[ -d $hooks ]] && args+=(--ro-bind "$hooks" "$hooks")
 	fi
-done < <(find "$src" -mindepth 2 -maxdepth 3 -name .git -type d -prune 2>/dev/null)
+done < <([[ -n $nosrc ]] || find "$src" -mindepth 2 -maxdepth 3 -name .git -type d -prune 2>/dev/null)
+args+=("${extra[@]}")
 
 # A clean environment: nothing from the session leaks in (agent sockets, tokens, D-Bus).
 env=(--clearenv --setenv HOME "$HOME" --setenv USER "$USER" --setenv LOGNAME "$USER"
