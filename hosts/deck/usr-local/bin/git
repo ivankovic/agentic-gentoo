@@ -101,9 +101,13 @@ state() {
 	{
 		[[ -d $hooks ]] && echo "$hooks"
 		find "$hooks" -maxdepth 1 \( -type f -o -type l \) ! -name '*.sample' 2>/dev/null
-		# Submodules' and other worktrees' own config and hooks.
+		# Submodules' and other worktrees' own config and hooks, and their directories: a file added
+		# to one (a submodule's new hook) changes its ctime, which the stamp sees. Not the object and
+		# ref stores, which change all the time.
 		find "$common/modules" "$common/worktrees" \( -name config -o -name config.worktree -o -name commondir \
 			-o -path '*/hooks/*' \) ! -name '*.sample' \( -type f -o -type l \) 2>/dev/null
+		find "$common/modules" "$common/worktrees" -type d \( -name objects -o -name refs -o -name logs -o -name lfs \
+			-o -name info \) -prune -o -type d -print 2>/dev/null
 		# Files the config includes.
 		"$real" --git-dir="$gd" config --list --show-origin --includes --local 2>/dev/null |
 			sed -n 's/^file:\([^	]*\)	.*/\1/p' | sort -u
