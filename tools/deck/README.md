@@ -122,7 +122,7 @@ made in the clone, and the patch here is refreshed from it by hand.
 | `f` (Review) | the subject's findings, open ones first |
 | `c` (findings) | an agent rechecks the open findings and marks what it finds fixed |
 | `x` `n` `w` `o` (findings) | decide: fixed / doesn't apply here / won't fix / open again, with a note |
-| `Enter` `a` `Esc` (findings) | the report at the finding / decided ones too / back |
+| `Enter` `a` `Esc` (findings) | the report at the finding / only the open ones (again: all) / back |
 | `?` | explain the selected row and the keys that work on it; `?` again: every key |
 | `r` | reload |
 | `q` | quit |
@@ -162,7 +162,9 @@ code … 5; performance: its measured share of CPU time and profile samples) tim
 unreviewed (a change 1, never reviewed 0.7, current 0.03). The board is sorted by it, and `deck
 review next` names the top one: where spare tokens are best spent.
 
-**Findings** are decided one by one: `f` on a subject lists them, open ones first, worst first.
+**Findings** are decided one by one: `f` on a subject lists them, open ones first, worst first,
+then the decided ones (fixed, doesn't apply here, won't fix), latest first; `a` leaves only the
+open ones.
 Whether one is fixed the agents decide: every review gets the open findings numbered and names, in
 a `resolved` block, those the code it read shows fixed, with where and how; deck marks them fixed
 (by that agent). `c` (or `deck review recheck`) asks for only that check, against the installed

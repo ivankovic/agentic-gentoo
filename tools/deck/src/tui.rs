@@ -163,11 +163,11 @@ const HELP: &[&str] = &[
     "  S  P                the same, of the whole even when an earlier version was reviewed",
     "  Enter               the latest report, in a terminal (marks it read)",
     "  n  a                the most worthwhile next (the top row) / the next agent",
-    "  f                   the subject's findings, open ones first; there:",
+    "  f                   the subject's findings: open ones first, then fixed and the rest; there:",
     "    x n w o           decide: fixed / doesn't apply here / won't fix / open again, with a note;",
     "                      the next review of it is told, and won't raise it again without a reason",
     "    c                 have the agent recheck the open ones: it marks what it finds fixed",
-    "    Enter  a  Esc     the report at the finding / decided ones too / back",
+    "    Enter  a  Esc     the report at the finding / only the open ones (again: all) / back",
 ];
 
 struct App {
@@ -204,8 +204,8 @@ struct App {
     /// The subject whose findings the Review tab lists, instead of the subjects.
     findings_of: Option<String>,
     finding_tab: TableState,
-    /// Also the decided findings.
-    finding_all: bool,
+    /// Only the open findings; otherwise the decided ones too (not the superseded).
+    finding_open_only: bool,
 }
 
 pub fn run(m: Model) -> Result<()> {
@@ -241,7 +241,7 @@ pub fn run(m: Model) -> Result<()> {
         runs_seen: None,
         findings_of: None,
         finding_tab: TableState::default().with_selected(0),
-        finding_all: false,
+        finding_open_only: false,
     };
     app.load_usage();
     app.load_review();
@@ -375,7 +375,7 @@ impl App {
     fn selected_finding(&self) -> Option<review::Listed<'_>> {
         let subject = self.findings_of.as_ref()?;
         let i = self.finding_tab.selected()?;
-        review::findings(&self.review_runs, subject, self.finding_all).into_iter().nth(i)
+        finding_list(&self.review_runs, subject, self.finding_open_only).into_iter().nth(i)
     }
 
     /// The latest finished run of the selected subject: the given kind, or whichever is newer.
@@ -986,7 +986,7 @@ impl App {
             View::Patches => (&mut self.patch_tab, self.patch_rows.len()),
             View::Usage => (&mut self.usage_tab, self.usage_rows.len()),
             View::Review if self.findings_of.is_some() => {
-                let n = self.findings_of.as_ref().map_or(0, |s| review::findings(&self.review_runs, s, self.finding_all).len());
+                let n = self.findings_of.as_ref().map_or(0, |s| finding_list(&self.review_runs, s, self.finding_open_only).len());
                 (&mut self.finding_tab, n)
             }
             View::Review => (&mut self.review_tab, self.review_rows.len()),
@@ -1059,10 +1059,10 @@ impl App {
                 };
             }
             KeyCode::Char('a') if self.view == View::Review && self.findings_of.is_some() => {
-                self.finding_all = !self.finding_all;
+                self.finding_open_only = !self.finding_open_only;
                 step(&mut self.finding_tab, 0, 0);
                 self.finding_tab.select(Some(0));
-                self.status = if self.finding_all { "all findings, decided ones too".into() } else { "open findings".into() };
+                self.status = if self.finding_open_only { "open findings only".into() } else { "open findings, then the decided ones".into() };
             }
             KeyCode::Enter if self.view == View::Review && self.findings_of.is_some() => {
                 let Some((report, line)) = self.selected_finding().map(|l| (l.run.report.clone(), finding_line(&l))) else { return };
@@ -1717,14 +1717,18 @@ impl App {
     }
 
     fn draw_findings(&mut self, f: &mut Frame, body: Rect, detail: Rect, subject: &str) {
-        let list = review::findings(&self.review_runs, subject, self.finding_all);
+        let list = finding_list(&self.review_runs, subject, self.finding_open_only);
         let rows: Vec<Row> = list
             .iter()
             .map(|l| {
                 let x = l.finding;
                 Row::new(vec![
                     Cell::from(x.severity.clone()).fg(severity_color(x)),
-                    Cell::from(x.status_text()).fg(if x.is_open() { Color::Yellow } else { Color::DarkGray }),
+                    Cell::from(x.status_text()).fg(match x.status.as_str() {
+                        _ if x.is_open() => Color::Yellow,
+                        "fixed" => Color::Green,
+                        _ => Color::DarkGray,
+                    }),
                     Cell::from(l.run.kind.label()).dark_gray(),
                     Cell::from(l.run.version.clone()).dark_gray(),
                     Cell::from(x.title.clone()),
@@ -1735,8 +1739,8 @@ impl App {
         let title = format!(
             " Findings · {subject} · {} · {shown} {} · c recheck  x fixed  n n/a  w won't fix  o reopen  a {}  Esc ",
             review::counts_label(review::open_counts(&self.review_runs, subject), "none open"),
-            if self.finding_all { "in all" } else { "open" },
-            if self.finding_all { "open only" } else { "all" },
+            if self.finding_open_only { "open" } else { "in all" },
+            if self.finding_open_only { "all" } else { "open only" },
         );
         let table = Table::new(
             rows,
@@ -1784,7 +1788,7 @@ impl App {
             ));
             lines.push(kv("report", format!("{}  (Enter opens it there)", tilde(&l.run.report))));
         } else {
-            lines.push(Line::from(if self.finding_all {
+            lines.push(Line::from(if !self.finding_open_only {
                 "No findings for it yet."
             } else {
                 "Nothing open. a shows the decided ones."
@@ -1944,6 +1948,15 @@ impl App {
             detail,
         );
     }
+}
+
+/// The findings the view lists: open ones first, then (unless only the open ones) the decided
+/// ones, latest decision first. Never the superseded: a later full review has them again.
+fn finding_list<'a>(runs: &'a [review::Run], subject: &str, open_only: bool) -> Vec<review::Listed<'a>> {
+    review::findings(runs, subject, !open_only)
+        .into_iter()
+        .filter(|l| l.finding.status != "superseded")
+        .collect()
 }
 
 fn severity_color(x: &review::Finding) -> Color {
