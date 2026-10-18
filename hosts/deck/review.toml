@@ -14,11 +14,15 @@ auto_per_day = 3
 # An agent reads the prompt on stdin and writes its report, in Markdown, on stdout. It runs in
 # `jail --no-src`, with only the code under review mounted, read-only: no ~/src, no secrets.
 # Another agent is another [[agent]]; `default` picks the one used unless one is named.
+# It starts in the code under review, which may hold the agent's own project files: an agent must
+# not honour them (Claude Code's .claude/settings.json can run hooks).
 [[agent]]
 name = "claude"
 default = true
 command = [
     "claude", "-p",
+    # No settings files (so no project hooks), and the file tools kept to the code under review.
+    "--restricted",
     "--tools", "Read,Grep,Glob",
     "--strict-mcp-config",
     "--no-session-persistence",

@@ -716,8 +716,12 @@ pub fn prepare(repo: &Path, s: &Subject, version: &str, v: &Versions, log: &mut 
             };
             let ebuild = &ebuild;
             let repo_root = ebuild.ancestors().nth(3).context("ebuild path")?;
-            let work = cache_dir().join("portage");
+            // The build's own work directory, and the downloads (Portage checks them against the
+            // Manifest): what it can write. Not the rest of the cache, where every subject's
+            // source is kept and reused as the base for the next review.
+            let work = cache_dir().join("portage").join(format!("{}-{version}", s.slug()));
             let dist = cache_dir().join("distfiles");
+            let _ = std::fs::remove_dir_all(&work);
             std::fs::create_dir_all(&work)?;
             std::fs::create_dir_all(&dist)?;
             writeln!(log, "deck: fetching and unpacking {cp}-{version}, in the jail")?;
@@ -732,7 +736,9 @@ pub fn prepare(repo: &Path, s: &Subject, version: &str, v: &Versions, log: &mut 
                     c.args(["--ro", "/var/cache/distfiles"]);
                 }
                 c.arg("--rw")
-                    .arg(cache_dir())
+                    .arg(&work)
+                    .arg("--rw")
+                    .arg(&dist)
                     .args(["--", "env"])
                     .arg(format!("PORTAGE_TMPDIR={}", work.display()))
                     .arg(format!("DISTDIR={}", dist.display()))
@@ -757,11 +763,11 @@ pub fn prepare(repo: &Path, s: &Subject, version: &str, v: &Versions, log: &mut 
             }
             let pn = cp.rsplit('/').next().unwrap_or(cp);
             let pf = format!("{pn}-{version}");
-            let pdir = work.join("portage").join(cp.split('/').next().unwrap_or("")).join(&pf);
-            let src = pick_source(&pdir.join("work"), pn)?;
+            let rel = Path::new("portage").join(cp.split('/').next().unwrap_or("")).join(&pf).join("work");
+            let src = pick_source(&work, &rel, pn)?;
             let _ = std::fs::remove_dir_all(&tmp);
             std::fs::rename(&src, &tmp).with_context(|| format!("moving {}", src.display()))?;
-            let _ = std::fs::remove_dir_all(&pdir);
+            let _ = std::fs::remove_dir_all(&work);
         }
     }
     std::fs::rename(&tmp, &dir)?;
@@ -769,13 +775,21 @@ pub fn prepare(repo: &Path, s: &Subject, version: &str, v: &Versions, log: &mut 
 }
 
 /// The unpacked source in Portage's work directory: the one entry named after the package (others
-/// are vendored dependencies), or the only one, or all of it.
-fn pick_source(work: &Path, pn: &str) -> Result<PathBuf> {
+/// are vendored dependencies), or the only one, or all of it. Never a symlink: the build made them,
+/// and one could lead the agent's read-only mount anywhere.
+fn pick_source(root: &Path, rel: &Path, pn: &str) -> Result<PathBuf> {
+    // Nor on the way there, from the build's ROOT to its work directory REL.
+    let work = root.join(rel);
+    let real = work.canonicalize().with_context(|| format!("reading {}", work.display()))?;
+    if real != root.canonicalize()?.join(rel) {
+        bail!("{} leads elsewhere ({})", work.display(), real.display());
+    }
+    let work = &work;
     let entries: Vec<PathBuf> = std::fs::read_dir(work)
         .with_context(|| format!("reading {}", work.display()))?
         .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .map(|e| e.path())
-        .filter(|p| p.is_dir())
         .collect();
     let named = entries.iter().find(|p| {
         p.file_name()
