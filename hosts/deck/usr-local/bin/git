@@ -95,7 +95,11 @@ state() {
 	# The repository's own config as git reads it, includes followed, with where each line is from.
 	"$real" --git-dir="$gd" config --list --show-origin --includes --local 2>&1
 	[[ -f $gd/config.worktree ]] && "$real" -C / config --file "$gd/config.worktree" --list --show-origin --includes 2>&1
-	hooks=$("$real" --git-dir="$gd" config --get core.hooksPath 2>/dev/null) || hooks=$common/hooks
+	# Without what the caller sets for itself (git -c, which reaches child gits as
+	# GIT_CONFIG_PARAMETERS, or GIT_CONFIG_COUNT): a program running git with hooks off recorded
+	# "hooks /dev/null" as the repository's, and then every plain git looked like a change.
+	hooks=$(env -u GIT_CONFIG_PARAMETERS -u GIT_CONFIG_COUNT -u GIT_CONFIG_GLOBAL -u GIT_CONFIG_SYSTEM \
+		-u GIT_CONFIG_NOSYSTEM "$real" --git-dir="$gd" config --get core.hooksPath 2>/dev/null) || hooks=$common/hooks
 	[[ $hooks = /* ]] || hooks=$wt/$hooks
 	echo "hooks $hooks"
 	{
