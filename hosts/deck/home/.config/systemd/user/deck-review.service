@@ -7,5 +7,5 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/deck review auto
+ExecStart=/usr/bin/deck-patches review auto
 Nice=10
