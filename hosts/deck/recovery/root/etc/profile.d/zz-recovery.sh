@@ -7,20 +7,20 @@ deck_help() {
   1. Network      Saved Wi-Fi networks connect by themselves. Check:  ping -c1 gentoo.org
                   Otherwise:  iwctl station wlan0 connect <SSID>
 
-  2. Look         deck-mount                  main system read-only at /mnt/deck
+  2. Look         deck mount                  main system read-only at /mnt/deck
                   journalctl --root=/mnt/deck -b -1 -p warning              last boot's warnings
                   journalctl --root=/mnt/deck --namespace=vitals -b -1 -n 50  its last temperatures and power
-                  deck-mount check            offline btrfs check, read-only (when not mounted)
+                  deck mount check            offline btrfs check, read-only (when not mounted)
 
-  3. Repair       deck-rollback               root back to a snapshot (hourly, or from before an emerge)
-                  deck-mount off && deck-mount rw
-                  deck-chroot                 a shell inside the main system: emerge, dracut, systemctl
-                  deck-mount off              when done, then: reboot
+  3. Repair       deck rollback               root back to a snapshot (hourly, or from before an emerge)
+                  deck mount off && deck mount rw
+                  deck chroot                 a shell inside the main system: emerge, dracut, systemctl
+                  deck mount off              when done, then: reboot
 
   4. Help         curl -fsSL https://claude.ai/install.sh | bash     (or just: install-claude)
                   export PATH=$HOME/.local/bin:$PATH; claude
 
-  help prints this again; less /usr/local/share/RECOVERY.md has the rest.
+  deck lists these tools; help prints this again; less /usr/local/share/RECOVERY.md has the rest.
 
 TXT
 }

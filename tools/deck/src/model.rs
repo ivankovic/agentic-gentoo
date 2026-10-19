@@ -134,7 +134,7 @@ impl Model {
             .and_then(|r| self.tracked(r))
             .map(|t| t.upstream.as_str())
             .filter(|u| !u.is_empty())
-            .with_context(|| format!("{id} has no upstream project: U, or deck upstream {id} <URL>"))
+            .with_context(|| format!("{id} has no upstream project: U, or deck patches upstream {id} <URL>"))
     }
 
     /// Stages the patch's file on a branch of its upstream project's clone (`send::stage`).
@@ -168,7 +168,7 @@ impl Model {
 
     fn known(&self, id: &str) -> Result<()> {
         if !self.rows.iter().any(|r| r.id == id) {
-            bail!("no patch {id}; `deck patches` lists them");
+            bail!("no patch {id}; `deck patches patches` lists them");
         }
         Ok(())
     }

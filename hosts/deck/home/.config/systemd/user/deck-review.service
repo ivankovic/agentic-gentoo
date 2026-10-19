@@ -1,7 +1,7 @@
-# Reviews updates of watched code for security, within review.toml's daily budget (`deck review
+# Reviews updates of watched code for security, within review.toml's daily budget (`deck patches review
 # auto`, tools/deck): run by deck-review.timer. Findings show on the maintenance tile.
 [Unit]
-Description=Security reviews of updates to watched code (deck review auto)
+Description=Security reviews of updates to watched code (deck patches review auto)
 Wants=network-online.target
 After=network-online.target
 

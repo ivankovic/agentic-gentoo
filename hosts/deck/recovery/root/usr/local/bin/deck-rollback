@@ -8,14 +8,14 @@
 #
 # The kernels on the ESP aren't part of @. If the restored root lacks the modules of the kernel
 # that boots by default, it says so: pick a matching kernel in the boot menu (Space at power-on), or
-# reinstall it from inside: deck-mount rw; deck-chroot; emerge --config sys-kernel/gentoo-kernel.
+# reinstall it from inside: deck mount rw; deck chroot; emerge --config sys-kernel/gentoo-kernel.
 set -euo pipefail
 LUKS=/dev/disk/by-uuid/9e6393f4-5800-4971-aa10-aa2ea004c044
 TOP=/mnt/deck-top
 
-findmnt -rn /mnt/deck >/dev/null && { echo "deck-rollback: deck is mounted; run 'deck-mount off' first" >&2; exit 1; }
+findmnt -rn /mnt/deck >/dev/null && { echo "deck-rollback: deck is mounted; run 'deck mount off' first" >&2; exit 1; }
 if [[ -e /dev/mapper/deck ]] && cryptsetup status deck | grep -q readonly; then
-  echo "deck-rollback: deck is open read-only; run 'deck-mount off' first" >&2; exit 1
+  echo "deck-rollback: deck is open read-only; run 'deck mount off' first" >&2; exit 1
 fi
 [[ -e /dev/mapper/deck ]] || cryptsetup open "$LUKS" deck
 mkdir -p "$TOP"

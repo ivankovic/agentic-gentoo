@@ -688,7 +688,7 @@ pub fn prepare(repo: &Path, s: &Subject, version: &str, v: &Versions, log: &mut 
     std::fs::create_dir_all(&tmp)?;
     match s {
         Subject::Local(l) => {
-            writeln!(log, "deck: {} at {version}, from git", s.name())?;
+            writeln!(log, "deck-patches: {} at {version}, from git", s.name())?;
             let mut archive = Command::new("git")
                 .arg("-C")
                 .arg(repo)
@@ -724,7 +724,7 @@ pub fn prepare(repo: &Path, s: &Subject, version: &str, v: &Versions, log: &mut 
             let _ = std::fs::remove_dir_all(&work);
             std::fs::create_dir_all(&work)?;
             std::fs::create_dir_all(&dist)?;
-            writeln!(log, "deck: fetching and unpacking {cp}-{version}, in the jail")?;
+            writeln!(log, "deck-patches: fetching and unpacking {cp}-{version}, in the jail")?;
             // `ebuild clean <phase>` in the jail, as the user, with our own temporary and
             // download directories; what is already downloaded is linked from the system's.
             let ebuild_phase = |phase: &str, log: &mut dyn Write| -> Result<bool> {
@@ -755,7 +755,7 @@ pub fn prepare(repo: &Path, s: &Subject, version: &str, v: &Versions, log: &mut 
             // prepare applies Gentoo's patches and ours, but some packages' prepare needs build
             // tools that a package from the binhost never pulled in: then upstream's source.
             if !ebuild_phase("prepare", log)? {
-                writeln!(log, "deck: prepare failed; unpacking without Gentoo's patches")?;
+                writeln!(log, "deck-patches: prepare failed; unpacking without Gentoo's patches")?;
                 if !ebuild_phase("unpack", log)? {
                     bail!("ebuild {} unpack failed", ebuild.display());
                 }
@@ -1024,7 +1024,7 @@ pub fn run(repo: &Path, req: Request, v: &Versions, log: &mut dyn Write) -> Resu
                     if s.paths().is_empty() { String::new() } else { format!(" in {}", s.paths().join(", ")) }
                 ),
             )?;
-            writeln!(log, "deck: {old} → {target}: no change, nothing to review")?;
+            writeln!(log, "deck-patches: {old} → {target}: no change, nothing to review")?;
             return Ok(vec![]);
         }
         let text = if req.recheck {
@@ -1034,7 +1034,7 @@ pub fn run(repo: &Path, req: Request, v: &Versions, log: &mut dyn Write) -> Resu
         };
         let out = std::fs::File::create(&report)?;
         let err = std::fs::File::create(report.with_extension("log"))?;
-        writeln!(log, "deck: {} reviewing {} ({}) in {}", req.agent.name, s.name(), req.kind.label(), dir.display())?;
+        writeln!(log, "deck-patches: {} reviewing {} ({}) in {}", req.agent.name, s.name(), req.kind.label(), dir.display())?;
         let mut c = jail();
         c.arg("--ro")
             .arg(&dir)
@@ -1065,12 +1065,12 @@ pub fn run(repo: &Path, req: Request, v: &Versions, log: &mut dyn Write) -> Resu
                 continue;
             };
             if *found_in == target {
-                writeln!(log, "deck: {reference} not taken as fixed: found in this same version, {target}")?;
+                writeln!(log, "deck-patches: {reference} not taken as fixed: found in this same version, {target}")?;
                 continue;
             }
             let note = format!("fixed in {target}: {evidence}");
             decide(run, *index, "fixed", &note, &req.agent.name)?;
-            writeln!(log, "deck: {reference} fixed: {evidence}")?;
+            writeln!(log, "deck-patches: {reference} fixed: {evidence}")?;
         }
         Ok(parse_findings(&text))
     })();
@@ -1096,7 +1096,7 @@ pub fn run(repo: &Path, req: Request, v: &Versions, log: &mut dyn Write) -> Resu
     Ok(r)
 }
 
-/// Starts `deck review run` as a user unit, so it goes on after the caller is gone.
+/// Starts `deck patches review run` as a user unit, so it goes on after the caller is gone.
 pub fn start(host_dir: &Path, subject: &str, kind: Kind, agent: &str, full: bool, recheck: bool) -> Result<()> {
     let exe = std::env::current_exe().context("finding deck")?;
     let slug = subject.replace(['/', ' '], "_");

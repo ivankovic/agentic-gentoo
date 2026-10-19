@@ -1,4 +1,6 @@
-# deck
+# deck-patches
+
+`deck patches` (through the router, [hosts/deck/usr-local/bin/deck](../../hosts/deck/usr-local/bin/deck)).
 
 What is installed on a Gentoo machine, where each package came from, which carry local patches,
 where each patch stands upstream, and AI agents' security and performance reviews of the code that
@@ -9,22 +11,22 @@ Installed through Portage, from the local overlay's live ebuild `app-portage/dec
 what is committed here, pushed or not.
 
 ```sh
-deck                                       # the TUI: packages, patches, usage, review
-deck packages [--filter here|compiled|patched|overlay|…]
-deck patches
-deck mark <category/package/file> <state> [--url URL] [--note TEXT]
-deck upstream <category/package/file> <URL>
-deck stage <category/package/file>         # onto a branch of upstream's clone, staged; a terminal there
-deck fork | deck push | deck pr            # in that clone, one step each
-deck usage [--days N] [--spikes]           # CPU, memory, active time per package
-deck usage --pkg <label>                   # whose code it ran, who ran its code, its spikes
-deck review [list]                         # every subject, where its reviews stand, best next first
-deck review next [--kind security|performance]
-deck review run <subject> [--kind K] [--agent A] [--full]
-deck review auto                           # security reviews of updates, within the daily budget
-deck review findings [<subject>] [--all]   # findings, open ones first, and what was decided
-deck review decide <run> <n> <open|fixed|not-applicable|wont-fix> [--note TEXT]
-deck review recheck <subject>              # an agent marks the open findings it finds fixed
+deck patches                               # the TUI: packages, patches, usage, review
+deck patches packages [--filter here|compiled|patched|overlay|…]
+deck patches patches
+deck patches mark <category/package/file> <state> [--url URL] [--note TEXT]
+deck patches upstream <category/package/file> <URL>
+deck patches stage <category/package/file>         # onto a branch of upstream's clone, staged; a terminal there
+deck patches fork | deck patches push | deck patches pr            # in that clone, one step each
+deck patches usage [--days N] [--spikes]           # CPU, memory, active time per package
+deck patches usage --pkg <label>                   # whose code it ran, who ran its code, its spikes
+deck patches review [list]                         # every subject, where its reviews stand, best next first
+deck patches review next [--kind security|performance]
+deck patches review run <subject> [--kind K] [--agent A] [--full]
+deck patches review auto                           # security reviews of updates, within the daily budget
+deck patches review findings [<subject>] [--all]   # findings, open ones first, and what was decided
+deck patches review decide <run> <n> <open|fixed|not-applicable|wont-fix> [--note TEXT]
+deck patches review recheck <subject>              # an agent marks the open findings it finds fixed
 ```
 
 It reads the host's directory, `~/src/agentic-gentoo/hosts/$(hostname)` unless `--host-dir` or
@@ -77,17 +79,17 @@ The first six count as open.
 ## Sending a patch upstream
 
 Each step is one command and only runs when asked: the commit message and the pull request's
-text are the user's to write, and nothing reaches upstream until `deck push`.
+text are the user's to write, and nothing reaches upstream until `deck patches push`.
 
-1. `deck stage <id>` (or `S`): clones the patch's upstream project to `~/3p/<host>/<owner>/<repo>`
+1. `deck patches stage <id>` (or `S`): clones the patch's upstream project to `~/3p/<host>/<owner>/<repo>`
    if it isn't there, makes a branch named after the patch file (`0002-ask-before.patch` goes on
    `ask-before`) from upstream's default branch, applies the patch with
    `git apply --3way --index`, staged and uncommitted, and opens a terminal there. A branch that
    exists already is left as it is; uncommitted changes in the clone stop it.
 2. Review (`git diff --cached`), adapt it to upstream's current code and checks, `git commit`.
-3. `deck fork`: `gh repo fork`, as the remote `fork`; `origin` stays upstream.
-4. `deck push`: the branch to the fork, once it has a commit of its own.
-5. `deck pr`: opens the browser on a new pull request from the fork's branch, with upstream's
+3. `deck patches fork`: `gh repo fork`, as the remote `fork`; `origin` stays upstream.
+4. `deck patches push`: the branch to the fork, once it has a commit of its own.
+5. `deck patches pr`: opens the browser on a new pull request from the fork's branch, with upstream's
    template. Run it again once the pull request exists: it prints its URL and marks the patch
    `sent` with it, if it was untracked, `unsent` or `reported`.
 
@@ -170,7 +172,7 @@ open ones.
 Whether one is fixed the agents decide: every review gets the open findings numbered and names, in
 a `resolved` block, those the code it read shows fixed, with where and how; deck marks them fixed
 (by that agent), but only in a newer version than the one the finding was made in: unchanged code
-can't have fixed it, whatever a comment in it tells the agent. `c` (or `deck review recheck`) asks for only that check, against the installed
+can't have fixed it, whatever a comment in it tells the agent. `c` (or `deck patches review recheck`) asks for only that check, against the installed
 version, without looking for anything new. What is the owner's to judge is decided with a note:
 `n` (doesn't apply here), `w` (won't fix), `x` (fixed, when no agent could see it) or `o` (open
 again, also to undo an agent's call), in the run's record. The next review of the subject is given every earlier finding
@@ -180,7 +182,7 @@ a change fixes it reports with severity `fix`, filed as fixed. Open findings sta
 later reviews, full ones too, until fixed or decided. The Review tab's Open column and
 the maintenance tile count what is still undecided.
 
-**Every day**, `deck-review.timer` (a user timer) runs `deck review auto`: security reviews of
+**Every day**, `deck-review.timer` (a user timer) runs `deck patches review auto`: security reviews of
 the changes in watched code, updates first, at most `budget.auto_per_day` a day. Findings
 not decided yet and failed automatic runs show on the maintenance tile (`deck-attention`).
 
@@ -190,7 +192,7 @@ unreported vulnerability: it goes upstream privately, never into this public rep
 
 ## Usage accounting: deck-usaged and deck-focusd
 
-Two services record usage; `deck usage` and the Usage tab merge them per package.
+Two services record usage; `deck patches usage` and the Usage tab merge them per package.
 
 - `deck-usaged` ([systemd/deck-usaged.service](systemd/deck-usaged.service)), a root service:
   CPU, memory and a CPU profile per package, hour by hour, into `/var/lib/deck/usage.db`.
@@ -237,7 +239,7 @@ follows wrappers that start one program and wait for it (a script such as `jail`
 jailed Claude Code counts as `user:claude`, not bash. Wayland's idle notification (ext-idle-notify)
 fires after 60 s without input; those 60 s are dropped too, so active time is time with input at
 most a minute apart. An idle inhibitor (a playing video) keeps the session active. It records the
-program's path; `deck` maps paths to packages as deck-usaged does. `deck-focusd --windows` shows
+program's path; `deck-patches` maps paths to packages as deck-usaged does. `deck-focusd --windows` shows
 what each open window counts as.
 
 **Spikes.** Seconds are sorted by how much CPU the package used in them (up to 5% of a core,

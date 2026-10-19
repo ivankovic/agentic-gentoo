@@ -17,7 +17,7 @@ events (crashes, an unclean shutdown) as seen: the tile drops them until a newer
             (etc/deck-health/portage.py, run as root after syncs and emerges)
   snapshots build output inside the hourly snapshots of @home: a cargo target/ in ~/src, or
             ~/.cache, that isn't its own subvolume (fix: deck-nosnap DIR)
-  reviews   findings of AI reviews (deck review, tools/deck) nobody has decided about yet, and
+  reviews   findings of AI reviews (deck patches review, tools/deck) nobody has decided about yet, and
             the daily automatic reviews that failed; decide in deck's Review tab (f, then x/n/w)
   disk      / or /efi more than 85% full (btrfs slows down and can fail to write when nearly full;
             a full ESP fails the next kernel install)

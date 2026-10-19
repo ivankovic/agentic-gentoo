@@ -41,7 +41,7 @@ PROJECTS = pathlib.Path.home() / ".claude/projects"
 # What /usr/local/bin/jail gives jailed programs as their home.
 JAIL_HOME = pathlib.Path(os.environ.get("XDG_DATA_HOME") or pathlib.Path.home() / ".local/share") / "jail/home"
 INTERVAL = 10
-RERUN = {"ssh", "nvim", "vim", "mmm", "deck"}
+RERUN = {"ssh", "nvim", "vim", "mmm", "deck-patches"}
 # Discharging at this or less when the service stops: upower is powering off (its
 # PercentageAction is 2%), so the session should come back.
 LOW_BATTERY = 5

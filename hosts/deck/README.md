@@ -53,6 +53,14 @@ Deploy with `./deploy.sh deck` (diff) and `./deploy.sh deck apply` from the repo
 tracked files under `home/`, `etc/`, `portage/` and `usr-local/` are installed; nothing on the system is deleted.
 Secrets (SSH keys, `gh` token, Wi-Fi passwords) stay on the machine; see [Secrets](../../README.md#secrets).
 
+**Our tools are `deck <tool>`.** [usr-local/bin/deck](usr-local/bin/deck) routes, as git does:
+`deck mail sync` runs `deck-mail sync`, `deck` alone lists the tools this system has, and
+`deck help <tool>` shows one's header (scripts aren't run for it). A `deck-*` file is one of ours;
+daemons and what units run (`deck-usaged`, `deck-focusd`, `deck-attention`, `deck-terminals`) are
+`deck-*` too, unlisted. The recovery system has the same router and its own tools (`deck mount`,
+`deck chroot`, `deck rollback`); each says where the other's are. Named for what they are instead:
+`jail`, `mmm`, and the `git` and `emerge` wrappers.
+
 ## Configuration notes
 
 - **Keyboard.** Console and LUKS prompt use `KEYMAP=us`. niri uses `us,ch,hr`, US by
@@ -426,7 +434,7 @@ it opens a terminal with the details and the failed units' logs.
 - **Updates and rollback.** `sudo emerge` ([usr-local/sbin/emerge](usr-local/sbin/emerge)) first
   takes a read-only snapshot of `@`, `/.snapshots/@.pre-emerge.<time>` (the last 5 kept; btrbk
   ignores them), unless the command changes nothing (`-p`, `--search`, `--sync`, ...). To go back,
-  boot the recovery system and run `deck-rollback`: it lists the snapshots of `@`, renames `@` to
+  boot the recovery system and run `deck rollback`: it lists the snapshots of `@`, renames `@` to
   `@.broken.<time>` and makes the chosen snapshot the new `@`, then checks that the kernels on the
   ESP still have their modules in it.
 - **Previous kernel kept.** Each kernel that boots far enough for the health check is recorded as
@@ -444,7 +452,7 @@ it opens a terminal with the details and the failed units' logs.
   when @world is more than 14 days behind, a `@preserved-rebuild` is due, depclean is blocked or
   Gentoo news is unread.
 - **Code reviews.** AI agents review our own code and the installed packages that matter for
-  security and performance ([review.toml](review.toml); `deck review` and deck's Review tab,
+  security and performance ([review.toml](review.toml); `deck patches review` and deck's Review tab,
   [tools/deck](../../tools/deck/README.md#reviews)). The first review of each is a baseline;
   after that each update gets a review of its change, daily for security
   ([deck-review.timer](home/.config/systemd/user/deck-review.timer), a user timer, enabled with
@@ -463,7 +471,7 @@ it opens a terminal with the details and the failed units' logs.
   media errors. The SSD also counts shutdowns it wasn't warned of; when that goes up, the previous
   boot ended in a crash, reset or power loss: the panel says so for a week (until seen) and a
   scrub starts. btrfs needs no repair pass after a crash (it mounts at its last commit); the offline
-  `btrfs check --readonly` is `deck-mount check` in the recovery system. Report:
+  `btrfs check --readonly` is `deck mount check` in the recovery system. Report:
   `/var/lib/deck-health/report`.
 - **ESP copy.** The EFI system partition is FAT (no checksums) and holds every kernel and the
   recovery's UKI. The health check mirrors its files to `/var/lib/deck-health/esp` (root only),
@@ -555,16 +563,16 @@ generate the gitleaks ebuild below).
 
 ## Packages and patches
 
-`deck` ([tools/deck](../../tools/deck/)) lists every installed package by origin and the local patches each carries.
+`deck patches` ([tools/deck](../../tools/deck/)) lists every installed package by origin and the local patches each carries.
 [upstream.toml](upstream.toml) records where each patch stands upstream (sent, in review,
-rejected, backport…), one timestamped event per change; `deck` edits it, as do `deck mark` and
-hand edits. `deck stage`, `deck fork`, `deck push` and `deck pr` take a patch upstream one step at a
+rejected, backport…), one timestamped event per change; the TUI edits it, as do `deck patches mark` and
+hand edits. `deck patches stage`, `deck patches fork`, `deck patches push` and `deck patches pr` take a patch upstream one step at a
 time, with the commit message and pull request written by hand ([tools/deck](../../tools/deck/README.md#sending-a-patch-upstream)).
 
-`deck` and its services come from the overlay's `app-portage/deck` (live, built from this
+`deck-patches` and its services come from the overlay's `app-portage/deck` (live, built from this
 clone). `deck-usaged` (root) records CPU, memory and a CPU profile per package per hour, with
 bursts, into `/var/lib/deck/usage.db`; `deck-focusd` (user) records active time per program into
-`~/.local/state/deck/focus.db`. `deck usage` and deck's Usage tab read both. How they count:
+`~/.local/state/deck/focus.db`. `deck patches usage` and deck's Usage tab read both. How they count:
 [tools/deck](../../tools/deck/README.md).
 
 ## Local overlay
@@ -578,7 +586,7 @@ bursts, into `/var/lib/deck/usage.db`; `deck-focusd` (user) records active time 
 | `dev-util/omnidiff` | `9999` (installed, in world) | Live: clones `main`, crates from Cargo.lock at unpack; `**` keyword. Rebuild with `emerge @live-rebuild` |
 | | `0.2.0` | Upstream's release ebuild from omnidiff's `packaging/gentoo`, unchanged (still says `RUST_MIN_VER=1.88.0`; Cargo.toml needs 1.92) |
 | `dev-util/gitleaks` | `8.30.1` (in world) | Secret scanner; `.githooks/scan-secrets` runs it when installed. Go modules via `EGO_SUM` from upstream's `go.sum` (deprecated in ::gentoo, but needs no hosted dependency tarball; QA notice at unpack). `~amd64` keyword. [portage/mirrors](portage/mirrors) pins Go downloads to proxy.golang.org: goproxy.io served HTML pages for 76 of the 426 modules, which went into the first Manifest. Regenerating the Manifest: check every distfile against upstream's `go.sum` h1 hashes first |
-| `app-portage/deck` | `9999` (in world) | This repository's [tools/deck](../../tools/deck/): the `deck` TUI, `deck-usaged` (system service) and `deck-focusd` (user service). Live: git-r3 clones this repository, pointed at the local clone by [env/deck-local-source.conf](portage/env/deck-local-source.conf), so committed work builds before it is pushed; crates from Cargo.lock at unpack. `**` keyword; CC-BY-NC-ND-4.0 accepted for it alone |
+| `app-portage/deck` | `9999` (in world) | This repository's [tools/deck](../../tools/deck/): `deck-patches` (the TUI, `deck patches`), `deck-usaged` (system service) and `deck-focusd` (user service). Live: git-r3 clones this repository, pointed at the local clone by [env/deck-local-source.conf](portage/env/deck-local-source.conf), so committed work builds before it is pushed; crates from Cargo.lock at unpack. `**` keyword; CC-BY-NC-ND-4.0 accepted for it alone |
 | `mail-client/mmm` | `9999` (in world) | This repository's [tools/mmm](../../tools/mmm/): Marko's Mail Machine, the mail reader over notmuch that replaces aerc. Live, from the local clone like `app-portage/deck`; crates from Cargo.lock at unpack. `**` keyword; CC-BY-NC-ND-4.0 accepted for it alone |
 | `games-board/chess-tui` | `2.7.1` (in world) | Terminal chess (Rust, ratatui): two players, against a UCI engine (`games-board/stockfish`, in world; `chess-tui -e /usr/bin/stockfish` once, the path is remembered) or on Lichess. [portage/patches/games-board/chess-tui-2.7.1/](portage/patches/games-board/chess-tui-2.7.1/) backports upstream 7d722c9, which saves local and bot games on quit and offers *R to resume* in the menu; it is newer than 2.7.1, and the versioned directory stops it applying to the next release. Its 0002, ours, asks before a new game or `r` mid-game discards a saved game (y: new game, r: resume, n/Esc: cancel); upstream still deletes it silently. CRATES and licenses from `pycargoebuild -C -i` on the tag (it needs Portage's Python modules: a venv with `--system-site-packages`); every crate checked against Cargo.lock's sha256. `sound` USE (default on) pulls ALSA. `~amd64` keyword |
 

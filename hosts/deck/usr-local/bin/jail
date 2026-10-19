@@ -4,7 +4,7 @@
 #   jail                 a shell in the jail, in the current directory if it is under ~/src
 #   jail claude          any program, e.g. a coding agent
 #   jail [OPTIONS] [--] COMMAND
-#     --no-src           without ~/src: for programs that read untrusted code (deck review)
+#     --no-src           without ~/src: for programs that read untrusted code (deck patches review)
 #     --ro DIR, --rw DIR one more directory, read-only or writable (repeatable)
 #     --chdir DIR        start there instead of the current directory
 #

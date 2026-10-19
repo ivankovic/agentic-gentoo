@@ -1,4 +1,4 @@
-# CPU, memory and profile per package, for `deck usage` and deck's Usage tab.
+# CPU, memory and profile per package, for `deck patches usage` and deck's Usage tab.
 [Unit]
 Description=Per-package CPU and memory accounting (deck)
 Documentation=https://github.com/ivankovic/agentic-gentoo/tree/main/tools/deck

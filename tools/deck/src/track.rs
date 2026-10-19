@@ -105,7 +105,7 @@ pub struct Event {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Tracked {
-    /// `category/package/file`, as `deck patches` prints it.
+    /// `category/package/file`, as `deck patches patches` prints it.
     pub id: String,
     /// The upstream project the patch is meant for.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -129,7 +129,7 @@ pub struct Tracking {
 const HEADER: &str = "\
 # Local patches on their way upstream, kept by deck (tools/deck).
 # One [[patch]] per patch; each [[patch.event]] is a change of state, and the last is the current
-# one. Edit with `deck`, `deck mark` or by hand.
+# one. Edit with `deck patches` (the TUI), `deck patches mark` or by hand.
 
 ";
 

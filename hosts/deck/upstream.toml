@@ -1,6 +1,6 @@
 # Local patches on their way upstream, kept by deck (tools/deck).
 # One [[patch]] per patch; each [[patch.event]] is a change of state, and the last is the current
-# one. Edit with `deck`, `deck mark` or by hand.
+# one. Edit with `deck patches` (the TUI), `deck patches mark` or by hand.
 
 [[patch]]
 id = "dev-libs/gmime/0001-groups-hold-mailboxes-not-groups.patch"
@@ -11,6 +11,12 @@ at = "2026-10-19T08:30:22+02:00"
 state = "reported"
 url = "https://github.com/jstedfast/gmime/issues/184"
 note = "asked whether they want it fixed, and patched by us"
+
+[[patch.event]]
+at = "2026-10-19T18:33:29+02:00"
+state = "rejected"
+url = "It's a feature, not a bug."
+note = "It's a feature, not a bug."
 
 [[patch]]
 id = "games-board/chess-tui/0001-resume-local-and-bot-games.patch"

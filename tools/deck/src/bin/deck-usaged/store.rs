@@ -1,4 +1,4 @@
-//! Hourly totals and spikes in SQLite. The rollback journal (not WAL) lets `deck usage` read the
+//! Hourly totals and spikes in SQLite. The rollback journal (not WAL) lets `deck patches usage` read the
 //! file without write access to its directory.
 
 use anyhow::{Context, Result};

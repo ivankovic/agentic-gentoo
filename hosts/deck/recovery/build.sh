@@ -35,6 +35,7 @@ rm -f "$ROOT/etc/os-release"
 cp -rT --preserve=mode,timestamps "$here/root" "$ROOT"
 chown -R root:root "$ROOT/etc" "$ROOT/usr/local"
 install -m 644 "$here/README.md" "$ROOT/usr/local/share/RECOVERY.md"
+install -m 755 "$here/../usr-local/bin/deck" "$ROOT/usr/local/bin/deck"  # the router: lists what this system has
 
 # Console root login without a password (autologin on tty1, and the emergency shell must work);
 # the LUKS passphrase is the gate. No sshd.

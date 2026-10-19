@@ -223,10 +223,10 @@ pub fn push(dir: &Path, tty: bool) -> Result<()> {
         bail!("{branch} has no commit on top of {base} yet: git commit first");
     }
     if remote_repo(dir, "fork").is_err() {
-        bail!("no remote fork yet: run deck fork first");
+        bail!("no remote fork yet: run deck patches fork first");
     }
     if tty && !git(dir, &["status", "--porcelain", "--untracked-files=no"])?.is_empty() {
-        println!("deck: note: uncommitted changes stay here, only commits are pushed");
+        println!("deck-patches: note: uncommitted changes stay here, only commits are pushed");
     }
     run(
         dir,
@@ -247,7 +247,7 @@ pub struct Pr {
 pub fn pr(dir: &Path, tty: bool) -> Result<Pr> {
     let branch = current_branch(dir)?;
     let repo = remote_repo(dir, "origin")?;
-    let fork = remote_repo(dir, "fork").context("no remote fork yet: run deck fork first")?;
+    let fork = remote_repo(dir, "fork").context("no remote fork yet: run deck patches fork first")?;
     let owner = fork.split('/').next().unwrap_or_default();
     if let Some(url) = find_pr(&repo, owner, &branch)? {
         return Ok(Pr {

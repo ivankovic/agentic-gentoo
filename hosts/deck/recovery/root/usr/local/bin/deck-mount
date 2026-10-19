@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# deck-mount [rw]: open deck's main LUKS partition and mount its subvolumes under /mnt/deck.
-# Read-only by default, so looking can't change anything; `deck-mount rw` remounts writable for
-# repairs (and `deck-chroot` needs it). `deck-mount off` unmounts and closes.
-# `deck-mount check` opens it read-only without mounting and runs `btrfs check --readonly`: the
+# deck mount [rw]: open deck's main LUKS partition and mount its subvolumes under /mnt/deck.
+# Read-only by default, so looking can't change anything; `deck mount rw` remounts writable for
+# repairs (and `deck chroot` needs it). `deck mount off` unmounts and closes.
+# `deck mount check` opens it read-only without mounting and runs `btrfs check --readonly`: the
 # offline check of btrfs's metadata, which can't run on the live system. It changes nothing.
 # (Never `btrfs check --repair` without a backup and advice: it can make damage worse.)
 set -euo pipefail
@@ -17,11 +17,11 @@ if [[ $mode == off ]]; then
 fi
 
 if [[ $mode == check ]]; then
-  findmnt -rn "$MNT" >/dev/null && { echo "deck-mount: mounted; run 'deck-mount off' first" >&2; exit 1; }
+  findmnt -rn "$MNT" >/dev/null && { echo "deck-mount: mounted; run 'deck mount off' first" >&2; exit 1; }
   [[ -e /dev/mapper/deck ]] || cryptsetup open --readonly "$LUKS" deck
   rc=0
   btrfs check --readonly --progress /dev/mapper/deck || rc=$?
-  echo "deck-mount: btrfs check exited $rc ($([[ $rc == 0 ]] && echo 'no errors' || echo 'errors: see above')); 'deck-mount off' closes it"
+  echo "deck-mount: btrfs check exited $rc ($([[ $rc == 0 ]] && echo 'no errors' || echo 'errors: see above')); 'deck mount off' closes it"
   exit $rc
 fi
 
@@ -30,7 +30,7 @@ if [[ ! -e /dev/mapper/deck ]]; then
 fi
 
 if findmnt -rn "$MNT" >/dev/null; then
-  [[ $mode == rw ]] && { cryptsetup status deck | grep -q readonly && { echo "deck-mount: opened read-only; run 'deck-mount off' then 'deck-mount rw'" >&2; exit 1; }; mount -o remount,rw "$MNT"; }
+  [[ $mode == rw ]] && { cryptsetup status deck | grep -q readonly && { echo "deck-mount: opened read-only; run 'deck mount off' then 'deck mount rw'" >&2; exit 1; }; mount -o remount,rw "$MNT"; }
 else
   mkdir -p "$MNT"
   opts=$([[ $mode == rw ]] && echo rw || echo ro)
@@ -47,5 +47,5 @@ Look:     journalctl --root=/mnt/deck --list-boots
           journalctl --root=/mnt/deck -b -1 -p warning
           journalctl --root=/mnt/deck --namespace=vitals -b -1 -n 50    (hardware, last 100 s)
           ls /mnt/deck/var/lib/systemd/pstore        btrfs subvolume list /mnt/deck/.snapshots
-Repair:   deck-mount rw && deck-chroot
+Repair:   deck mount rw && deck chroot
 TXT

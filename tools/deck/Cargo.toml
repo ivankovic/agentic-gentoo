@@ -5,6 +5,11 @@ edition = "2024"
 description = "Installed Gentoo packages, where they came from, local patches and their way upstream"
 publish = false
 
+# `deck` is the router (hosts/deck/usr-local/bin/deck): this is `deck patches`.
+[[bin]]
+name = "deck-patches"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

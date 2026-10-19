@@ -7,7 +7,7 @@
 # input as root, or files from strangers; 4 the lock screen; 5 the rest worth a look.
 
 [budget]
-# `deck review auto` (daily, after the sync) reviews pending updates of watched code, at most this
+# `deck patches review auto` (daily, after the sync) reviews pending updates of watched code, at most this
 # many runs a day. Full reviews (baselines) only run when asked for.
 auto_per_day = 3
 

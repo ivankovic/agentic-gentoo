@@ -768,7 +768,7 @@ impl App {
             },
             Action::Push(dir) => match send::push(&dir, false) {
                 Ok(()) => "pushed · S opens the pull request in the browser".into(),
-                Err(e) => format!("not pushed: {e:#} (deck push in the clone shows it all)"),
+                Err(e) => format!("not pushed: {e:#} (deck patches push in the clone shows it all)"),
             },
             Action::Review(subject, kind, full) => {
                 match review::start(&self.m.host_dir, &subject, kind, &self.agent_name(), full, false) {
@@ -986,7 +986,7 @@ impl App {
             Line::from(""),
             Line::from("f lists a subject's findings. Every review also checks the open ones and marks what it finds fixed, as fixed (agent), with where; c asks for just that check. Decide the rest: n doesn't apply here, w won't fix, x fixed (each with a note), o open again. The next review is given every earlier finding with its decision: it won't raise what doesn't apply or won't be fixed without saying what changed, and checks the fixes. Open shows what's left to decide; the maintenance tile shows it too."),
             Line::from(""),
-            Line::from("Score is how worthwhile it is next: for security, the tier from review.toml (1 our own code … 5); for performance, the share of CPU time and profile samples deck-usaged measured. The list is sorted by it. deck review auto, daily, reviews updates of watched code within the budget in review.toml."),
+            Line::from("Score is how worthwhile it is next: for security, the tier from review.toml (1 our own code … 5); for performance, the share of CPU time and profile samples deck-usaged measured. The list is sorted by it. deck patches review auto, daily, reviews updates of watched code within the budget in review.toml."),
         ];
         let title = self.selected_item().map_or("Review".into(), |i| i.subject.name());
         (title, body, keys)

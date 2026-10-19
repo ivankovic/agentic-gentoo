@@ -47,7 +47,7 @@ enum Cmd {
     Patches,
     /// Record a change of a patch's upstream state, timestamped now
     Mark {
-        /// The patch, as `deck patches` prints it: category/package/file
+        /// The patch, as `deck patches patches` prints it: category/package/file
         id: String,
         #[arg(value_enum)]
         state: State,
@@ -108,7 +108,7 @@ enum ReviewCmd {
     },
     /// Run one review now: the difference from the last reviewed version, or the whole
     Run {
-        /// ours/<name> or category/package, as deck review list prints it
+        /// ours/<name> or category/package, as deck patches review list prints it
         subject: String,
         #[arg(long, value_enum, default_value = "security")]
         kind: Kind,
@@ -144,9 +144,9 @@ enum ReviewCmd {
     },
     /// Decide about a finding (the next review is told): open, fixed, not-applicable, wont-fix
     Decide {
-        /// The run, as deck review findings prints it
+        /// The run, as deck patches review findings prints it
         run: String,
-        /// The finding's number in that run, as deck review findings prints it
+        /// The finding's number in that run, as deck patches review findings prints it
         index: usize,
         decision: String,
         #[arg(long, default_value = "")]
@@ -155,7 +155,7 @@ enum ReviewCmd {
 }
 
 fn main() -> Result<()> {
-    // Die quietly on a closed pipe (`deck usage | head`), as command-line tools do.
+    // Die quietly on a closed pipe (`deck patches usage | head`), as command-line tools do.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     let cli = Cli::parse();
     let host_dir = match cli.host_dir {
@@ -185,7 +185,7 @@ fn main() -> Result<()> {
     match &cli.cmd {
         Some(Cmd::Fork { dir }) => {
             let fork = send::fork(dir, true)?;
-            println!("deck: your fork is {fork}, the remote fork");
+            println!("deck-patches: your fork is {fork}, the remote fork");
             return Ok(());
         }
         Some(Cmd::Push { dir }) => return send::push(dir, true),
@@ -238,15 +238,15 @@ fn main() -> Result<()> {
         Some(Cmd::Stage { id, no_terminal }) => {
             let s = m.stage(&id)?;
             if s.fresh {
-                println!("deck: staged on branch {} in {}", s.branch, s.dir.display());
+                println!("deck-patches: staged on branch {} in {}", s.branch, s.dir.display());
             } else {
                 println!(
-                    "deck: branch {} in {} was there already, left as it is",
+                    "deck-patches: branch {} in {} was there already, left as it is",
                     s.branch,
                     s.dir.display()
                 );
             }
-            println!("deck: there: git diff --cached, git commit, then deck fork, deck push, deck pr");
+            println!("deck-patches: there: git diff --cached, git commit, then deck patches fork, deck patches push, deck patches pr");
             if !no_terminal {
                 send::terminal(&s.dir)?;
             }
@@ -255,20 +255,20 @@ fn main() -> Result<()> {
         Some(Cmd::Pr { dir }) => {
             let pr = send::pr(&dir, true)?;
             let Some(url) = pr.url else {
-                println!("deck: once the pull request is created, run deck pr again to mark the patch sent");
+                println!("deck-patches: once the pull request is created, run deck patches pr again to mark the patch sent");
                 return Ok(());
             };
             let Some(row) = m.staged_on(&dir, &pr.branch) else {
-                println!("deck: {url} (no local patch staged on {})", pr.branch);
+                println!("deck-patches: {url} (no local patch staged on {})", pr.branch);
                 return Ok(());
             };
             let id = row.id.clone();
             match m.last_event(row).map(|e| e.state) {
                 None | Some(State::Unsent | State::Reported) => {
                     m.record(&id, State::Sent, url.clone(), String::new())?;
-                    println!("deck: {url}; {id} marked sent");
+                    println!("deck-patches: {url}; {id} marked sent");
                 }
-                Some(s) => println!("deck: {url}; {id} is {}", s.label()),
+                Some(s) => println!("deck-patches: {url}; {id} is {}", s.label()),
             }
             Ok(())
         }
@@ -332,7 +332,7 @@ fn review_cmd(host_dir: &std::path::Path, cmd: &ReviewCmd) -> Result<()> {
                         _ => "the whole of it, a baseline".into(),
                     };
                     println!("{} review of {}: {what} (score {s:.0})", k.label(), i.subject.name());
-                    println!("deck review run {} --kind {}", i.subject.name(), k.label());
+                    println!("deck patches review run {} --kind {}", i.subject.name(), k.label());
                 }
                 _ => println!("nothing to review"),
             }
@@ -343,7 +343,7 @@ fn review_cmd(host_dir: &std::path::Path, cmd: &ReviewCmd) -> Result<()> {
             let item = items
                 .iter()
                 .find(|i| i.subject.name() == *subject)
-                .with_context(|| format!("no subject {subject}; deck review list shows them"))?;
+                .with_context(|| format!("no subject {subject}; deck patches review list shows them"))?;
             run_review(&cfg, &repo, item, *kind, agent.as_deref(), *full, false, false, &usage_db)
         }
         ReviewCmd::Prepare { subject, version } => {
@@ -351,7 +351,7 @@ fn review_cmd(host_dir: &std::path::Path, cmd: &ReviewCmd) -> Result<()> {
             let item = items
                 .iter()
                 .find(|i| i.subject.name() == *subject)
-                .with_context(|| format!("no subject {subject}; deck review list shows them"))?;
+                .with_context(|| format!("no subject {subject}; deck patches review list shows them"))?;
             let v = match version {
                 Some(v) => v.clone(),
                 None => item.versions.target().context("no version")?.to_string(),
@@ -366,7 +366,7 @@ fn review_cmd(host_dir: &std::path::Path, cmd: &ReviewCmd) -> Result<()> {
             let item = items
                 .iter()
                 .find(|i| i.subject.name() == *subject)
-                .with_context(|| format!("no subject {subject}; deck review list shows them"))?;
+                .with_context(|| format!("no subject {subject}; deck patches review list shows them"))?;
             run_review(&cfg, &repo, item, Kind::Security, agent.as_deref(), false, false, true, &usage_db)
         }
         ReviewCmd::Findings { subject, all } => {

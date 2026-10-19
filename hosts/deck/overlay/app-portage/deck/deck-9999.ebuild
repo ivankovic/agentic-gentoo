@@ -34,7 +34,7 @@ src_unpack() {
 
 src_install() {
 	local t="$(cargo_target_dir)"
-	dobin "${t}/deck" "${t}/deck-focusd"
+	dobin "${t}/deck-patches" "${t}/deck-focusd"
 	# A root service: not in a user's PATH.
 	dosbin "${t}/deck-usaged"
 	systemd_dounit systemd/deck-usaged.service
