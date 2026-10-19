@@ -9,6 +9,8 @@
 #   hosts/<host>/etc/      -> /etc       (sudo)
 #   hosts/<host>/portage/  -> /etc/portage (sudo)
 #   hosts/<host>/usr-local/ -> /usr/local  (sudo)
+#   hosts/<host>/recovery/root/, README.md -> /etc/deck-recovery/root/, RECOVERY.md (sudo): the
+#     recovery system's files, which its update (etc/deck-recovery/update.sh) puts on it
 # Everything else (state/, README.md, ...) is a record, not deployed.
 #
 # Only files tracked by git are deployed, in their working-tree version. Deploying only ever goes
@@ -34,13 +36,16 @@ dir=hosts/$host
 
 # Prints "<repo path>\t<target path>\t<sudo|user>" for every tracked, deployable file.
 targets() {
-  git ls-files -z -- "$dir/home" "$dir/etc" "$dir/portage" "$dir/usr-local" | while IFS= read -r -d '' src; do
+  git ls-files -z -- "$dir/home" "$dir/etc" "$dir/portage" "$dir/usr-local" "$dir/recovery/root" \
+    "$dir/recovery/README.md" | while IFS= read -r -d '' src; do
     rel=${src#"$dir"/}
     case $rel in
       home/*) printf '%s\t%s\tuser\n' "$src" "$HOME/${rel#home/}" ;;
       etc/*) printf '%s\t%s\tsudo\n' "$src" "/etc/${rel#etc/}" ;;
       portage/*) printf '%s\t%s\tsudo\n' "$src" "/etc/portage/${rel#portage/}" ;;
       usr-local/*) printf '%s\t%s\tsudo\n' "$src" "/usr/local/${rel#usr-local/}" ;;
+      recovery/root/*) printf '%s\t%s\tsudo\n' "$src" "/etc/deck-recovery/root/${rel#recovery/root/}" ;;
+      recovery/README.md) printf '%s\t%s\tsudo\n' "$src" /etc/deck-recovery/RECOVERY.md ;;
     esac
   done
 }

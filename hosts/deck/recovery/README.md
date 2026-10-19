@@ -47,7 +47,10 @@ The initramfs is generic, built inside systemd-nspawn, with only dm-crypt and th
 
 [deck-recovery-update.timer](../etc/systemd/system/deck-recovery-update.timer) runs weekly on AC
 and updates the installed recovery in place once its last update is 25 days old
-([refresh.sh](../etc/deck-recovery/refresh.sh): opens p3, update.sh, rebuilds the UKI). It opens
+([refresh.sh](../etc/deck-recovery/refresh.sh): opens p3, update.sh, rebuilds the UKI). update.sh
+first puts our files on it: `root/` here and this README, as `./deploy.sh deck apply` last installed
+them in `/etc/deck-recovery/`, and the `deck` router from `/usr/local/bin`. So a change here reaches
+the recovery once deployed, at its next update (`refresh.sh --force`: now). It opens
 p3 with a key file, `/etc/deck-recovery/p3.key`, on the main system's encrypted root; anyone who
 can read that already has the main system. Enroll it once:
 

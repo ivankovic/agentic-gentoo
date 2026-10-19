@@ -43,7 +43,7 @@ Paths mirror the `~/system` layout proposed in research overview §2.5.
 | `etc/` | `/etc/` |
 | `home/` | `~` (your user's home) |
 | `state/world` | `/var/lib/portage/world` (observed, not deployed) |
-| `recovery/` | the recovery system on `nvme0n1p3`, built and installed by its own scripts (not by deploy.sh); see [recovery/README.md](recovery/README.md) |
+| `recovery/` | the recovery system on `nvme0n1p3`, built and installed by its own scripts; deploy.sh puts `recovery/root/` and its README in `/etc/deck-recovery/`, which its monthly update copies onto it; see [recovery/README.md](recovery/README.md) |
 | `email.md`, `runbook.md`, `bench/` | records and plans (not deployed); [email.md](email.md) is the offline-email plan |
 
 `etc/kernel/cmdline`, `etc/dracut.conf.d/10-luks.conf` and `etc/fstab` contain this machine's

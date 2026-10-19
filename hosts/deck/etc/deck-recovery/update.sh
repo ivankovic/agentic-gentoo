@@ -3,10 +3,26 @@
 # systemd-nspawn: its packages from the binhost (the main system's Gentoo repository, bound
 # read-only, so both are on the same snapshot) and, given the ESP's mount point, its UKI at
 # <esp>/EFI/Linux/deck-recovery.efi. The main system's own UKIs are never touched.
+#
+# Our files go on top first, every time, so the recovery follows the repository at its next update:
+# recovery/root/ and its README (deploy.sh installs them in this directory) and the deck router
+# (/usr/local/bin/deck). build.sh points RECOVERY_FILES, RECOVERY_DOC and RECOVERY_ROUTER at the
+# repository instead. What was removed from the repository stays on the recovery, as with deploy.sh.
 set -euo pipefail
 [[ $EUID == 0 ]] || { echo "update.sh: run as root" >&2; exit 1; }
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT=${1:?usage: update.sh <root> [esp]}
 ESP=${2:-}
+files=${RECOVERY_FILES:-$here/root}
+doc=${RECOVERY_DOC:-$here/RECOVERY.md}
+router=${RECOVERY_ROUTER:-/usr/local/bin/deck}
+
+# The stage3's os-release is a symlink into /usr/lib: replace it, don't write through it.
+[[ -L $ROOT/etc/os-release ]] && rm "$ROOT/etc/os-release"
+# Copied as root, so new files are root's; --preserve keeps the executable bits.
+cp -rT --preserve=mode,timestamps "$files" "$ROOT"
+install -D -m 644 "$doc" "$ROOT/usr/local/share/RECOVERY.md"
+install -m 755 "$router" "$ROOT/usr/local/bin/deck"
 
 packages=(
   sys-kernel/gentoo-kernel-bin sys-kernel/dracut sys-kernel/linux-firmware sys-firmware/intel-microcode

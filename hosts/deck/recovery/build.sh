@@ -4,8 +4,9 @@
 # the finished root onto partition 3 later. Safe to rerun; it picks up where it left off.
 #
 # 1. the latest amd64 systemd stage3, checked against Gentoo's release key
-# 2. root/ from this directory on top (portage config, dracut, fstab, iwd, autologin, helpers)
-# 3. update.sh: the recovery's packages, installed inside it with systemd-nspawn
+# 2. update.sh: root/ from this directory on top (portage config, dracut, fstab, iwd, autologin,
+#    helpers) and the deck router, then the recovery's packages, installed inside it with
+#    systemd-nspawn
 set -euo pipefail
 [[ $EUID == 0 ]] || { echo "build.sh: run as root" >&2; exit 1; }
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -29,17 +30,10 @@ if [[ ! -e $ROOT/etc/gentoo-release ]]; then
   echo "build.sh: extracted $file"
 fi
 
-# Our files on top. os-release is a symlink into /usr/lib in the stage3; replace it, don't write
-# through it.
-rm -f "$ROOT/etc/os-release"
-cp -rT --preserve=mode,timestamps "$here/root" "$ROOT"
-chown -R root:root "$ROOT/etc" "$ROOT/usr/local"
-install -m 644 "$here/README.md" "$ROOT/usr/local/share/RECOVERY.md"
-install -m 755 "$here/../usr-local/bin/deck" "$ROOT/usr/local/bin/deck"  # the router: lists what this system has
-
 # Console root login without a password (autologin on tty1, and the emergency shell must work);
 # the LUKS passphrase is the gate. No sshd.
 chroot "$ROOT" passwd -d root >/dev/null
 
-"$here/../etc/deck-recovery/update.sh" "$ROOT"
+RECOVERY_FILES=$here/root RECOVERY_DOC=$here/README.md RECOVERY_ROUTER=$here/../usr-local/bin/deck \
+  "$here/../etc/deck-recovery/update.sh" "$ROOT"
 echo "build.sh: recovery root ready in $ROOT ($(du -sh "$ROOT" | cut -f1))"
