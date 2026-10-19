@@ -1,0 +1,7 @@
+#!/bin/bash
+# Before `notmuch new` (deck-mail sync): the database's revision, so post-new can tell what
+# notmuch new changed from what was changed on deck while mbsync ran.
+set -euo pipefail
+state=${XDG_STATE_HOME:-$HOME/.local/state}/deck-mail
+mkdir -p "$state"
+notmuch count --lastmod '*' | cut -f2,3 >"$state/pre-new"

@@ -2,8 +2,19 @@
 # After `notmuch new` (deck-mail sync): tags from the Gmail folder each message is in
 # (~/Mail/<account>/{INBOX,All,Sent,Drafts,Trash}, usr-local/bin/deck-mail). While sync is one
 # way, `inbox` follows Gmail exactly: archived there, out of the inbox here.
+#
+# Only for what notmuch new just changed (pre-new keeps the revision before it): mail deleted or
+# archived in mmm while mbsync ran is still in INBOX, and Gmail hears of it at the next sync. The
+# folders deciding it here would undo it.
 set -euo pipefail
 cd "$(notmuch config get database.mail_root)"
+changed=
+state=${XDG_STATE_HOME:-$HOME/.local/state}/deck-mail/pre-new
+read -r uuid _ < <(notmuch count --lastmod '*' | cut -f2,3) || true
+if [[ -r $state ]] && read -r was_uuid was_rev <"$state" && [[ $was_uuid == "$uuid" ]]; then
+	changed="lastmod:$((was_rev + 1)).. and "
+fi
+rm -f "$state"
 inbox=() sent=() drafts=() trash=()
 for a in */; do
 	a=${a%/}
@@ -16,12 +27,12 @@ done
 drafts+=('folder:mmm-drafts')
 or() { local IFS='|'; local q="$*"; echo "(${q//|/ or })"; }
 notmuch tag --batch <<END
-+inbox -- $(or "${inbox[@]}") and not tag:inbox
--inbox -- tag:inbox and not $(or "${inbox[@]}")
++inbox -- $changed$(or "${inbox[@]}") and not tag:inbox
+-inbox -- ${changed}tag:inbox and not $(or "${inbox[@]}")
 +sent -- tag:new and $(or "${sent[@]}")
 +draft -- $(or "${drafts[@]}") and not tag:draft
 -draft -- tag:draft and not $(or "${drafts[@]}")
-+deleted -- $(or "${trash[@]}") and not tag:deleted
--deleted -- tag:deleted and not $(or "${trash[@]}")
++deleted -- $changed$(or "${trash[@]}") and not tag:deleted
+-deleted -- ${changed}tag:deleted and not $(or "${trash[@]}")
 -new -- tag:new
 END
