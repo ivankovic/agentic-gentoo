@@ -1,8 +1,7 @@
 gmime: groups hold mailboxes, not groups
 
-Nested groups recursed without limit: a To header of some 50000 nested
-groups (100 KB) overflows the stack, and notmuch new crashes on that mail
-every time. RFC 5322 has no nested groups.
+RFC 5322, 3.4: a group's list is a mailbox-list. Parse only mailboxes
+inside a group.
 
 --- a/gmime/internet-address.c
 +++ b/gmime/internet-address.c
@@ -11,7 +10,7 @@ every time. RFC 5322 has no nested groups.
  		charset = NULL;
  		
 -		if (!address_parse (options, ALLOW_ANY, &inptr, &charset, &address, offset)) {
-+		/* RFC 5322: a group holds mailboxes, not groups; nesting them recursed without limit */
++		/* RFC 5322: a group holds mailboxes, not groups */
 +		if (!address_parse (options, is_group ? ALLOW_MAILBOX : ALLOW_ANY, &inptr, &charset, &address, offset)) {
  			/* skip this address... */
  			while (*inptr && *inptr != ',' && (!is_group || *inptr != ';'))
