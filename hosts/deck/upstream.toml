@@ -3,6 +3,11 @@
 # one. Edit with `deck`, `deck mark` or by hand.
 
 [[patch]]
+id = "dev-libs/gmime/0001-groups-hold-mailboxes-not-groups.patch"
+upstream = "https://github.com/jstedfast/gmime"
+event = []
+
+[[patch]]
 id = "games-board/chess-tui/0001-resume-local-and-bot-games.patch"
 upstream = "https://github.com/thomas-mauran/chess-tui"
 
