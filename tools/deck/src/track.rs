@@ -10,6 +10,7 @@ use std::path::Path;
 #[serde(rename_all = "kebab-case")]
 pub enum State {
     Unsent,
+    Reported,
     Sent,
     InReview,
     ChangesRequested,
@@ -22,8 +23,9 @@ pub enum State {
 }
 
 impl State {
-    pub const ALL: [State; 10] = [
+    pub const ALL: [State; 11] = [
         State::Unsent,
+        State::Reported,
         State::Sent,
         State::InReview,
         State::ChangesRequested,
@@ -38,6 +40,7 @@ impl State {
     pub fn label(self) -> &'static str {
         match self {
             State::Unsent => "unsent",
+            State::Reported => "reported",
             State::Sent => "sent",
             State::InReview => "in-review",
             State::ChangesRequested => "changes-requested",
@@ -55,13 +58,14 @@ impl State {
     pub fn sendable(self) -> bool {
         matches!(
             self,
-            State::Unsent | State::Sent | State::InReview | State::ChangesRequested
+            State::Unsent | State::Reported | State::Sent | State::InReview | State::ChangesRequested
         )
     }
 
     pub fn help(self) -> &'static str {
         match self {
             State::Unsent => "ours, not offered upstream yet",
+            State::Reported => "the bug is reported upstream, the patch not offered yet",
             State::Sent => "offered upstream, no response yet",
             State::InReview => "upstream is reviewing it",
             State::ChangesRequested => "upstream asked for changes",
@@ -78,7 +82,12 @@ impl State {
     pub fn open(self) -> bool {
         matches!(
             self,
-            State::Unsent | State::Sent | State::InReview | State::ChangesRequested | State::Accepted
+            State::Unsent
+                | State::Reported
+                | State::Sent
+                | State::InReview
+                | State::ChangesRequested
+                | State::Accepted
         )
     }
 }

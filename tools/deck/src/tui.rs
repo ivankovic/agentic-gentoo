@@ -265,7 +265,7 @@ fn origin_color(o: Origin) -> Color {
 
 fn state_color(label: &str) -> Color {
     match label {
-        "untracked" | "unsent" | "changes-requested" => Color::Yellow,
+        "untracked" | "unsent" | "reported" | "changes-requested" => Color::Yellow,
         "sent" | "in-review" | "accepted" => Color::Blue,
         "released" | "backport" | "dropped" => Color::Green,
         "rejected" => Color::Red,
@@ -750,7 +750,7 @@ impl App {
                 Err(e) => format!("{e:#}"),
             },
             Step::Follow(url) => match self.m.last_event(&self.m.rows[r]).map(|e| e.state) {
-                None | Some(State::Unsent) => match self.m.record(&id, State::Sent, url.clone(), String::new()) {
+                None | Some(State::Unsent | State::Reported) => match self.m.record(&id, State::Sent, url.clone(), String::new()) {
                     Ok(()) => format!("marked sent · {url}"),
                     Err(e) => format!("not saved: {e:#}"),
                 },

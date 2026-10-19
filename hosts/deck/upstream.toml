@@ -5,7 +5,12 @@
 [[patch]]
 id = "dev-libs/gmime/0001-groups-hold-mailboxes-not-groups.patch"
 upstream = "https://github.com/jstedfast/gmime"
-event = []
+
+[[patch.event]]
+at = "2026-10-19T08:30:22+02:00"
+state = "reported"
+url = "https://github.com/jstedfast/gmime/issues/184"
+note = "asked whether they want it fixed, and patched by us"
 
 [[patch]]
 id = "games-board/chess-tui/0001-resume-local-and-bot-games.patch"

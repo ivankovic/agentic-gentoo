@@ -264,7 +264,7 @@ fn main() -> Result<()> {
             };
             let id = row.id.clone();
             match m.last_event(row).map(|e| e.state) {
-                None | Some(State::Unsent) => {
+                None | Some(State::Unsent | State::Reported) => {
                     m.record(&id, State::Sent, url.clone(), String::new())?;
                     println!("deck: {url}; {id} marked sent");
                 }

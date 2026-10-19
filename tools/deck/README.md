@@ -61,6 +61,7 @@ last event is the current state. A patch removed from the repository stays liste
 | State | Meaning |
 |---|---|
 | `unsent` | ours, not offered upstream yet |
+| `reported` | the bug is reported upstream (the URL: its issue), the patch not offered yet |
 | `sent` | offered upstream, no response yet |
 | `in-review` | upstream is reviewing it |
 | `changes-requested` | upstream asked for changes |
@@ -71,7 +72,7 @@ last event is the current state. A patch removed from the repository stays liste
 | `withdrawn` | we took it back |
 | `dropped` | no longer carried here |
 
-The first five count as open.
+The first six count as open.
 
 ## Sending a patch upstream
 
@@ -88,7 +89,7 @@ text are the user's to write, and nothing reaches upstream until `deck push`.
 4. `deck push`: the branch to the fork, once it has a commit of its own.
 5. `deck pr`: opens the browser on a new pull request from the fork's branch, with upstream's
    template. Run it again once the pull request exists: it prints its URL and marks the patch
-   `sent` with it, if it was untracked or `unsent`.
+   `sent` with it, if it was untracked, `unsent` or `reported`.
 
 In the TUI, `S` on a patch does whichever step comes next, from what the clone shows: stage
 (and open a terminal there), commit (a terminal opens, the commit is yours), fork, push, pull
