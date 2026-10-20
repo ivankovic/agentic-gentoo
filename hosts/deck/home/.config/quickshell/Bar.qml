@@ -4,11 +4,10 @@ import Quickshell
 import Quickshell.Wayland
 
 // The status bar along the bottom: where the laptop is (home, away, a sign-in page, offline),
-// each server's state with its problems, and, in the right corner, what needs a look on deck
-// itself. Calm when all is well: grey text and green dots.
-// Only "now" items are named (red); "soon" ones are counted (amber); the backlog is only in the
-// popup. A click opens a popup above the bar from what deck-status already gathered (Status.qml),
-// and asks it to gather again.
+// then deck, domaci and core (hosts.toml's order), each a dot and a name with its problems. Calm
+// when all is well: grey text and green dots. Only "now" items are named (red); "soon" ones are
+// counted (amber); the backlog is only in the popup. A click opens a popup above the bar from
+// what deck-status already gathered (Status.qml), and asks it to gather again.
 PanelWindow {
     id: bar
 
@@ -41,10 +40,10 @@ PanelWindow {
     }
 
     function stateColor(s) {
-        return s === "ok" ? Theme.sage : s === "partial" ? Theme.ochre : s === "down" ? Theme.oxblood : Theme.taupe;
+        return s === "ok" ? Theme.sage : s === "partial" ? Theme.ochre : s === "down" || s === "now" ? Theme.oxblood : Theme.taupe;
     }
     function stateDot(s) {
-        return s === "ok" ? "●" : s === "partial" ? "◐" : s === "down" ? "○" : "–";
+        return s === "ok" ? "●" : s === "partial" || s === "now" ? "◐" : s === "down" ? "○" : "–";
     }
     readonly property var netGlyph: ({home: 0xF02DC, away: 0xF001D, portal: 0xF0342, "no-internet": 0xF0A8E, offline: 0xF05AA})
 
@@ -70,6 +69,22 @@ PanelWindow {
             onClicked: bar.toggle("network", net)
         }
 
+        // deck, then each server in hosts.toml's order: a dot and a name, problems after it.
+        Segment {
+            id: deck
+            readonly property string state: Status.age < 0 || Status.age > 900 ? "unchecked"
+                : Status.now.length ? "now" : Status.soon ? "partial" : "ok"
+            dot: bar.stateDot(state)
+            dotColor: bar.stateColor(state)
+            color: state === "ok" ? Theme.taupe : bar.stateColor(state)
+            text: Status.age < 0 ? "deck: deck-status isn't running"
+                : Status.age > 900 ? `deck: status ${Math.round(Status.age / 60)} min old`
+                : state === "ok" ? "deck"
+                : "deck: " + [Status.now.length ? Status.now[0] + (Status.now.length > 1 ? ` +${Status.now.length - 1}` : "") : "",
+                   Status.soon ? `${Status.soon} to look at` : ""].filter(t => t).join(" · ")
+            onClicked: bar.toggle("maintenance", deck)
+        }
+
         Repeater {
             model: Status.hosts
             Segment {
@@ -85,19 +100,6 @@ PanelWindow {
 
         Item {
             Layout.fillWidth: true
-        }
-
-        Segment {
-            id: maint
-            readonly property int count: Status.now.length + Status.soon
-            glyph: count ? 0xF0026 : 0xF05E0
-            color: Status.now.length ? Theme.oxblood : Status.soon ? Theme.ochre : Theme.taupe
-            text: "deck · " + (Status.age < 0 ? "deck-status isn't running"
-                : Status.age > 900 ? `status ${Math.round(Status.age / 60)} min old`
-                : count === 0 ? "all good"
-                : [Status.now.length ? Status.now[0] + (Status.now.length > 1 ? ` +${Status.now.length - 1}` : "") : "",
-                   Status.soon ? `${Status.soon} to look at` : ""].filter(t => t).join(" · "))
-            onClicked: bar.toggle("maintenance", maint)
         }
     }
 
