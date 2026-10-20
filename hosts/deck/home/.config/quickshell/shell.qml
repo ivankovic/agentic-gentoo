@@ -14,6 +14,12 @@ ShellRoot {
         Wallpaper {}
     }
 
+    Variants {
+        model: Quickshell.screens
+
+        Bar {}
+    }
+
     Omni {}
 
     Osd {}

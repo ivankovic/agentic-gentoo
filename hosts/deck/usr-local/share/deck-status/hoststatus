@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""hoststatus: one server's state as JSON, for deck's status bar (usr-local/bin/deck-status).
+
+Installed on a server as ~/.local/bin/deck-hoststatus and run only through a key restricted to it
+in ~/.ssh/authorized_keys (restrict,command="..."), so that key can do nothing else. Read-only:
+it writes nothing and takes no input. Needs python3 (Debian and Ubuntu have it).
+
+  uptime, load        /proc
+  reboot              /run/reboot-required (Debian, Ubuntu) and the packages asking for it
+  failed              failed systemd units, the system's
+  disks               real filesystems' use, in percent
+  containers          docker ps, when this user may; else a list root keeps in
+                      /run/deck-status/containers (docker ps --format '{{json .}}' lines), else null
+  listening           TCP ports listened on, as addr:port (another host's tunnel shows up here)
+"""
+import json
+import os
+import subprocess
+
+
+def run(*cmd):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        return r.stdout if r.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def read(path):
+    try:
+        with open(path) as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def containers():
+    out = run("docker", "ps", "-a", "--format", "{{json .}}") or read("/run/deck-status/containers")
+    if out is None:
+        return None
+    found = []
+    for line in out.splitlines():
+        try:
+            c = json.loads(line)
+        except ValueError:
+            continue
+        found.append({"name": c.get("Names", ""), "state": c.get("State", ""), "status": c.get("Status", "")})
+    return found
+
+
+def disks():
+    out = run("df", "-P", "-x", "tmpfs", "-x", "devtmpfs", "-x", "overlay", "-x", "squashfs", "-x", "efivarfs") or ""
+    found = {}
+    for line in out.splitlines()[1:]:
+        f = line.split()
+        if len(f) >= 6 and f[4].endswith("%"):
+            found.setdefault(f[5], int(f[4][:-1]))
+    return found
+
+
+def listening():
+    out = run("ss", "-Hltn") or ""
+    return sorted({l.split()[3] for l in out.splitlines() if len(l.split()) >= 4})
+
+
+reboot_pkgs = read("/run/reboot-required.pkgs")
+print(json.dumps({
+    "host": os.uname().nodename,
+    "uptime": int(float((read("/proc/uptime") or "0").split()[0])),
+    "load": float((read("/proc/loadavg") or "0").split()[0]),
+    "cpus": os.cpu_count(),
+    "reboot": os.path.exists("/run/reboot-required"),
+    "reboot_pkgs": sorted(set(reboot_pkgs.split())) if reboot_pkgs else [],
+    "failed": [l.split()[0] for l in (run("systemctl", "--failed", "--no-legend", "--plain") or "").splitlines() if l.strip()],
+    "disks": disks(),
+    "containers": containers(),
+    "listening": listening(),
+}))

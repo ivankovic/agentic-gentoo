@@ -38,7 +38,6 @@ PanelWindow {
         page = "";
         Brightness.refresh();
         Battery.refresh();
-        Maintenance.refresh();
         visible = true;
         search.forceActiveFocus();
     }
@@ -515,20 +514,6 @@ PanelWindow {
                     columns: 2
                     rowSpacing: 10
                     columnSpacing: 10
-
-                    // Security advisories, firmware updates, failed units; details in a terminal.
-                    Tile {
-                        visible: Maintenance.issues.length > 0
-                        Layout.columnSpan: 2
-                        icon: 0xF0026
-                        label: Maintenance.issues[0] ?? ""
-                        detail: Maintenance.issues.slice(1).join(" · ") || "Click for details"
-                        active: true
-                        onClicked: {
-                            root.close();
-                            Maintenance.show();
-                        }
-                    }
 
                     Tile {
                         icon: Networking.wifiEnabled ? 0xF05A9 : 0xF05AA

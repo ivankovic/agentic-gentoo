@@ -1,0 +1,15 @@
+# The status bar's data (usr-local/bin/deck-status): network, servers, what needs a look, into
+# ~/.local/state/deck/status.json. The bar sends SIGUSR1 when a popup opens.
+[Unit]
+Description=Status for the bar: network, servers, maintenance
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/local/bin/deck-status --daemon
+Restart=on-failure
+RestartSec=10
+Nice=10
+
+[Install]
+WantedBy=graphical-session.target

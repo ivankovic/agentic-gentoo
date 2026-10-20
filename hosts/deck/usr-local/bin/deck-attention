@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""deck-attention: things on deck that want a look, as one line each for the omni panel's
-maintenance tile (home/.config/quickshell/Maintenance.qml runs it when the panel opens).
-`deck-attention --details` explains each line, for the tile's details terminal, and marks the
-events (crashes, an unclean shutdown) as seen: the tile drops them until a newer one happens.
+"""deck-attention: things on deck that want a look, as one line each.
+`deck-attention --details` explains each line, for the maintenance details terminal, and marks
+the events (crashes, an unclean shutdown) as seen: they're dropped until a newer one happens.
+`--seen` only marks them. `--json` is for the status bar (deck-status): each item with how soon
+it wants a look, "now", "soon" or "backlog" (in the bar's popup only), its line and its detail.
 
   repos     work that exists only on deck: a repository in ~/src with changes not committed, or
-            commits on no remote, for more than a day
+            commits on no remote, for more than a day; a week or more: soon, else backlog
   drift     config files that differ between deck and the agentic-gentoo repo (`./deploy.sh`):
             edited on deck and not in the repo, or changed in the repo and not deployed
   crashes   programs that crashed (dumped core) in the last 3 days, from coredumpctl; not
@@ -45,6 +46,7 @@ NEWS = pathlib.Path("/var/lib/gentoo/news")
 REVIEWS = pathlib.Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "deck/reviews/runs"
 DAY = 86400
 REPO_GRACE = 1 * DAY
+REPO_SOON = 7 * DAY
 CRASH_DAYS = 3
 UNCLEAN_DAYS = 7
 WORLD_DAYS = 14
@@ -80,7 +82,7 @@ def repos():
 
 
 def repo_state(repo):
-    """(name, summary, detail lines), or None when there's nothing old to report."""
+    """(name, summary, detail lines, age in seconds), or None when there's nothing old to report."""
     now = time.time()
     # --no-optional-locks: don't refresh the index, so this never collides with git you run.
     status = run("git", "--no-optional-locks", "status", "--porcelain=v1", "-z", cwd=repo).stdout
@@ -107,7 +109,8 @@ def repo_state(repo):
     detail = [f"  {s}" for _, s in unpushed[:5]] + [f"  changed: {f}" for f in changed[:10]]
     if len(changed) > 10:
         detail.append(f"  ... and {len(changed) - 10} more")
-    return repo.name, ", ".join(parts), detail
+    age = max(ages + [now - int(t) for t, _ in unpushed], default=0)
+    return repo.name, ", ".join(parts), detail, age
 
 
 # Where deploy.sh installs each part of hosts/deck (its targets(); keep the two in step).
@@ -224,7 +227,7 @@ def reviews():
             return f"{high} high of {len(xs)}" if high else plural(len(xs), "finding")
         found.append((f"Review findings to decide: {', '.join(open_by)}",
                       "\n".join(f"  {s}: {counts(xs)} open" for s, xs in sorted(open_by.items()))
-                      + "\n  deck, tab 4 Review: f lists them; x fixed, n doesn't apply here, w won't fix"))
+                      + "\n  deck patches, tab 4 Review: f lists them; x fixed, n doesn't apply here, w won't fix"))
     if failed:
         found.append((plural(len(failed), "automatic review") + " failed",
                       "\n".join(f"  {r['subject']} ({r['kind']}): {r.get('error', '')}" for r in failed)))
@@ -252,54 +255,62 @@ def disks():
 
 
 def main():
-    details = "--details" in sys.argv[1:]
-    lines, text = [], []
+    args = sys.argv[1:]
+    if args == ["--seen"]:
+        mark_seen()
+        return 0
+    details, as_json = "--details" in args, "--json" in args
+    items = []  # (level, line, detail lines)
 
     # The slow checks (git in every repo, the drift compare, coredumpctl) run side by side.
     repo_states, d, c = parallel(repos, drift, crashes)
-    for name, summary, detail in repo_states:
-        lines.append(f"Only on deck: {name} ({summary})")
-        text += [f"~/src/{name}: {summary}"] + detail
+    for name, summary, detail, age in repo_states:
+        items.append(("soon" if age > REPO_SOON else "backlog", f"Only on deck: {name} ({summary})",
+                      [f"~/src/{name}: {summary}"] + detail))
 
     if d:
-        lines.append(f"Config differs from repo: {plural(len(d), 'file')}")
-        text += ["Config differs from the agentic-gentoo repo (cd ~/src/agentic-gentoo; ./deploy.sh deck):"]
-        text += [f"  {s:9} {p}" for s, p in d]
+        items.append(("soon", f"Config differs from repo: {plural(len(d), 'file')}",
+                      ["Config differs from the agentic-gentoo repo (cd ~/src/agentic-gentoo; ./deploy.sh deck):"]
+                      + [f"  {s:9} {p}" for s, p in d]))
 
     last_seen = seen()
     new = {p: [t for t in times if t > last_seen] for p, times in c.items()}
     new = {p: times for p, times in new.items() if times}
-    if new:
-        lines.append("Crashed: " + ", ".join(f"{p} {len(t)}×" if len(t) > 1 else p for p, t in new.items()))
     if c:
-        text.append(f"Crashes in the last {CRASH_DAYS} days (coredumpctl info <program> for the stack):")
+        detail = [f"Crashes in the last {CRASH_DAYS} days (coredumpctl info <program> for the stack):"]
         for p, times in c.items():
             when = ", ".join(time.strftime("%a %d %b %H:%M", time.localtime(t))
                              + (" (new)" if t > last_seen else "") for t in times[-5:])
-            text.append(f"  {p}: {when}")
+            detail.append(f"  {p}: {when}")
+        line = "Crashed: " + ", ".join(f"{p} {len(t)}×" if len(t) > 1 else p for p, t in new.items())
+        items.append(("soon" if new else "seen", line if new else "", detail))
 
     u = unclean()
     if u:
         stamp = time.strftime("%a %d %b, %H:%M", time.localtime(u))
-        if u > last_seen:
-            lines.append(f"Unclean shutdown before {stamp}")
-        text.append(f"Unclean shutdown before {stamp} (see Disk health below)")
+        items.append(("now" if u > last_seen else "seen", f"Unclean shutdown before {stamp}" if u > last_seen else "",
+                      [f"Unclean shutdown before {stamp} (see Disk health below)"]))
 
     snap = snapshotted()
     if snap:
         names = [str(d.relative_to(SRC)) if d.is_relative_to(SRC) else "~/" + str(d.relative_to(HOME)) for d in snap]
-        lines.append("Build output in snapshots: " + ", ".join(names))
-        text += ["Build output in the hourly snapshots of @home (stop builds, then):",
-                 "  deck-nosnap " + " ".join(str(d).replace(str(HOME), "~", 1) for d in snap)]
+        items.append(("soon", "Build output in snapshots: " + ", ".join(names),
+                      ["Build output in the hourly snapshots of @home (stop builds, then):",
+                       "  deck-nosnap " + " ".join(str(d).replace(str(HOME), "~", 1) for d in snap)]))
 
-    for line, detail in portage() + reviews() + disks():
-        lines.append(line)
-        text += [line + ":", detail]
+    for level, found in (("soon", portage()), ("backlog", reviews()), ("now", disks())):
+        for line, detail in found:
+            items.append((level, line, [line + ":", detail]))
 
+    if as_json:
+        print(json.dumps([{"level": l, "line": line, "detail": "\n".join(d)} for l, line, d in items]))
+        return 0
+    text = [t for _, _, d in items for t in d]
     if details:
         if c or u:
             text.append("(Crashes and the unclean shutdown above are now marked as seen.)")
         mark_seen()
+    lines = [line for _, line, _ in items if line]
     print("\n".join(text if details else lines) or ("nothing" if details else ""))
     return 0
 

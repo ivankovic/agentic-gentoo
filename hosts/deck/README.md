@@ -28,7 +28,7 @@ Recorded 2026-10-09.
 | Kernel   | `sys-kernel/gentoo-kernel` from the binhost ([state/kernel](state/kernel)) |
 | Packages | Official binhost, x86-64-v3; `-march=native` for source builds |
 | Network  | NetworkManager with iwd |
-| Desktop  | niri, quickshell (clock overlay + Mod+D omni panel), foot, mako, swaylock, greetd + tuigreet; GURU overlay enabled |
+| Desktop  | niri, quickshell (clock overlay, status bar, Mod+D omni panel), foot, mako, swaylock, greetd + tuigreet; GURU overlay enabled |
 | Fonts    | Iosevka everywhere (Iosevka Term for monospace, Iosevka Etoile for the shell's serif, Iosevka Aile for GTK UI); Symbols Nerd Font for icons; Noto + Noto Color Emoji as fallback |
 | Laptop   | power-profiles-daemon (thermal control is the firmware's: thermald refuses this model), fwupd, battery charge 75–80 % (Mod+D "Full charge" lifts it to 100 % until reboot) |
 
@@ -416,11 +416,23 @@ never followed by the host.
 
 ## Maintenance
 
-Set up on 2026-10-11. Anything that needs attention shows as a tile at the top of the Mod+D
-dashboard ([quickshell/Maintenance.qml](home/.config/quickshell/Maintenance.qml)): security
-advisories, firmware updates, failed system or user units, a recovery system over 6 weeks old, an
-unclean shutdown, and what [deck-attention](usr-local/bin/deck-attention) finds (below). Clicking
-it opens a terminal with the details and the failed units' logs.
+Set up on 2026-10-11. The **status bar** along the bottom of the screen
+([quickshell/Bar.qml](home/.config/quickshell/Bar.qml), since 2026-10-20) shows where the laptop
+is (home, away, a sign-in page, no internet, offline), each server's state, and what needs a look:
+security advisories, firmware updates, failed system or user units, a recovery system over 6 weeks
+old, an unclean shutdown, and what [deck-attention](usr-local/bin/deck-attention) finds (below).
+Only urgent things are named (red: failed units, advisories, a full disk, an unclean shutdown, a
+server down); the rest is counted (amber), and the backlog (review findings, work not yet a week
+old) is only in the popup a click opens. The popup's "Full report" opens a terminal with the
+details and the failed units' logs ([quickshell/Maintenance.qml](home/.config/quickshell/Maintenance.qml)).
+
+The bar never waits: [deck-status](usr-local/bin/deck-status), a user service, gathers it all into
+`~/.local/state/deck/status.json`, every 5 minutes, when the network changes, and when a popup
+opens. Home is when a probe address on the home network answers; servers are checked over ssh with
+a key that can only run [hoststatus](usr-local/share/deck-status/hoststatus) there (read-only:
+uptime, a pending reboot, failed units, disks, containers, listening ports), and their sites over
+HTTPS. Offline, servers show as unchecked, not down. Which servers, and how to reach them, is in
+`~/.config/deck/hosts.toml`, outside this repository (deck-status's header shows the format).
 
 - **Snapshots.** btrbk snapshots `@` and `@home` hourly into `@snapshots`, visible as
   `/.snapshots/@.<date>` and `/.snapshots/@home.<date>` ([etc/btrbk/btrbk.conf](etc/btrbk/btrbk.conf),

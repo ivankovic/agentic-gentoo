@@ -1,0 +1,337 @@
+#!/usr/bin/env python3
+"""deck-status: what the status bar shows (home/.config/quickshell/Bar.qml), gathered in the
+background into one file, so the bar and its popups never wait.
+
+  deck-status          gather once and print it
+  deck-status --daemon the user service (deck-status.service): gathers into
+                       ~/.local/state/deck/status.json, and again when the network changes
+                       (ip monitor) or on SIGUSR1 (the bar sends it when a popup opens)
+
+Network:  offline (no default route), no-internet or portal (NetworkManager's connectivity
+          check), home (the home probe answers), away. Every minute and on each change.
+Hosts:    each server in ~/.config/deck/hosts.toml, every 5 minutes while online: its hoststatus
+          over ssh with a key that can only run that (usr-local/share/deck-status/hoststatus,
+          installed there by hand), and its sites over HTTPS. A host marked home_only is checked
+          only at home; away, `via` tells from another host's listening ports whether its tunnel
+          is up. Offline, nothing is checked: hosts show as unchecked, not down.
+Local:    failed units, security advisories (the daily sync's list), firmware (hourly),
+          the recovery's age, and deck-attention --json; every 5 minutes.
+
+Each item has a level: now (named in the bar, red), soon (counted, amber) or backlog (the popup
+only). The host list stays out of the repository, which is public:
+
+  # ~/.config/deck/hosts.toml
+  [home]
+  probe = "192.0.2.10:22"          # answers only on the home network
+  [[host]]
+  name = "server"
+  ssh = ["server"]                 # ssh arguments; the key and -o options are added
+  key = "~/.ssh/id_deck_status"
+  sites = ["https://example.org/health"]
+  [[host]]
+  name = "nas"
+  ssh = ["nas"]
+  key = "~/.ssh/id_deck_status"
+  home_only = true
+  via = { host = "server", ports = [2222] }   # away: up when server listens on these
+"""
+import concurrent.futures
+import datetime
+import json
+import os
+import pathlib
+import select
+import signal
+import socket
+import subprocess
+import sys
+import time
+import tomllib
+
+HOME = pathlib.Path.home()
+STATE = pathlib.Path(os.environ.get("XDG_STATE_HOME") or HOME / ".local/state") / "deck"
+OUT = STATE / "status.json"
+CONFIG = pathlib.Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "deck/hosts.toml"
+GLSA = pathlib.Path("/var/lib/gentoo-security/affected")
+RECOVERY = pathlib.Path("/var/lib/deck-recovery/updated")
+RECOVERY_DAYS = 42
+FULL = 85
+NET_EVERY, SLOW_EVERY, FIRMWARE_EVERY = 60, 300, 3600
+
+
+def run(*cmd, timeout=15):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        return r.returncode, r.stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None, ""
+
+
+def item(level, line, detail=""):
+    return {"level": level, "line": line, "detail": detail}
+
+
+# Network
+
+def network(config):
+    rc, out = run("ip", "-j", "route", "show", "default")
+    routes = json.loads(out) if rc == 0 and out.strip() else []
+    rc, out = run("nmcli", "-t", "-f", "NAME,TYPE", "connection", "show", "--active")
+    name = next((l.rsplit(":", 1)[0].replace("\\:", ":") for l in out.splitlines()
+                 if l and not l.endswith(":loopback")), "")
+    if not routes:
+        return {"state": "offline", "name": name, "line": "Offline" + (f" ({name}: no route)" if name else "")}
+    rc, conn = run("nmcli", "networking", "connectivity", "check", timeout=20)
+    conn = conn.strip()
+    if conn == "portal":
+        return {"state": "portal", "name": name, "line": f"Sign-in page · {name}"}
+    if conn in ("none", "limited"):
+        return {"state": "no-internet", "name": name, "line": f"No internet · {name}"}
+    probe = config.get("home", {}).get("probe", "")
+    if probe and reachable(probe):
+        return {"state": "home", "name": name, "line": f"Home · {name}"}
+    return {"state": "away", "name": name, "line": f"Away · {name}" if name else "Away"}
+
+
+def reachable(addr, timeout=1.5):
+    host, _, port = addr.rpartition(":")
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except (OSError, ValueError):
+        return False
+
+
+# Hosts
+
+def host_report(h):
+    """The hoststatus JSON, or an error string."""
+    key = os.path.expanduser(h.get("key", ""))
+    opts = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=6", "-o", "ServerAliveInterval=5",
+            "-o", "ServerAliveCountMax=2"]
+    if key:
+        opts += ["-i", key, "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none"]
+    rc, out = run("ssh", *opts, *h["ssh"], timeout=25)
+    if rc != 0:
+        return "ssh failed" if rc is not None else "ssh timed out"
+    try:
+        return json.loads(out)
+    except ValueError:
+        return "no status from it"
+
+
+def site(url):
+    rc, out = run("curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "8",
+                  "-A", "deck-status", url, timeout=12)
+    code = int(out) if out.isdigit() else 0
+    return code, 0 < code < 500
+
+
+def judge(h, report, sites):
+    """(state, line, items, detail lines) for one host."""
+    name, problems, detail = h["name"], [], []
+    if isinstance(report, str):
+        problems.append(report)
+    elif report:
+        up = report.get("uptime", 0) // 86400
+        detail.append(f"up {up} days, load {report.get('load', 0)} on {report.get('cpus', '?')} CPUs")
+        if report.get("reboot"):
+            problems.append("reboot pending")
+            detail.append("reboot pending for: " + (", ".join(report.get("reboot_pkgs", [])) or "updates"))
+        for u in report.get("failed", []):
+            problems.append(f"failed {u}")
+        for mount, used in report.get("disks", {}).items():
+            if used > FULL:
+                problems.append(f"{mount} {used}% full")
+        cs = report.get("containers")
+        if cs is None:
+            detail.append("containers: not visible to its status key")
+        else:
+            down = [c["name"] for c in cs if c.get("state") != "running"]
+            unhealthy = [c["name"] for c in cs if "unhealthy" in c.get("status", "")]
+            detail.append(f"containers: {len(cs) - len(down)} of {len(cs)} running")
+            problems += [f"{c} stopped" for c in down] + [f"{c} unhealthy" for c in unhealthy]
+        detail.append("disks: " + ", ".join(f"{m} {u}%" for m, u in report.get("disks", {}).items()))
+    for url, (code, ok) in sites.items():
+        detail.append(f"{'ok  ' if ok else 'DOWN'} {code or '---'} {url}")
+        if not ok:
+            problems.append(f"{url.split('//')[-1].split('/')[0]} down")
+    if isinstance(report, str) and sites and all(ok for _, ok in sites.values()):
+        state = "partial"
+    elif isinstance(report, str) and not any(ok for _, ok in sites.values()):
+        state = "down"
+    else:
+        state = "partial" if problems else "ok"
+    line = f"{name}: " + ", ".join(problems[:3]) + (f" +{len(problems) - 3}" if len(problems) > 3 else "") \
+        if problems else name
+    level = "now" if state == "down" else "soon" if problems else None
+    return state, line, ([item(level, line, "\n".join(detail))] if level else []), detail
+
+
+def hosts(config, net):
+    hs = config.get("host", [])
+    if net["state"] in ("offline", "no-internet", "portal"):
+        return [{"name": h["name"], "state": "unchecked", "line": h["name"],
+                 "detail": [f"not checked: {net['state']}"], "items": []} for h in hs]
+    at_home = net["state"] == "home"
+    reports = {}
+    with concurrent.futures.ThreadPoolExecutor(8) as pool:
+        futures = {h["name"]: pool.submit(host_report, h) for h in hs if at_home or not h.get("home_only")}
+        site_futures = {(h["name"], u): pool.submit(site, u) for h in hs for u in h.get("sites", [])
+                        if at_home or not h.get("home_only")}
+        reports = {n: f.result() for n, f in futures.items()}
+        site_results = {k: f.result() for k, f in site_futures.items()}
+    found = []
+    for h in hs:
+        name = h["name"]
+        if name in reports:
+            sites = {u: site_results[(name, u)] for u in h.get("sites", [])}
+            state, line, items, detail = judge(h, reports[name], sites)
+        else:
+            via = h.get("via", {})
+            other = reports.get(via.get("host", ""))
+            ports = [str(p) for p in via.get("ports", [])]
+            if isinstance(other, dict) and ports:
+                listening = {a.rsplit(":", 1)[-1] for a in other.get("listening", [])}
+                up = all(p in listening for p in ports)
+                state = "partial" if up else "down"
+                line = f"{name}: tunnel only" if up else f"{name}: tunnel down"
+                detail = [f"away: checked through {via['host']}, which "
+                          + ("listens" if up else "doesn't listen") + f" on {', '.join(ports)} for it",
+                          "at home it's checked directly"]
+                items = [] if up else [item("soon", line, "\n".join(detail))]
+            else:
+                state, line, items, detail = "unchecked", name, [], ["not checked: away from home"]
+        found.append({"name": name, "state": state, "line": line, "detail": detail, "items": items})
+    return found
+
+
+# Local maintenance
+
+def local(firmware):
+    items = []
+    _, sysf = run("systemctl", "--failed", "--no-legend", "--plain")
+    _, userf = run("systemctl", "--user", "--failed", "--no-legend", "--plain")
+    failed = [l.split()[0] for l in (sysf + userf).splitlines() if l.strip()]
+    if failed:
+        items.append(item("now", "Failed: " + ", ".join(failed),
+                          "systemctl status " + " ".join(failed) + "; journalctl -u <unit> -n 30"))
+    try:
+        glsa = [l for l in GLSA.read_text().splitlines() if l[:6].isdigit()]
+    except OSError:
+        glsa = []
+    if glsa:
+        items.append(item("now", f"{len(glsa)} security advisor{'y' if len(glsa) == 1 else 'ies'}", "\n".join(glsa)))
+    if firmware:
+        items.append(item("soon", "Firmware update: " + ", ".join(firmware), "fwupdmgr update"))
+    try:
+        updated = datetime.datetime.fromisoformat(RECOVERY.read_text().strip().replace("Z", "+00:00"))
+        age = (datetime.datetime.now(datetime.timezone.utc) - updated).days
+        if age > RECOVERY_DAYS:
+            items.append(item("soon", f"Recovery system {age} days old",
+                              "sudo systemctl start deck-recovery-update.service"))
+    except (OSError, ValueError):
+        items.append(item("soon", "Recovery updates not set up", "sudo bash /etc/deck-recovery/refresh.sh --enroll"))
+    rc, out = run("deck-attention", "--json", timeout=60)
+    try:
+        items += [i for i in json.loads(out) if i.get("line")]
+    except ValueError:
+        items.append(item("soon", "deck-attention failed", "run deck-attention --details"))
+    return items
+
+
+def firmware_updates():
+    rc, out = run("fwupdmgr", "get-updates", "--json", timeout=60)
+    try:
+        return [d["Name"] for d in json.loads(out).get("Devices", [])]
+    except (ValueError, AttributeError, KeyError):
+        return []
+
+
+def load_config():
+    try:
+        return tomllib.loads(CONFIG.read_text())
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        print(f"deck-status: {CONFIG}: {e}", file=sys.stderr)
+        return {}
+
+
+def write(status):
+    STATE.mkdir(parents=True, exist_ok=True)
+    tmp = OUT.with_suffix(".tmp")
+    tmp.write_text(json.dumps(status, indent=1))
+    os.replace(tmp, OUT)
+
+
+def gather(status, config, what, firmware):
+    """Updates status in place: what is a set of "net", "hosts", "local"."""
+    now = int(time.time())
+    if "net" in what:
+        status["network"] = network(config)
+        status["network"]["checked"] = now
+    if "hosts" in what:
+        status["hosts"] = hosts(config, status["network"])
+        status["hosts_checked"] = now
+    if "local" in what:
+        status["local"] = local(firmware)
+        status["local_checked"] = now
+    items = status.get("local", []) + [i for h in status.get("hosts", []) for i in h["items"]]
+    status["now"] = [i["line"] for i in items if i["level"] == "now"]
+    status["soon"] = sum(i["level"] == "soon" for i in items)
+    status["items"] = items
+    status["updated"] = now
+
+
+def daemon():
+    status, firmware, firmware_at = {}, [], 0
+    last = {"net": 0, "hosts": 0, "local": 0}
+    wake = {"now": True}
+    signal.signal(signal.SIGUSR1, lambda *_: wake.update(now=True))
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    # Network changes: ip monitor prints a line for each route or address change.
+    mon = subprocess.Popen(["ip", "monitor", "route", "address"], stdout=subprocess.PIPE,
+                           stdin=subprocess.DEVNULL, text=True)
+    net_changed = 0
+    while True:
+        t = time.time()
+        if wake["now"] or net_changed and t - net_changed > 3:
+            what = {"net", "hosts", "local"} if wake["now"] else {"net", "hosts"}
+            wake["now"], net_changed = False, 0
+        else:
+            what = {k for k, every in (("net", NET_EVERY), ("hosts", SLOW_EVERY), ("local", SLOW_EVERY))
+                    if t - last[k] >= every}
+        if what:
+            config = load_config()
+            if "local" in what and t - firmware_at >= FIRMWARE_EVERY:
+                firmware, firmware_at = firmware_updates(), t
+            before = status.get("network", {}).get("state")
+            gather(status, config, what, firmware)
+            if "net" in what and "hosts" not in what and status["network"]["state"] != before:
+                gather(status, config, {"hosts"}, firmware)  # moved: hosts mean something else now
+                last["hosts"] = t
+            for k in what:
+                last[k] = t
+            write(status)
+        try:
+            ready, _, _ = select.select([mon.stdout], [], [], 5)
+        except InterruptedError:
+            continue
+        if ready:
+            if not mon.stdout.readline():
+                return 1
+            net_changed = net_changed or time.time()
+
+
+def main():
+    if sys.argv[1:] == ["--daemon"]:
+        return daemon()
+    status = {}
+    gather(status, load_config(), {"net", "hosts", "local"}, firmware_updates())
+    print(json.dumps(status, indent=1))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
