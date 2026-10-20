@@ -21,14 +21,16 @@ Singleton {
     }
     readonly property var network: data.network ?? {state: "unknown", line: "Status not gathered yet"}
     readonly property var hosts: data.hosts ?? []
-    readonly property var items: data.items ?? []
-    readonly property var now: data.now ?? []
-    readonly property int soon: data.soon ?? 0
+    // Deck's own: each server's problems are on its own segment, not counted again here.
+    readonly property var items: (data.local ?? []).filter(i => i.line)
+    readonly property var now: items.filter(i => i.level === "now").map(i => i.line)
+    readonly property int soon: items.filter(i => i.level === "soon").length
     readonly property int backlog: items.filter(i => i.level === "backlog").length
 
-    // Seconds since the service last wrote: stale when it stopped.
+    // Seconds since the service last wrote: stale when it stopped; -1 with no status at all. The
+    // clock moves on each load too: a status newer than the last tick read as a negative age.
     property real clock: Date.now()
-    readonly property int age: data.updated ? Math.floor(clock / 1000 - data.updated) : -1
+    readonly property int age: data.updated ? Math.max(0, Math.floor(clock / 1000 - data.updated)) : -1
     Timer {
         running: true
         repeat: true
@@ -61,6 +63,7 @@ Singleton {
             try {
                 JSON.parse(text());
                 root.raw = text();
+                root.clock = Date.now();
             } catch (e) {}
         }
     }

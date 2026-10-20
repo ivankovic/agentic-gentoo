@@ -420,7 +420,8 @@ Set up on 2026-10-11. The **status bar** along the bottom of the screen
 ([quickshell/Bar.qml](home/.config/quickshell/Bar.qml), since 2026-10-20) shows where the laptop
 is (home, away, a sign-in page, no internet, offline), each server's state, and what needs a look:
 security advisories, firmware updates, failed system or user units, a recovery system over 6 weeks
-old, an unclean shutdown, and what [deck-attention](usr-local/bin/deck-attention) finds (below).
+old, an unclean shutdown, and what [deck-attention](usr-local/bin/deck-attention) finds (below):
+the right corner is deck's own; each server's problems are on its segment.
 Only urgent things are named (red: failed units, advisories, a full disk, an unclean shutdown, a
 server down); the rest is counted (amber), and the backlog (review findings, work not yet a week
 old) is only in the popup a click opens. The popup's "Full report" opens a terminal with the

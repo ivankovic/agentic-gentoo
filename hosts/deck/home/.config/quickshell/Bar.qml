@@ -4,7 +4,8 @@ import Quickshell
 import Quickshell.Wayland
 
 // The status bar along the bottom: where the laptop is (home, away, a sign-in page, offline),
-// each server's state, and what needs a look. Calm when all is well: grey text and green dots.
+// each server's state with its problems, and, in the right corner, what needs a look on deck
+// itself. Calm when all is well: grey text and green dots.
 // Only "now" items are named (red); "soon" ones are counted (amber); the backlog is only in the
 // popup. A click opens a popup above the bar from what deck-status already gathered (Status.qml),
 // and asks it to gather again.
@@ -91,11 +92,11 @@ PanelWindow {
             readonly property int count: Status.now.length + Status.soon
             glyph: count ? 0xF0026 : 0xF05E0
             color: Status.now.length ? Theme.oxblood : Status.soon ? Theme.ochre : Theme.taupe
-            text: Status.age < 0 ? "deck-status isn't running"
-                : Status.age > 900 ? `Status ${Math.round(Status.age / 60)} min old`
-                : count === 0 ? "All good"
+            text: "deck · " + (Status.age < 0 ? "deck-status isn't running"
+                : Status.age > 900 ? `status ${Math.round(Status.age / 60)} min old`
+                : count === 0 ? "all good"
                 : [Status.now.length ? Status.now[0] + (Status.now.length > 1 ? ` +${Status.now.length - 1}` : "") : "",
-                   Status.soon ? `${Status.soon} to look at` : ""].filter(t => t).join(" · ")
+                   Status.soon ? `${Status.soon} to look at` : ""].filter(t => t).join(" · "))
             onClicked: bar.toggle("maintenance", maint)
         }
     }
@@ -133,7 +134,7 @@ PanelWindow {
                         Layout.fillWidth: true
                         Text {
                             Layout.fillWidth: true
-                            text: bar.open === "network" ? "Network" : bar.open === "maintenance" ? "Needs a look" : bar.open
+                            text: bar.open === "network" ? "Network" : bar.open === "maintenance" ? "deck" : bar.open
                             color: Theme.parchment
                             font.family: Theme.serif
                             font.pixelSize: 16
