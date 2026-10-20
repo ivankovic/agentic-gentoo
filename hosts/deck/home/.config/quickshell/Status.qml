@@ -10,9 +10,11 @@ import Quickshell.Io
 Singleton {
     id: root
 
+    // Set when the file has loaded: file.text() in a binding doesn't update when it does.
+    property string raw: ""
     readonly property var data: {
         try {
-            return JSON.parse(file.text() || "{}");
+            return JSON.parse(raw || "{}");
         } catch (e) {
             return {};
         }
@@ -31,7 +33,10 @@ Singleton {
         running: true
         repeat: true
         interval: 30000
-        onTriggered: root.clock = Date.now()
+        onTriggered: {
+            root.clock = Date.now();
+            file.reload(); // deck-status replaces the file, which the watch may not follow
+        }
     }
 
     function refresh() {
@@ -50,5 +55,6 @@ Singleton {
         path: `${Quickshell.env("XDG_STATE_HOME") || Quickshell.env("HOME") + "/.local/state"}/deck/status.json`
         watchChanges: true
         onFileChanged: reload()
+        onLoaded: root.raw = text()
     }
 }
