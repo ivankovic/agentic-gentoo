@@ -22,6 +22,8 @@ set -uo pipefail
 
 real=/usr/bin/git
 [[ -n ${JAIL-} ]] && exec "$real" "$@"
+# No home, no ~/src to guard: system services (gentoo-sync runs git in /var/db/repos as root).
+[[ -n ${HOME-} ]] || exec "$real" "$@"
 src=$HOME/src
 store=${XDG_STATE_HOME:-$HOME/.local/state}/git-guard
 
