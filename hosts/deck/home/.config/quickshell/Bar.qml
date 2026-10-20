@@ -245,7 +245,7 @@ PanelWindow {
                             visible: Status.items.some(i => i.line.startsWith("Crashed") || i.line.startsWith("Unclean"))
                             text: "Mark crashes seen"
                             onClicked: {
-                                Quickshell.execDetached(["sh", "-c", "deck-attention --seen; systemctl --user kill --signal=USR1 deck-status.service"]);
+                                Quickshell.execDetached(["sh", "-c", "deck-attention --seen; systemctl --user kill --kill-whom=main --signal=USR1 deck-status.service"]);
                             }
                         }
                     }

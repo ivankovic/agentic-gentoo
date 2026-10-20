@@ -5,7 +5,8 @@ background into one file, so the bar and its popups never wait.
   deck-status          gather once and print it
   deck-status --daemon the user service (deck-status.service): gathers into
                        ~/.local/state/deck/status.json, and again when the network changes
-                       (ip monitor) or on SIGUSR1 (the bar sends it when a popup opens)
+                       (ip monitor) or on SIGUSR1 (the bar sends it when a popup opens, to the
+                       main process only: systemctl kill --kill-whom=main)
 
 Network:  offline (no default route), no-internet or portal (NetworkManager's connectivity
           check), home (the home probe answers), away. Every minute and on each change.
@@ -291,8 +292,10 @@ def daemon():
     signal.signal(signal.SIGUSR1, lambda *_: wake.update(now=True))
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     # Network changes: ip monitor prints a line for each route or address change.
-    mon = subprocess.Popen(["ip", "monitor", "route", "address"], stdout=subprocess.PIPE,
-                           stdin=subprocess.DEVNULL, text=True)
+    def monitor():
+        return subprocess.Popen(["ip", "monitor", "route", "address"], stdout=subprocess.PIPE,
+                                stdin=subprocess.DEVNULL, text=True)
+    mon = monitor()
     net_changed = 0
     while True:
         t = time.time()
@@ -319,8 +322,9 @@ def daemon():
         except InterruptedError:
             continue
         if ready:
-            if not mon.stdout.readline():
-                return 1
+            if not mon.stdout.readline():  # it ended: start another, and look now
+                mon.wait()
+                mon = monitor()
             net_changed = net_changed or time.time()
 
 

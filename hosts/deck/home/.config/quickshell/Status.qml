@@ -40,7 +40,8 @@ Singleton {
     }
 
     function refresh() {
-        Quickshell.execDetached(["systemctl", "--user", "kill", "--signal=USR1", "deck-status.service"]);
+        // Only the main process: the rest of the unit (ip monitor, a check's ssh) would die of it.
+        Quickshell.execDetached(["systemctl", "--user", "kill", "--kill-whom=main", "--signal=USR1", "deck-status.service"]);
     }
 
     function ago(t) {
@@ -55,6 +56,12 @@ Singleton {
         path: `${Quickshell.env("XDG_STATE_HOME") || Quickshell.env("HOME") + "/.local/state"}/deck/status.json`
         watchChanges: true
         onFileChanged: reload()
-        onLoaded: root.raw = text()
+        // Only what parses: a bad read keeps the last good status.
+        onLoaded: {
+            try {
+                JSON.parse(text());
+                root.raw = text();
+            } catch (e) {}
+        }
     }
 }
