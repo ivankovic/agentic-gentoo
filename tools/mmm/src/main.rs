@@ -8,6 +8,7 @@ mod compose;
 mod config;
 mod notmuch;
 mod render;
+mod screen;
 mod ui;
 
 use anyhow::Result;

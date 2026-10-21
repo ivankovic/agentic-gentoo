@@ -1,7 +1,9 @@
 #!/bin/bash
 # After `notmuch new` (deck-mail sync): tags from the Gmail folder each message is in
 # (~/Mail/<account>/{INBOX,All,Sent,Drafts,Trash}, usr-local/bin/deck-mail). While sync is one
-# way, `inbox` follows Gmail exactly: archived there, out of the inbox here.
+# way, `inbox` follows Gmail exactly: archived there, out of the inbox here. `spam` follows
+# Gmail's Spam folder the same way. Then `deck-mail filter` screens the new mail in the inbox
+# (tags screener, suspect; deleted for blocked senders), before `new` comes off.
 #
 # Only for what notmuch new just changed (pre-new keeps the revision before it): mail deleted or
 # archived in mmm while mbsync ran is still in INBOX, and Gmail hears of it at the next sync. The
@@ -15,12 +17,12 @@ if [[ -r $state ]] && read -r was_uuid was_rev <"$state" && [[ $was_uuid == "$uu
 	changed="lastmod:$((was_rev + 1)).. and "
 fi
 rm -f "$state"
-inbox=() sent=() drafts=() trash=()
+inbox=() sent=() drafts=() trash=() spam=()
 for a in */; do
 	a=${a%/}
 	[[ -d $a/INBOX ]] || continue
 	inbox+=("folder:\"$a/INBOX\"") sent+=("folder:\"$a/Sent\"")
-	drafts+=("folder:\"$a/Drafts\"") trash+=("folder:\"$a/Trash\"")
+	drafts+=("folder:\"$a/Drafts\"") trash+=("folder:\"$a/Trash\"") spam+=("folder:\"$a/Spam\"")
 done
 ((${#inbox[@]})) || exit 0
 # mmm keeps its drafts in a folder of its own, next to the accounts.
@@ -34,5 +36,8 @@ notmuch tag --batch <<END
 -draft -- tag:draft and not $(or "${drafts[@]}")
 +deleted -- $changed$(or "${trash[@]}") and not tag:deleted
 -deleted -- ${changed}tag:deleted and not $(or "${trash[@]}")
--new -- tag:new
++spam -- $changed$(or "${spam[@]}") and not tag:spam
+-spam -- ${changed}tag:spam and not $(or "${spam[@]}")
 END
+deck-mail filter || echo "post-new: deck-mail filter failed; the new mail isn't screened" >&2
+notmuch tag -new -- tag:new

@@ -13,7 +13,7 @@ mmm from:hep date:1y..  # one notmuch query
 
 ## What it does
 
-- **Searches** along the top, `1`–`9`, from `~/.config/mmm/searches` (`Name = notmuch query`, a
+- **Searches** along the top, `1`–`9` and `0`, from `~/.config/mmm/searches` (`Name = notmuch query`, a
   line each), with how many need you (unread, or a PDF waiting). `/` types any notmuch query.
 - **The list**: threads, newest first, loaded 200 at a time as the cursor nears the end.
 - **A thread**: every message, HTML as text (`H` for the plain text, where there is one),
@@ -24,7 +24,8 @@ mmm from:hep date:1y..  # one notmuch query
   browser through `xdg-open`, attachments with their program from `$XDG_RUNTIME_DIR/mmm`), `y`
   copies, `w` saves an attachment to `~/Downloads`.
 - **Tags**: `a` archive (`-inbox`), `d` delete (`+deleted`; again, back out), `s` star, `m`
-  read/unread. `u` undoes the last, on exactly the messages it changed. Opening a thread marks
+  read/unread, `!` spam (Gmail's Spam at the next sync, which teaches Gmail; in the Spam tab, `!`
+  takes it out). `u` undoes the last, on exactly the messages it changed. Opening a thread marks
   it read. `deck-mail sync` carries all of it to Gmail, as before.
 - **PDFs to the family archive in Nextcloud**: under each PDF, what became of it: in Nextcloud
   (and where), going at the next sync, left out, or waiting. Nothing goes until it's chosen:
@@ -33,6 +34,11 @@ mmm from:hep date:1y..  # one notmuch query
   the focused PDF, or on the thread's only waiting one. Mail with a PDF waiting is in the
   Waiting tab and marked ☁ in the list; a tab's count is its mail that needs you, unread or
   waiting. `deck-mail sync` does the sending ([email.md](../../hosts/deck/email.md)).
+- **The Screener**: new mail from senders you don't know (`?` in the list) and mail that looks like
+  spam (`⚠`), from deck-mail's filter, wait in the Screener tab instead of the Inbox. Opening one
+  says why in the footer. `A` lets the sender in, `B` blocks them (to the Bin, now and later); `u`
+  undoes. `U` unsubscribes: it says how (one click, a mail to write, a page), `U` again does it.
+  ([email.md](../../hosts/deck/email.md), "Spam and the screener".)
 - **Writing**: `c` a new mail, `r` reply, `R` reply to all, `f` forward (the message being read;
   in the list, the thread's newest). The draft opens in `$VISUAL` / `$EDITOR` (nvim): headers
   (From, To, Cc, Bcc, Subject, and `Attach:` lines, one file each), then your text, then the

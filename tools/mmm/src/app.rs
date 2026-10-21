@@ -5,6 +5,7 @@ use crate::compose::{self, Draft, Pending};
 use crate::config::{self, Search};
 use crate::notmuch::{self, Message, Thread};
 use crate::render::{self, Doc, Pdfs, Target};
+use crate::screen;
 use anyhow::Result;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::Line;
@@ -81,6 +82,11 @@ enum Undo {
         file: String,
         before: Choice,
     },
+    /// A sender let in or blocked: their line in deck-mail's senders, and what it tagged.
+    Sender {
+        address: String,
+        changes: Vec<(String, Vec<String>)>,
+    },
 }
 
 pub struct App {
@@ -106,6 +112,8 @@ pub struct App {
     pub edit: Option<Draft>,
     /// Mail sent with `y`, in its minute before it goes.
     pub pending: Vec<Pending>,
+    /// After a first `U`: the message and how it unsubscribes, until the second `U` does it.
+    unsub: Option<(String, screen::Unsubscribe)>,
 }
 
 fn invert(change: &str) -> String {
@@ -228,6 +236,7 @@ impl App {
             lastmod: String::new(),
             edit: None,
             pending: vec![],
+            unsub: None,
         };
         app.lastmod = notmuch::lastmod().unwrap_or_default();
         app.load()?;
@@ -371,6 +380,18 @@ impl App {
                     Err(e) => self.status = format!("{e:#}"),
                 };
             }
+            Undo::Sender { address, changes } => {
+                let res = changes
+                    .iter()
+                    .try_for_each(|(change, ids)| notmuch::tag(ids, &invert(change)))
+                    .and_then(|()| screen::sender("forget", &address).map(|_| ()));
+                self.status = match res {
+                    Ok(()) => format!("undone: {address} is a sender like any other again"),
+                    Err(e) => format!("{e:#}"),
+                };
+                self.lastmod.clear();
+                return self.tick();
+            }
         };
         match notmuch::tag(&ids, &invert(&change)) {
             Ok(()) => {
@@ -426,6 +447,9 @@ impl App {
                 v.scroll = v.doc.starts.get(at).copied().unwrap_or(0);
                 if v.msgs.len() == 1 {
                     v.scroll = 0;
+                }
+                if v.thread.has("screener") || v.thread.has("suspect") {
+                    self.status = why_line(&v.msgs);
                 }
                 self.view = Some(v);
             }
@@ -487,6 +511,9 @@ impl App {
             } => return self.key_review(*draft, scroll, discard, k),
         }
         self.status.clear();
+        if k.code != KeyCode::Char('U') {
+            self.unsub = None;
+        }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         // Keys that mean the same in the list and in a thread.
         match k.code {
@@ -506,11 +533,14 @@ impl App {
             KeyCode::Char('c') if !ctrl => return self.write(Draft::new_mail()),
             KeyCode::Char('e') if !ctrl => return self.resume(),
             KeyCode::Char(c @ ('r' | 'R' | 'f')) if !ctrl => return self.answer(c),
-            KeyCode::Char(c @ '1'..='9') => {
+            KeyCode::Char(c @ '0'..='9') => {
                 self.view = None;
-                return self.switch(c as usize - '1' as usize);
+                // 0 is the tenth, as on the keyboard.
+                return self.switch((c as usize + 9 - '0' as usize) % 10);
             }
-            KeyCode::Char('a' | 'd' | 's' | 'm') if !ctrl => return self.act(k.code),
+            KeyCode::Char('a' | 'd' | 's' | 'm' | '!') if !ctrl => return self.act(k.code),
+            KeyCode::Char(c @ ('A' | 'B')) => return self.sender_rule(c),
+            KeyCode::Char('U') => return self.unsubscribe(),
             _ => {}
         }
         if self.view.is_some() {
@@ -564,6 +594,18 @@ impl App {
                 {
                     v.msgs = msgs;
                 }
+            }
+            KeyCode::Char('!') => {
+                if t.has("spam") {
+                    self.change(&t.thread, "-spam", "not spam: back to the Inbox at the next sync");
+                } else {
+                    self.change(
+                        &t.thread,
+                        "+spam",
+                        "reported as spam: Gmail's Spam at the next sync",
+                    );
+                }
+                self.view = None;
             }
             KeyCode::Char('m') => {
                 if t.has("unread") && !in_view {
@@ -1081,12 +1123,110 @@ impl App {
         self.status = status;
     }
 
+    /// The message `A`, `B` and `U` act on: in a thread the one read, in the list the newest.
+    fn target_message(&self) -> Option<Message> {
+        if let Some(v) = &self.view {
+            return v.msgs.get(v.current()).cloned();
+        }
+        // Not your own reply: the newest someone else sent, if there is one.
+        let t = self.threads.get(self.sel)?;
+        notmuch::show_thread(&t.thread)
+            .ok()?
+            .into_iter()
+            .max_by_key(|m| (!m.has("sent"), m.timestamp))
+    }
+
+    /// `A` lets the sender in (their mail leaves the Screener), `B` blocks them (to the Bin, and
+    /// so will their next mail). deck-mail keeps the rule; u takes it back.
+    fn sender_rule(&mut self, c: char) {
+        let Some(m) = self.target_message() else { return };
+        let address = screen::address(&m.from);
+        let (kind, done) = if c == 'A' {
+            ("allow", format!("{address} let in: their mail goes to the Inbox"))
+        } else {
+            ("block", format!("{address} blocked: their mail goes to the Bin"))
+        };
+        match screen::sender(kind, &address) {
+            Ok(changes) => {
+                self.undo.push(Undo::Sender { address, changes });
+                self.status = format!("{done} · u undoes");
+                self.view = None;
+                self.lastmod.clear();
+                self.tick();
+            }
+            Err(e) => self.status = format!("{e:#}"),
+        }
+    }
+
+    /// `U` says how the mail unsubscribes; `U` again does it: the one-click request, a mail to
+    /// write, or the list's page in the browser.
+    fn unsubscribe(&mut self) {
+        let Some(m) = self.target_message() else { return };
+        if let Some((id, u)) = self.unsub.take()
+            && id == m.id
+        {
+            self.status = match u.method.as_str() {
+                "one-click" => match screen::unsubscribe(&id) {
+                    Ok(()) => format!("unsubscribed at {}: a archives this one", u.host),
+                    Err(e) => format!("{e:#}"),
+                },
+                "link" => match spawn("xdg-open", &[&u.target]) {
+                    Ok(()) => format!("{}'s unsubscribe page is open in the browser", u.host),
+                    Err(e) => format!("{e:#}"),
+                },
+                _ => {
+                    let mut d = Draft::new_mail();
+                    d.to = u.target.clone();
+                    d.subject = u.subject.clone();
+                    d.body = u.body.clone();
+                    return self.write(d);
+                }
+            };
+            return;
+        }
+        match screen::unsubscribe_check(&m.id) {
+            Ok(u) => {
+                self.status = match u.method.as_str() {
+                    "one-click" => format!("U again: unsubscribe at {} (one click, nothing to open)", u.host),
+                    "mailto" => format!("U again: write the unsubscribe mail to {}", u.target),
+                    "link" => format!("U again: open {}'s unsubscribe page in the browser", u.host),
+                    _ => "this mail names no way to unsubscribe (no List-Unsubscribe)".into(),
+                };
+                if u.method != "none" {
+                    self.unsub = Some((m.id, u));
+                }
+            }
+            Err(e) => self.status = format!("{e:#}"),
+        }
+    }
+
     fn explain(&self) -> Mode {
         if let Some(v) = &self.view {
             return crate::ui::explain_thread(self, v);
         }
         crate::ui::explain_list(self)
     }
+}
+
+/// The footer's line for a screened or suspect thread: who the sender is to you and what looked
+/// wrong, from deck-mail's filter.
+fn why_line(msgs: &[Message]) -> String {
+    let ids: Vec<String> = msgs.iter().map(|m| m.id.clone()).collect();
+    let Ok(whys) = screen::why(&ids) else {
+        return String::new();
+    };
+    let mut parts = vec![];
+    if let Some(w) = whys.iter().find(|w| w.new_sender) {
+        parts.push(format!("? {} is new to you: A lets them in, B blocks", w.sender));
+    }
+    let reasons: Vec<&str> = whys
+        .iter()
+        .flat_map(|w| w.reasons.iter().map(String::as_str))
+        .collect();
+    if !reasons.is_empty() {
+        parts.push(format!("⚠ {} · ! reports spam", reasons.join("; ")));
+    }
+    parts.join(" · ")
 }
 
 /// Writes an attachment out: to ~/Downloads with `save`, else to a private folder to open it.

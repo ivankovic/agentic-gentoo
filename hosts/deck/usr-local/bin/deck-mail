@@ -22,6 +22,19 @@
                      the N (50) most frequent senders, sender domains and subjects, with the
                      newest message's month: what to clean up. The query defaults to
                      `not tag:sent`; deleted and spam are always left out.
+  deck-mail filter [--query Q | --train]
+                     screen new mail in the inbox (notmuch's post-new hook runs it): tags
+                     screener (a sender you don't know), suspect (looks like spam: DMARC,
+                     a lookalike domain, bogofilter, an optional language model in
+                     ~/.config/deck-mail/filter) or deleted (a blocked sender). --train teaches
+                     bogofilter again now; `sync` does once a day.
+  deck-mail screener allow|block|forget ADDRESS|@DOMAIN
+                     a line in ~/.config/deck-mail/senders, and that sender's mail tagged to
+                     match (mmm's A and B); prints what it tagged, as JSON
+  deck-mail why ID…  mmm's view of why these messages were screened or are suspect, as JSON
+  deck-mail unsubscribe [--check] ID
+                     how the mail's List-Unsubscribe lets you leave the list (mmm's U); without
+                     --check, the one-click request (RFC 8058) is sent
 
 The account list stays out of the repo, which is public: addresses only on deck.
 ~/.config/deck-mail/accounts, one account a line, the first one the default for sending:
@@ -40,7 +53,12 @@ Both ways, as tags in notmuch (aerc's d and a, home/.config/aerc/binds.conf):
   unread, flagged  maildir flags, which mbsync carries both ways
   archive          `inbox` removed: `sync` takes the Inbox label off in Gmail, over IMAP
   delete           tag `deleted`: `sync` moves the message to Gmail's Bin (kept 30 days)
+  spam             tag `spam`: `sync` moves it to Gmail's Spam, Gmail's "Report spam"; without
+                   the tag, a message in Spam goes back to the inbox. Gmail's Spam is synced,
+                   so its own verdicts are `spam` here too
   the rest         comes from Gmail: new mail, archiving and deleting there, labels moved
+
+Only here, never in Gmail: `screener` and `suspect` (deck-mail filter; mmm's Screener tab).
 
 mbsync itself never deletes or uploads on Gmail: it pulls messages and their disappearance, and
 pushes only flags. Archive and delete go through Gmail's own IMAP commands (X-GM-LABELS, MOVE),
@@ -59,6 +77,7 @@ import os
 import pathlib
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -74,10 +93,11 @@ ISYNCRC = CONFIG / "isyncrc"
 MSMTPQ = "/usr/share/msmtp/msmtpq"
 # Gmail's folders: local name, the IMAP special-use flag that finds it, its English name.
 # Gmail names them in the account's language (British English: "[Gmail]/Bin"), so `config` asks
-# the server; the names here are the fallback. Spam and the inbox tabs aren't synced.
+# the server; the names here are the fallback. Spam is synced too: Gmail's verdicts are the `spam`
+# tag here, and the filter learns from them. The inbox tabs aren't synced.
 FOLDERS = [("INBOX", None, "INBOX"), ("All", r"\All", "[Gmail]/All Mail"),
            ("Sent", r"\Sent", "[Gmail]/Sent Mail"), ("Drafts", r"\Drafts", "[Gmail]/Drafts"),
-           ("Trash", r"\Trash", "[Gmail]/Trash")]
+           ("Trash", r"\Trash", "[Gmail]/Trash"), ("Spam", r"\Junk", "[Gmail]/Spam")]
 NOTIFY_EVERY = 3600
 # msmtpq: the queue and its log in the state folder; no connection test (debian.org ping): when
 # msmtp fails, the mail is queued and the next sync sends it.
@@ -272,11 +292,15 @@ def pending(query):
 
 
 def push(a):
-    """Archive and delete in Gmail what was archived and deleted on deck. False if it failed."""
+    """Archive, delete and report spam in Gmail as was done on deck, and take out of Spam what
+    deck says isn't. False if it failed."""
     n = a["name"]
     archive = pending(f'folder:"{n}/INBOX" and not tag:inbox')
-    delete = pending(f'tag:deleted and path:"{n}/**" and not folder:"{n}/Trash"')
-    if not archive and not delete:
+    # Spam wins over delete: both move the message, and Spam is what trains Gmail.
+    delete = pending(f'tag:deleted and not tag:spam and path:"{n}/**" and not folder:"{n}/Trash"')
+    spam = pending(f'tag:spam and path:"{n}/**" and not folder:"{n}/Spam" and not folder:"{n}/Trash"')
+    unspam = pending(f'folder:"{n}/Spam" and not tag:spam')
+    if not archive and not delete and not spam and not unspam:
         return True
     try:
         imap = login(a)
@@ -296,12 +320,28 @@ def push(a):
 
         each(archive, "STORE", "-X-GM-LABELS", r"(\Inbox)")
         each(delete, "MOVE", quote(names[r"\Trash"]))
+        # Moving to Spam is Gmail's "Report spam": it learns from it.
+        each(spam, "MOVE", quote(names[r"\Junk"]))
         imap.close()
+        if unspam:
+            # Out of Spam: found by its header there (Gmail's own search leaves Spam out).
+            if imap.select(quote(names[r"\Junk"]))[0] != "OK":
+                raise imaplib.IMAP4.error(f"can't open {names[r'\Junk']}")
+            for mid in unspam:
+                uids = imap.uid("SEARCH", "HEADER", "Message-ID", quote(f"<{mid}>"))[1][0].split()
+                if uids:
+                    typ, data = imap.uid("MOVE", b",".join(uids).decode(), "INBOX")
+                    if typ != "OK":
+                        raise imaplib.IMAP4.error(f"MOVE {mid}: {data}")
+            imap.close()
         imap.logout()
     except (OSError, imaplib.IMAP4.error, ValueError, AttributeError, IndexError) as e:
-        print(f"deck-mail: {n}: archiving and deleting in Gmail failed: {e}")
+        print(f"deck-mail: {n}: archiving, deleting and reporting spam in Gmail failed: {e}")
         return False
-    print(f"deck-mail: {n}: {len(archive)} archived, {len(delete)} moved to the Bin in Gmail")
+    done = [f"{len(archive)} archived", f"{len(delete)} moved to the Bin"]
+    done += [f"{len(spam)} reported as spam"] if spam else []
+    done += [f"{len(unspam)} back from Spam"] if unspam else []
+    print(f"deck-mail: {n}: {', '.join(done)} in Gmail")
     return True
 
 
@@ -318,6 +358,9 @@ def config():
     STATE.mkdir(parents=True, exist_ok=True)
     for a in accts:
         (MAIL / a["name"]).mkdir(parents=True, exist_ok=True)
+    for path, example in ((SENDERS, SENDERS_EXAMPLE), (FILTER, FILTER_EXAMPLE)):
+        if not path.exists():
+            write(path, example, 0o644)
     # The index is rebuilt from the mail by `notmuch new`: out of the hourly snapshots.
     if not (MAIL / ".notmuch").exists():
         subprocess.run(["deck-nosnap", str(MAIL / ".notmuch")], check=False)
@@ -422,6 +465,11 @@ def sync(interactive):
         if r.returncode:
             failed.append(a["name"])
     subprocess.run(["notmuch", "new", *([] if interactive else ["--quiet"])], check=True)
+    if shutil.which("bogofilter"):
+        try:
+            train()
+        except (OSError, subprocess.CalledProcessError) as e:
+            print(f"deck-mail: filter: teaching bogofilter failed: {e}")
     # Only once the archive config is filled in: the example's placeholders would fail every sync.
     if ARCHIVE.exists() and "example" not in ARCHIVE.read_text():
         try:
@@ -1243,6 +1291,412 @@ def top(args):
     return 0
 
 
+# The screener and the filter: what new mail in the inbox gets, after notmuch new (its post-new
+# hook runs `deck-mail filter`). Gmail never sees these tags; the inbox there stays as it was.
+#
+#   screener  the first mail from a sender you don't know: mmm's Screener tab, not its Inbox,
+#             until `screener allow` (mmm's A) lets the sender in or `block` (B) bins them
+#   suspect   something says it's spam: a failed DMARC, a lookalike of a domain you know,
+#             bogofilter, or the language model if one is set up. Also in the Screener tab.
+#   deleted   from a blocked sender: Gmail's Bin at the next sync
+#
+# A sender you know: someone you wrote to, an `allow` line in ~/.config/deck-mail/senders, or
+# someone whose mail you kept from before the screener started (its start is in the state folder).
+SENDERS = CONFIG / "deck-mail/senders"
+SENDERS_EXAMPLE = """\
+# deck-mail's screener: one rule a line, for an address or a whole @domain. On deck only.
+#   allow  their new mail goes straight to the Inbox
+#   block  their new mail goes to the Bin
+# mmm's A and B write these lines; `deck-mail screener allow|block|forget ADDRESS` too.
+"""
+FILTER = CONFIG / "deck-mail/filter"
+FILTER_EXAMPLE = """\
+# deck-mail filter: an optional language model for mail the other checks can't decide on.
+# Any OpenAI-compatible chat endpoint (llama.cpp's llama-server, ollama). On deck only.
+# Mail goes to it: only point it at a machine of yours.
+#llm-url    http://localhost:8080/v1/chat/completions
+#llm-model  qwen3-8b
+#llm-max    5            # at most this many mails a sync
+"""
+WORDLIST = STATE / "bogofilter"
+FILTER_LOG = STATE / "filter.json"  # why each recent mail was screened or suspect, for mmm
+TRAIN_EVERY = 86400
+TRAIN_LIMIT = 4000  # mails of each kind
+# Too little spam and bogofilter only guesses: no verdicts until it has learned from this many.
+TRAIN_MIN = (50, 200)  # spam, other
+
+
+def own_addresses():
+    return {a["address"].lower() for a in accounts()}
+
+
+def sender_rules():
+    rules = {"allow": set(), "block": set()}
+    if SENDERS.exists():
+        for line in SENDERS.read_text().splitlines():
+            line = line.split("#", 1)[0].split()
+            if len(line) == 2 and line[0] in rules:
+                rules[line[0]].add(line[1].lower())
+    return rules
+
+
+def rule_for(rules, addr):
+    """allow, block or None: the address's own line first, then its domain's."""
+    for key in (addr, "@" + addr.rpartition("@")[2]):
+        for kind in ("block", "allow"):
+            if key in rules[kind]:
+                return kind
+    return None
+
+
+def screener_start():
+    f = STATE / "screener-start"
+    if not f.exists():
+        STATE.mkdir(parents=True, exist_ok=True)
+        f.write_text(f"{int(time.time())}\n")
+    return int(f.read_text())
+
+
+def addresses(output, query):
+    out = subprocess.run(["notmuch", "address", "--format=json", f"--output={output}",
+                          "--deduplicate=address", query], capture_output=True, text=True, check=True)
+    return {x["address"].lower() for x in json.loads(out.stdout or "[]") if x.get("address")}
+
+
+def known_senders():
+    """Everyone you wrote to, and the senders of mail you kept from before the screener."""
+    # The Date header is the sender's to write: mail the screener has seen doesn't count, however
+    # old it says it is.
+    return (addresses("recipients", "tag:sent")
+            | addresses("sender", f"date:..@{screener_start()} and not tag:deleted and not tag:spam"
+                                  " and not tag:new and not tag:screener and not tag:suspect"))
+
+
+def base_domain(d):
+    """The registrable part, near enough: example.co.uk, example.com."""
+    parts = d.split(".")
+    n = 3 if len(parts) >= 3 and len(parts[-1]) == 2 and len(parts[-2]) <= 3 else 2
+    return ".".join(parts[-n:])
+
+
+def one_edit(a, b):
+    """True when a and b differ by one letter changed, added or removed."""
+    if a == b or abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        return sum(x != y for x, y in zip(a, b)) == 1
+    if len(a) > len(b):
+        a, b = b, a
+    i = 0
+    while i < len(a) and a[i] == b[i]:
+        i += 1
+    return a[i:] == b[i + 1:]
+
+
+def lookalike(domain, known_bases):
+    """A known domain this one imitates: one letter off, or written in other scripts (xn--)."""
+    base = base_domain(domain)
+    if base in known_bases:
+        return None
+    if "xn--" in domain:
+        return f"{domain} is written in another script (punycode)"
+    for k in known_bases:
+        if len(k) >= 6 and one_edit(base, k):
+            return f"{base} looks like {k}"
+    return None
+
+
+def authentication(msg):
+    """Why Gmail's own checks failed for this mail, or None (only mx.google.com's results)."""
+    for h in msg.get_all("Authentication-Results") or []:
+        h = " ".join(str(h).split())
+        if not h.lower().startswith("mx.google.com"):
+            continue
+        r = dict(re.findall(r"\b(spf|dkim|dmarc)=(\w+)", h.lower()))
+        if r.get("dmarc") == "fail":
+            return "DMARC failed (the sender's domain says it didn't send it)"
+        if r.get("spf") in ("fail", "softfail") and r.get("dkim") != "pass":
+            return f"SPF {r['spf']} and no DKIM signature that passed"
+    return None
+
+
+def message_file(mid):
+    out = subprocess.run(["notmuch", "search", "--exclude=false", "--output=files", "--duplicate=1",
+                          nm_id(mid)], capture_output=True, text=True, check=True).stdout.split("\n")
+    return out[0] if out and out[0] else None
+
+
+def read_message(path):
+    import email
+    import email.policy
+    with open(path, "rb") as f:
+        return email.message_from_binary_file(f, policy=email.policy.default)
+
+
+def bogofilter(path):
+    """bogofilter's verdict, S (spam), H or U (unsure), and its score; None until it has learned."""
+    counts = WORDLIST / "counts"
+    if not counts.exists() or not shutil.which("bogofilter"):
+        return None
+    spam, ham = map(int, counts.read_text().split())
+    if spam < TRAIN_MIN[0] or ham < TRAIN_MIN[1]:
+        return None
+    r = subprocess.run(["bogofilter", "-d", str(WORDLIST), "-T", "-I", path],
+                       capture_output=True, text=True)
+    parts = r.stdout.split()
+    return (parts[0], float(parts[1])) if len(parts) >= 2 else None
+
+
+def filter_config():
+    conf = {}
+    if FILTER.exists():
+        for line in FILTER.read_text().splitlines():
+            line = line.split("#", 1)[0].split(None, 1)
+            if len(line) == 2:
+                conf[line[0]] = line[1].strip()
+    return conf
+
+
+def plain_text(msg, limit=3000):
+    body = msg.get_body(preferencelist=("plain", "html"))
+    try:
+        text = body.get_content() if body else ""
+    except (LookupError, ValueError):
+        text = ""
+    if body is not None and body.get_content_type() == "text/html":
+        text = re.sub(r"<(style|script)\b.*?</\1>", " ", text, flags=re.S | re.I)
+        text = re.sub(r"<[^>]+>", " ", text)
+    return " ".join(text.split())[:limit]
+
+
+def ask_model(conf, msg, sender):
+    """The language model's verdict: (spam?, its reason), or None when it can't say."""
+    import urllib.request
+    prompt = ("Is this email spam, phishing or a scam? Cold sales outreach counts as spam. "
+              "Newsletters and notifications the recipient signed up for do not. Answer with "
+              "SPAM or OK, then a short reason, on one line.\n\n"
+              f"From: {msg.get('From', '')}\nSubject: {msg.get('Subject', '')}\n\n{plain_text(msg)}")
+    body = json.dumps({"model": conf.get("llm-model", ""), "temperature": 0,
+                       "messages": [{"role": "user", "content": prompt}]}).encode()
+    req = urllib.request.Request(conf["llm-url"], body, {"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            answer = json.load(r)["choices"][0]["message"]["content"]
+    except (OSError, ValueError, KeyError, IndexError) as e:
+        print(f"deck-mail: filter: the language model didn't answer: {e}", file=sys.stderr)
+        return None
+    answer = re.sub(r"<think>.*?</think>", "", answer, flags=re.S).strip()
+    word = answer.split(None, 1)[0].strip(".:,").upper() if answer else ""
+    if word not in ("SPAM", "OK"):
+        return None
+    return word == "SPAM", answer.split(None, 1)[1].strip() if " " in answer else ""
+
+
+def filter_log(update=None):
+    log = json.loads(FILTER_LOG.read_text()) if FILTER_LOG.exists() else {}
+    if update:
+        log.update(update)
+        cut = time.time() - 90 * 86400
+        log = {k: v for k, v in log.items() if v.get("time", 0) > cut}
+        STATE.mkdir(parents=True, exist_ok=True)
+        tmp = FILTER_LOG.with_suffix(".tmp")
+        tmp.write_text(json.dumps(log, indent=1))
+        os.replace(tmp, FILTER_LOG)
+    return log
+
+
+def filter_new(query="tag:new and tag:inbox and not tag:sent and not tag:draft"):
+    """Screens new inbox mail and looks for spam in it; tags as the comment above says."""
+    import email.utils
+    ids = pending(f"({query}) and not tag:deleted and not tag:spam")
+    if not ids:
+        return 0
+    own = own_addresses()
+    rules = sender_rules()
+    known = known_senders()
+    known_bases = {base_domain(a.rpartition("@")[2]) for a in known | own}
+    conf = filter_config()
+    asked = 0
+    batch, log = [], {}
+    for mid in ids:
+        path = message_file(mid)
+        if not path:
+            continue
+        msg = read_message(path)
+        addr = email.utils.parseaddr(str(msg.get("From", "")))[1].lower()
+        if not addr or addr in own:
+            continue
+        domain = addr.rpartition("@")[2]
+        rule = rule_for(rules, addr)
+        if rule == "block":
+            batch.append(f"+deleted -- {nm_id(mid)}")
+            log[mid] = {"time": time.time(), "sender": addr, "blocked": True, "reasons": []}
+            continue
+        new_sender = rule != "allow" and addr not in known
+        reasons = [r for r in (authentication(msg), lookalike(domain, known_bases)) if r]
+        verdict = bogofilter(path)
+        if verdict and verdict[0] == "S":
+            reasons.append(f"bogofilter: spam ({verdict[1]:.2f})")
+        unsure = verdict is None or verdict[0] == "U"
+        if (not reasons and new_sender and unsure and conf.get("llm-url")
+                and asked < int(conf.get("llm-max", 5))):
+            asked += 1
+            answer = ask_model(conf, msg, addr)
+            if answer and answer[0]:
+                reasons.append(f"language model: {answer[1] or 'spam'}")
+        if new_sender:
+            batch.append(f"+screener -- {nm_id(mid)}")
+        if reasons:
+            batch.append(f"+suspect -- {nm_id(mid)}")
+        if new_sender or reasons:
+            log[mid] = {"time": time.time(), "sender": addr, "new-sender": new_sender,
+                        "reasons": reasons}
+    if batch:
+        subprocess.run(["notmuch", "tag", "--batch"], input="\n".join(batch) + "\n", text=True,
+                       check=True)
+    if log:
+        filter_log(log)
+        print(f"deck-mail: filter: {sum(v.get('new-sender', False) for v in log.values())} from new "
+              f"senders, {sum(bool(v['reasons']) for v in log.values())} suspect, "
+              f"{sum(v.get('blocked', False) for v in log.values())} blocked")
+    return 0
+
+
+def train(force=False):
+    """Teaches bogofilter again, from scratch: spam is what you or Gmail called spam; the rest is
+    mail you kept (not deleted, not screened or suspect, not your own). Once a day from sync."""
+    stamp = WORDLIST / "counts"
+    if not shutil.which("bogofilter"):
+        print("deck-mail: filter: bogofilter isn't installed (mail-filter/bogofilter)", file=sys.stderr)
+        return 1
+    if not force and stamp.exists() and time.time() - stamp.stat().st_mtime < TRAIN_EVERY:
+        return 0
+
+    def files(query):
+        out = subprocess.run(["notmuch", "search", "--exclude=false", "--output=files", "--duplicate=1",
+                              "--sort=newest-first", f"--limit={TRAIN_LIMIT}", query],
+                             capture_output=True, text=True, check=True).stdout
+        return [f for f in out.split("\n") if f]
+
+    spam = files("tag:spam")
+    ham = files("not tag:spam and not tag:deleted and not tag:screener and not tag:suspect"
+                " and not tag:sent and not tag:draft")
+    tmp = WORDLIST.with_name("bogofilter.new")
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True)
+    for flag, group in (("-s", spam), ("-n", ham)):
+        for i in range(0, len(group), 500):
+            subprocess.run(["bogofilter", "-d", str(tmp), flag, "-B", *group[i:i + 500]],
+                           check=True, capture_output=True)
+    (tmp / "counts").write_text(f"{len(spam)} {len(ham)}\n")
+    old = WORDLIST.with_name("bogofilter.old")
+    shutil.rmtree(old, ignore_errors=True)
+    if WORDLIST.exists():
+        WORDLIST.rename(old)
+    tmp.rename(WORDLIST)
+    shutil.rmtree(old, ignore_errors=True)
+    ready = len(spam) >= TRAIN_MIN[0] and len(ham) >= TRAIN_MIN[1]
+    print(f"deck-mail: filter: bogofilter learned from {len(spam)} spam and {len(ham)} other mails"
+          + ("" if ready else f"; it gives verdicts from {TRAIN_MIN[0]} spam and {TRAIN_MIN[1]} other"))
+    return 0
+
+
+def screener(args):
+    """`screener allow|block|forget ADDRESS`: the sender's line in the senders file, and their mail
+    tagged to match. Prints what it tagged as JSON ([change, [ids]] pairs), for mmm's undo."""
+    if len(args) != 2 or args[0] not in ("allow", "block", "forget") or "@" not in args[1] \
+            or re.search(r'[\s"()]', args[1]):
+        sys.exit("deck-mail: screener allow|block|forget ADDRESS|@DOMAIN")
+    kind, who = args[0], args[1].lower()
+    lines = SENDERS.read_text().splitlines() if SENDERS.exists() else SENDERS_EXAMPLE.splitlines()
+    lines = [l for l in lines if l.split("#", 1)[0].split()[1:2] != [who]]
+    if kind != "forget":
+        lines.append(f"{kind} {who}")
+    SENDERS.parent.mkdir(parents=True, exist_ok=True)
+    SENDERS.write_text("\n".join(lines) + "\n")
+    q = f"from:{who.lstrip('@')}" if who.startswith("@") else f"from:{who}"
+    changes = []
+    if kind == "allow":
+        changes = [("-screener", f"{q} and tag:screener"), ("-suspect", f"{q} and tag:suspect")]
+    elif kind == "block":
+        changes = [("+deleted", f"{q} and tag:inbox and not tag:deleted")]
+    done = []
+    for change, query in changes:
+        ids = pending(query)
+        if ids:
+            subprocess.run(["notmuch", "tag", "--batch"], text=True, check=True,
+                           input="".join(f"{change} -- {nm_id(m)}\n" for m in ids))
+        done.append([change, ids])
+    print(json.dumps(done))
+    return 0
+
+
+def why(mids):
+    """mmm's view of why these messages were screened or are suspect, as JSON."""
+    log = filter_log()
+    rules = sender_rules()
+    out = []
+    for mid in mids:
+        e = log.get(mid)
+        if e:
+            out.append({"message": mid, "sender": e.get("sender", ""),
+                        "new-sender": e.get("new-sender", False), "reasons": e.get("reasons", []),
+                        "rule": rule_for(rules, e.get("sender", ""))})
+    print(json.dumps(out))
+    return 0
+
+
+def unsubscribe(args):
+    """`unsubscribe [--check] ID`: how the mail's List-Unsubscribe header lets you leave the list,
+    as JSON: one-click (RFC 8058, an HTTPS POST that deck-mail makes without --check), mailto (a
+    mail to write), link (a page to open) or none."""
+    import urllib.parse
+    import urllib.request
+    check = "--check" in args
+    args = [a for a in args if a != "--check"]
+    if len(args) != 1:
+        sys.exit("deck-mail: unsubscribe [--check] MESSAGE-ID")
+    path = message_file(args[0])
+    if not path:
+        sys.exit(f"deck-mail: no message {args[0]}")
+    msg = read_message(path)
+    targets = re.findall(r"<([^>]+)>", " ".join(str(msg.get("List-Unsubscribe", "")).split()))
+    one_click = "list-unsubscribe=one-click" in str(msg.get("List-Unsubscribe-Post", "")).lower()
+    https = [t for t in targets if t.lower().startswith("https://")]
+    mailto = [t for t in targets if t.lower().startswith("mailto:")]
+    if https and one_click:
+        info = {"method": "one-click", "target": https[0]}
+    elif mailto:
+        m = urllib.parse.urlsplit(mailto[0])
+        q = urllib.parse.parse_qs(m.query)
+        info = {"method": "mailto", "target": urllib.parse.unquote(m.path),
+                "subject": q.get("subject", ["unsubscribe"])[0], "body": q.get("body", [""])[0]}
+    elif https:
+        info = {"method": "link", "target": https[0]}
+    else:
+        info = {"method": "none", "target": ""}
+    info["host"] = urllib.parse.urlsplit(info["target"]).hostname or info["target"].rpartition("@")[2]
+    info["sender"] = str(msg.get("From", ""))
+    if check or info["method"] != "one-click":
+        print(json.dumps(info))
+        return 0
+    req = urllib.request.Request(info["target"], b"List-Unsubscribe=One-Click", method="POST",
+                                 headers={"Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            info["status"] = r.status
+    except urllib.error.HTTPError as e:
+        info["status"] = e.code
+    except OSError as e:
+        sys.exit(f"deck-mail: unsubscribing at {info['host']} failed: {e}")
+    with open(STATE / "unsubscribed.log", "a") as f:
+        f.write(f"{time.strftime('%F %T')}\t{info['status']}\t{info['sender']}\t{info['host']}\n")
+    if not 200 <= info["status"] < 300:
+        sys.exit(f"deck-mail: {info['host']} answered {info['status']}")
+    print(json.dumps(info))
+    return 0
+
+
 def main():
     cmd = sys.argv[1:]
     if cmd == ["config"]:
@@ -1276,6 +1730,18 @@ def main():
         return file_pdf(cmd[1:])
     if cmd[:1] == ["top"]:
         return top(cmd[1:])
+    if cmd == ["filter"]:
+        return filter_new()
+    if cmd[:2] == ["filter", "--query"] and len(cmd) == 3:
+        return filter_new(cmd[2])
+    if cmd == ["filter", "--train"]:
+        return train(force=True)
+    if cmd[:1] == ["screener"]:
+        return screener(cmd[1:])
+    if cmd[:1] == ["why"]:
+        return why(cmd[1:])
+    if cmd[:1] == ["unsubscribe"]:
+        return unsubscribe(cmd[1:])
     print(__doc__.split("\n\n", 2)[1], file=sys.stderr)
     return 2
 

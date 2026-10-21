@@ -9,7 +9,8 @@ messages); more may follow. Addresses stay out of the repo. Disk: 323 GB free on
 
 - **Offline**: a full local copy of every account, readable and searchable without a connection;
   mail written offline is sent when back online.
-- **Everything syncs**: all history, promotions included. Only Spam stays on the server.
+- **Everything syncs**: all history, promotions included; Spam too since 2026-10-21, so Gmail's
+  verdicts and yours meet (see "Spam and the screener").
 - **One view over all accounts**, plus each account on its own.
 - **No Google Cloud OAuth client**: IMAP and SMTP with an **app password** per account.
 - **No Gmail labels to sync**: only Gmail's built-ins are in use. Inbox, Starred, read/unread,
@@ -127,6 +128,37 @@ a Nextcloud tag), and keeps a copy in `~/Documents/Archive`. `deck-mail sync` ru
 - `deck-mail archive --dry-run` lists what would go where, and what waits, without the password
   or any upload. mmm asks `deck-mail pdfs` what became of a thread's PDFs, and records a choice
   with `deck-mail file`.
+
+### Spam and the screener
+
+Gmail filters spam before deck-mail sees anything; this adds three things after it (2026-10-21).
+
+- **Telling Gmail.** `!` in mmm tags the thread `spam`; the next sync moves it to Gmail's Spam,
+  which is Gmail's "Report spam": its filter learns, for every device. Gmail's Spam folder is
+  synced, so what Gmail calls spam is `spam` here too (mmm's Spam tab, key 0), and `!` there takes
+  a message out, back to the inbox. Spam wins over delete.
+- **The screener.** New mail from a sender you don't know gets `screener` and waits in mmm's
+  Screener tab instead of its Inbox. Gmail isn't told: it stays in the inbox there, so the phone
+  still shows it. Known: anyone you wrote to, an `allow` line in `~/.config/deck-mail/senders`, or
+  a sender whose mail you kept from before the screener started (its first run; a Date header
+  can't backdate a sender in). `A` lets the sender in, `B` blocks them (their mail goes to the
+  Bin, now and later); `u` undoes either. Lines can name a whole `@domain`.
+- **Suspect.** `suspect` (also in the Screener tab, ⚠ in the list, the reason in mmm's footer)
+  when Gmail's DMARC check failed (or SPF failed with no DKIM signature that passed), when the
+  sender's domain is one letter off a domain you know or written in another script (punycode),
+  when bogofilter calls it spam, or when an optional language model does. bogofilter
+  (`mail-filter/bogofilter`) learns once a day from `spam` and from mail you kept (not deleted,
+  screened or suspect), in `~/.local/state/deck-mail/bogofilter`; it gives no verdicts until it has
+  50 spam and 200 others. The language model is asked only about new senders the other checks
+  left unsure, at most five a sync, and only if `~/.config/deck-mail/filter` names an
+  OpenAI-compatible endpoint (llama.cpp, ollama): a machine of yours, since the mail goes to it.
+
+`deck-mail filter` does the screening, from notmuch's post-new hook, on new mail in the inbox; why
+each mail was screened is kept for 90 days in `~/.local/state/deck-mail/filter.json`.
+
+**Unsubscribing**: `U` in mmm reads the mail's `List-Unsubscribe`: a one-click request (RFC 8058,
+an HTTPS POST that deck-mail sends; logged in `unsubscribed.log`), else a mail to write, else the
+list's page in the browser. `U` again does it.
 
 ### Promotions and other bulk mail
 

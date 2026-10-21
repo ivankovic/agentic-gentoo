@@ -1,8 +1,11 @@
-# mmm's searches, along the top, 1 to 9 in this order: Name = notmuch query.
+# mmm's searches, along the top, 1 to 9 and 0 in this order: Name = notmuch query.
 # Mail tagged deleted or spam is left out of every search unless the query names the tag
 # (notmuch's search.exclude_tags), so Bin needs no "not tag:deleted" elsewhere.
 # Waiting: mail with a PDF that waits for t or x, before anything goes to Nextcloud.
-Inbox = tag:inbox
+# Screener: new mail from senders you don't know, and mail that looks like spam (deck-mail filter);
+# it's still in Gmail's inbox. A lets the sender in, B blocks them, ! reports spam.
+Inbox = tag:inbox and not tag:screener and not tag:suspect
+Screener = tag:inbox and (tag:screener or tag:suspect)
 Unread = tag:unread
 Starred = tag:flagged
 Waiting = tag:pdf-waiting
@@ -10,3 +13,4 @@ Sent = tag:sent
 Drafts = tag:draft
 Everything = *
 Bin = tag:deleted
+Spam = tag:spam

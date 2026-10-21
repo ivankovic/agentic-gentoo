@@ -14,10 +14,11 @@ use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table, TableState, Wr
 /// Every key, for `?` `?`. A section starts at column 0.
 const HELP: &[&str] = &[
     "Everywhere",
-    "  1-9, Tab Shift+Tab  a search along the top / the next, previous one; its count: unread or waiting",
+    "  1-9 0, Tab S-Tab    a search along the top (0 the tenth) / the next, previous; its count: unread or waiting",
     "  /                   search: notmuch's query language (from:ana subject:ručak date:1w..)",
     "  a  d                archive (leaves the Inbox) / delete (Gmail's Bin at the next sync)",
     "  s  m                star / unstar;  mark read / unread",
+    "  !                   spam: to Gmail's Spam at the next sync, which teaches Gmail; in Spam, ! takes it out",
     "  u                   undo the last of these; first, take back a mail in its minute",
     "  c  r  R  f          write: a new mail / reply / reply to all / forward (the message read)",
     "  e                   resume a draft ✎ (in the list: the thread's; in a thread: the one read)",
@@ -47,6 +48,12 @@ const HELP: &[&str] = &[
     "  t                   file it in Nextcloud: category and name, suggested from the rules; Enter",
     "  x                   leave it out of Nextcloud;  u undoes either, until the next sync sends it",
     "                      Until then its mail is in the Waiting tab, ☁ in the list",
+    "",
+    "Screener (deck-mail filter: new mail from senders you don't know, and mail that looks like spam)",
+    "  A                   let the sender in: their mail goes to the Inbox from now on",
+    "  B                   block the sender: their mail goes to the Bin, now and from now on",
+    "                      ? in the list: a new sender;  ⚠ suspect (the reason is in the footer)",
+    "  U                   unsubscribe: says how (one click, a mail, a page); U again does it",
 ];
 
 fn kind_style(k: Kind) -> Style {
@@ -82,7 +89,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let mut tabs = vec![];
     for (i, s) in app.searches.iter().enumerate() {
         let on = app.current == Some(i);
-        let mut text = format!(" {} {}", i + 1, s.name);
+        let mut text = format!(" {} {}", (i + 1) % 10, s.name);
         if let Some(n) = app.unread[i].filter(|&n| n > 0) {
             text += &format!(" {n}");
         }
@@ -225,6 +232,8 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
                         | "draft"
                         | "archived"
                         | "pdf-waiting"
+                        | "screener"
+                        | "suspect"
                 )
             })
             .collect();
@@ -243,7 +252,11 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
             )),
             Cell::from(Span::raw(count).dark_gray()),
             Cell::from(Line::from(subject)),
-            Cell::from(if t.has("pdf-waiting") {
+            Cell::from(if t.has("suspect") {
+                Span::raw("⚠").red()
+            } else if t.has("screener") {
+                Span::raw("?").magenta()
+            } else if t.has("pdf-waiting") {
                 Span::raw("☁").yellow()
             } else if t.has("attachment") {
                 Span::raw("📎")
@@ -567,6 +580,9 @@ pub fn explain_list(app: &App) -> Mode {
         ("d", "delete / restore"),
         ("s", "star"),
         ("m", "read / unread"),
+        ("!", "spam / not spam"),
+        ("A B", "let sender in / block"),
+        ("U", "unsubscribe"),
         ("u", "undo"),
         ("r R f", "reply / all / forward"),
         ("c", "write a new mail"),
@@ -594,7 +610,14 @@ pub fn explain_list(app: &App) -> Mode {
         tags_line(&t.tags),
         Line::from(""),
     ];
-    body.push(Line::from(if t.has("inbox") {
+    if t.has("screener") || t.has("suspect") {
+        body.push(Line::from(
+            "In the Screener: a new sender (?) or mail that looks like spam (⚠). A lets the sender in, B blocks them, ! reports spam. Open it for the reason.",
+        ));
+    }
+    body.push(Line::from(if t.has("spam") {
+        "Spam: in Gmail's Spam (or going there at the next sync). ! takes it out, back to the Inbox."
+    } else if t.has("inbox") {
         "a archives it: it leaves the Inbox and stays in All Mail. d deletes it: Gmail's Bin at the next sync, gone from there after 30 days."
     } else if t.has("deleted") {
         "It is in the Bin: d takes it back out. Gmail empties the Bin 30 days after deletion."
@@ -737,6 +760,8 @@ pub fn explain_thread(app: &App, v: &ThreadView) -> Mode {
             ("H", "HTML / plain"),
             ("a d", "archive / delete"),
             ("s m", "star / unread"),
+            ("! U", "spam / unsubscribe"),
+            ("A B", "let sender in / block"),
             ("r R", "reply / reply to all"),
             ("f c", "forward / new mail"),
         ],

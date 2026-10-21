@@ -61,7 +61,7 @@ struct Pdfs {
     pdfs: Vec<Pdf>,
 }
 
-fn deck_mail(args: &[&str]) -> Result<Vec<u8>> {
+pub fn deck_mail(args: &[&str]) -> Result<Vec<u8>> {
     let out = Command::new("deck-mail")
         .args(args)
         .stdin(Stdio::null())

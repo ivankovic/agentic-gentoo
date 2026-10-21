@@ -93,7 +93,7 @@ daemons and what units run (`deck-usaged`, `deck-focusd`, `deck-attention`, `dec
   at 96–100 °C, below the firmware's 30 W limit in performance. A higher limit, the `scx_lavd`
   scheduler and always-on huge pages were measured and left nothing faster:
   [bench/2026-10-13-power-and-scheduler.md](bench/2026-10-13-power-and-scheduler.md).
-- **Extra packages** in world: `www-client/firefox-bin`, `sys-fs/udisks`,
+- **Extra packages** in world: `www-client/firefox-bin`, `sys-fs/udisks`, `mail-filter/bogofilter` (deck-mail's spam filter),
   `sys-boot/efibootmgr`, `dev-util/github-cli`; `app-crypt/pinentry -qt6`. For looks:
   `sys-boot/plymouth` (`-gtk -pango`; 22.02, since 24.004 is package-masked as breaking some
   systems) with the overlay's `x11-themes/plymouth-theme-academia`, `x11-themes/papirus-icon-theme`,
