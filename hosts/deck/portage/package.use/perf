@@ -1,0 +1,2 @@
+# perf for profiling (report --stdio): without the GTK 2 and Python front ends.
+dev-util/perf -gtk -python

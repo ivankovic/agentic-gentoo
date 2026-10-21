@@ -102,6 +102,9 @@ daemons and what units run (`deck-usaged`, `deck-focusd`, `deck-attention`, `dec
   for `dig` (`bind-tools` is gone from ::gentoo; the server stays disabled), iperf3, socat, whois,
   btop, lsof, strace, iotop-c, tmux, usbutils, dmidecode, lm-sensors. USE in
   [portage/package.use/admin-tools](portage/package.use/admin-tools).
+- **Profiling:** `dev-util/perf` (`-gtk -python`). niri keeps its debug info in `/usr/lib/debug`
+  ([portage/package.env/debug](portage/package.env/debug), `splitdebug`), so `perf record -p` as
+  the user shows its functions.
 - **Bambu Studio** (`media-gfx/bambustudio-bin`, GURU, `~amd64`) for the Bambu Lab X1C: Bambu's
   AppImage unpacked to `/opt`. On first login it downloads Bambu's proprietary network plugin into
   `~/.config/BambuStudio`. Its bundled wxWidgets has no EGL, so the GL canvas needs X11: it runs
