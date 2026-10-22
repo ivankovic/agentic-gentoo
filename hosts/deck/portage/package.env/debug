@@ -1,2 +1,0 @@
-# niri's release profile already builds line tables; Portage would strip them.
-gui-wm/niri splitdebug.conf

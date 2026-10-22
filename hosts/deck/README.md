@@ -102,9 +102,14 @@ daemons and what units run (`deck-usaged`, `deck-focusd`, `deck-attention`, `dec
   for `dig` (`bind-tools` is gone from ::gentoo; the server stays disabled), iperf3, socat, whois,
   btop, lsof, strace, iotop-c, tmux, usbutils, dmidecode, lm-sensors. USE in
   [portage/package.use/admin-tools](portage/package.use/admin-tools).
-- **Profiling:** `dev-util/perf` (`-gtk -python`). niri keeps its debug info in `/usr/lib/debug`
-  ([portage/package.env/debug](portage/package.env/debug), `splitdebug`), so `perf record -p` as
-  the user shows its functions.
+- **niri** is built for this CPU with whole-program LTO ([portage/env/niri.conf](portage/env/niri.conf)).
+- **Profiling:** `dev-util/perf` (`-gtk -python`). To profile niri, rebuild it with its debug info
+  (`FEATURES=splitdebug CARGO_PROFILE_RELEASE_DEBUG=line-tables-only emerge -1 gui-wm/niri`), log
+  in again (`deck-terminals --relogin`), then `perf record -B -N --call-graph dwarf -p <pid>` as
+  the user. `-B -N` matter: perf's build-id pass at the end otherwise runs addr2line over the
+  110 MB debug file for many minutes. Read it with `perf script --symfs` pointing at a tree
+  without `/usr/lib/debug` and symbolize offline with `llvm-symbolizer`; perf's own lookup in
+  that file is just as slow.
 - **Bambu Studio** (`media-gfx/bambustudio-bin`, GURU, `~amd64`) for the Bambu Lab X1C: Bambu's
   AppImage unpacked to `/opt`. On first login it downloads Bambu's proprietary network plugin into
   `~/.config/BambuStudio`. Its bundled wxWidgets has no EGL, so the GL canvas needs X11: it runs
