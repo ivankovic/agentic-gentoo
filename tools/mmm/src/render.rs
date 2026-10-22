@@ -422,38 +422,50 @@ impl Builder<'_> {
                 Kind::Text
             };
             let mut segs = vec![];
-            let mut at = 0;
-            for (s, e) in find_urls(&raw) {
-                if s > at {
-                    segs.push(Seg {
-                        text: raw[at..s].to_string(),
-                        kind,
-                        focus: None,
-                    });
-                }
-                let url = &raw[s..e];
-                let target = if url.to_ascii_lowercase().starts_with("www.") {
-                    format!("https://{url}")
-                } else {
-                    url.to_string()
-                };
-                let f = self.focus(Target::Link(target), url.to_string());
-                self.doc.focus[f].line = usize::MAX;
+            self.with_urls(&raw, kind, &mut segs);
+            if segs.is_empty() {
                 segs.push(Seg {
-                    text: url.to_string(),
-                    kind: Kind::Link,
-                    focus: Some(f),
-                });
-                at = e;
-            }
-            if at < raw.len() || segs.is_empty() {
-                segs.push(Seg {
-                    text: raw[at..].to_string(),
+                    text: String::new(),
                     kind,
                     focus: None,
                 });
             }
             self.line(segs);
+        }
+    }
+
+    /// `text` as segments of `kind`, with the bare URLs in it as links.
+    fn with_urls(&mut self, text: &str, kind: Kind, segs: &mut Vec<Seg>) {
+        let mut at = 0;
+        for (s, e) in find_urls(text) {
+            if s > at {
+                segs.push(Seg {
+                    text: text[at..s].to_string(),
+                    kind,
+                    focus: None,
+                });
+            }
+            let url = &text[s..e];
+            let target = if url.to_ascii_lowercase().starts_with("www.") {
+                format!("https://{url}")
+            } else {
+                url.to_string()
+            };
+            let f = self.focus(Target::Link(target), url.to_string());
+            self.doc.focus[f].line = usize::MAX;
+            segs.push(Seg {
+                text: url.to_string(),
+                kind: Kind::Link,
+                focus: Some(f),
+            });
+            at = e;
+        }
+        if at < text.len() {
+            segs.push(Seg {
+                text: text[at..].to_string(),
+                kind,
+                focus: None,
+            });
         }
     }
 
@@ -502,6 +514,11 @@ impl Builder<'_> {
                     _ => {
                         if !ts.s.trim().is_empty() {
                             open = None;
+                        }
+                        // A URL written out in the text, not as a link: one all the same.
+                        if kind != Kind::Code {
+                            self.with_urls(&ts.s, kind, &mut segs);
+                            continue;
                         }
                         None
                     }
@@ -717,6 +734,25 @@ mod tests {
             Target::Link("https://maps.example/x".into())
         );
         assert_eq!(b.doc.focus[0].text, "ovdje na karti");
+    }
+
+    #[test]
+    fn urls_written_out_in_html_are_links() {
+        let mut b = Builder {
+            doc: Doc::default(),
+            width: 60,
+            pdfs: &Pdfs::new(),
+        };
+        b.html("<p>See https://example.org/mr/3#note_1 at <b>noon</b>.</p><pre>https://in.code/x</pre>");
+        assert_eq!(b.doc.focus.len(), 1);
+        assert_eq!(
+            b.doc.focus[0].target,
+            Target::Link("https://example.org/mr/3#note_1".into())
+        );
+        let line: Vec<_> = b.doc.lines[0].iter().map(|s| (s.kind, s.text.as_str())).collect();
+        assert_eq!(line[0], (Kind::Text, "See "));
+        assert_eq!(line[1], (Kind::Link, "https://example.org/mr/3#note_1"));
+        assert_eq!(line[2], (Kind::Text, " at "));
     }
 
     #[test]
