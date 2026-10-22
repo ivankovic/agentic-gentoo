@@ -108,6 +108,8 @@ pub struct App {
     pub quit: bool,
     undo: Vec<Undo>,
     lastmod: String,
+    /// The database's version file when lastmod was last asked: unchanged, nothing to ask.
+    stamp: Option<(u64, std::time::SystemTime)>,
     /// A draft for the editor: main suspends the screen and runs it.
     pub edit: Option<Draft>,
     /// Mail sent with `y`, in its minute before it goes.
@@ -234,6 +236,7 @@ impl App {
             quit: false,
             undo: vec![],
             lastmod: String::new(),
+            stamp: None,
             edit: None,
             pending: vec![],
             unsub: None,
@@ -286,6 +289,12 @@ impl App {
             self.status = format!("✉ sent to {}", p.to);
         }
         self.pending.retain(|p| p.left() > 0);
+        // Ticks come every two seconds; most find the database as it was, without running notmuch.
+        let stamp = notmuch::db_stamp();
+        if stamp.is_some() && stamp == self.stamp && !self.lastmod.is_empty() {
+            return;
+        }
+        self.stamp = stamp;
         let Ok(m) = notmuch::lastmod() else { return };
         if m != self.lastmod {
             self.lastmod = m;

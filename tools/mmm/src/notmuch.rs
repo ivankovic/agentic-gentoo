@@ -4,7 +4,10 @@
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::Value;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
+use std::time::SystemTime;
 
 fn notmuch(args: &[&str]) -> Result<Vec<u8>> {
     let out = Command::new("notmuch")
@@ -71,6 +74,31 @@ pub fn lastmod() -> Result<String> {
         .skip(1)
         .collect::<Vec<_>>()
         .join(" "))
+}
+
+/// What changes whenever the database does: Xapian replaces its version file (`iamglass`) on
+/// every commit. One stat instead of a notmuch run, for polling; None when it can't be found.
+pub fn db_stamp() -> Option<(u64, SystemTime)> {
+    use std::os::unix::fs::MetadataExt;
+    static FILE: OnceLock<Option<PathBuf>> = OnceLock::new();
+    let file = FILE.get_or_init(|| {
+        let db = notmuch(&["config", "get", "database.path"]).ok()?;
+        let db = PathBuf::from(String::from_utf8_lossy(&db).trim());
+        let data = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::home_dir().map(|h| h.join(".local/share")))?;
+        let profile = std::env::var("NOTMUCH_PROFILE").unwrap_or_else(|_| "default".into());
+        // The old layout, inside the mail, and the XDG one.
+        [
+            db.join(".notmuch/xapian"),
+            data.join("notmuch").join(profile).join("xapian"),
+        ]
+        .into_iter()
+        .map(|d| d.join("iamglass"))
+        .find(|f| f.exists())
+    });
+    let m = std::fs::metadata(file.as_ref()?).ok()?;
+    Some((m.ino(), m.modified().ok()?))
 }
 
 /// The ids of the messages matching `query`, deleted and spam ones included.
