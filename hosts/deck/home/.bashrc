@@ -17,7 +17,7 @@ fi
 
 # Put your fun stuff here.
 export PATH="$HOME/.local/bin:$HOME/go/bin:$PATH"
-. "$HOME/.cargo/env"
+[[ -r $HOME/.cargo/env ]] && . "$HOME/.cargo/env"
 
 # Prompt in the foot palette (ANSI colours, so the text consoles match too). Two lines:
 #
