@@ -7,7 +7,7 @@ After=graphical-session.target
 Requisite=graphical-session.target
 
 [Service]
-ExecStart=/usr/local/bin/deck-terminals
+ExecStart=/usr/local/bin/deck-terminals --watch
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=5

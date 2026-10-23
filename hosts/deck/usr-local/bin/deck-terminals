@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """deck-terminals: after a crash or a flat battery, reopen the foot terminals where they were.
 
-Runs as a user service (home/.config/systemd/user/deck-terminals.service) for the whole niri
-session. Every 10 s it records each foot window: its workspace, column and place in the column,
+`deck-terminals --watch` runs as a user service (home/.config/systemd/user/deck-terminals.service)
+for the whole niri session. Every 10 s it records each foot window: its workspace, column and place in the column,
 width, the shell's directory and what is running in it (the terminal's foreground program). It
 writes ~/.local/state/deck-terminals/session.json only when that changes, and syncs it to disk,
 so a reset loses at most the last 10 s. Stopping the service (logout, shutdown, reboot) marks
@@ -277,6 +277,10 @@ def main():
             RELOGIN.unlink(missing_ok=True)
             raise
         return 0
+    if sys.argv[1:] != ["--watch"]:
+        print("deck terminals --reboot | --relogin | --show  (--watch: what the service runs)",
+              file=sys.stderr)
+        return 2
     stopping = False
 
     def stop(*_):

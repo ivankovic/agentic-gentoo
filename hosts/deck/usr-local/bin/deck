@@ -14,6 +14,7 @@ main=(
 	"patches|packages, local patches on their way upstream, usage, AI reviews (a TUI)"
 	"mail|mail: sync, unlock, which PDFs go to Nextcloud, top senders"
 	"nosnap|keep rebuildable folders out of the btrfs snapshots"
+	"terminals|reboot or log out with the terminals coming back (--reboot, --relogin)"
 )
 recovery=(
 	"mount|the main system at /mnt/deck, read-only (rw, off, check)"
