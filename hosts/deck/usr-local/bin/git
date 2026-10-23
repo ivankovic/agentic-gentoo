@@ -117,7 +117,7 @@ state() {
 		# Files the config includes.
 		"$real" --git-dir="$gd" config --list --show-origin --includes --local 2>/dev/null |
 			sed -n 's/^file:\([^	]*\)	.*/\1/p' | sort -u
-	} | sort -u >"$record.files.new"
+	} | sort -u >"$record.files.$$"
 	while IFS= read -r f; do
 		[[ -L $f ]] && echo "link $f -> $(readlink -- "$f")"
 		if [[ -d $f ]]; then
@@ -125,14 +125,14 @@ state() {
 		else
 			echo "file $f $(stat -L -c %a -- "$f" 2>/dev/null) $(sha256sum <"$f" 2>/dev/null | cut -c1-64)"
 		fi
-	done <"$record.files.new"
+	done <"$record.files.$$"
 }
 
 save() {
 	mkdir -p -- "$store"
-	state >"$record.state.new"
-	mv -- "$record.files.new" "$record.files"
-	mv -- "$record.state.new" "$record.state"
+	state >"$record.state.$$"
+	mv -- "$record.files.$$" "$record.files"
+	mv -- "$record.state.$$" "$record.state"
 	stamp >"$record.stamp"
 }
 
@@ -145,6 +145,8 @@ guarded() {
 	fi
 	[[ $wt/ = "$src"/* || $gd/ = "$src"/* ]] || return 1
 	record=$store/$(printf '%s' "$gd" | sha256sum | cut -c1-32)
+	# Work files of this git's own (.$$): two gits at once writing one file saved a hook list cut short.
+	trap 'rm -f -- "$record.files.$$" "$record.state.$$"' EXIT
 }
 
 trust() {
@@ -158,12 +160,12 @@ trust() {
 		guarded "$d" || { echo "git trust: $d is not a repository in $src" >&2; continue; }
 		mkdir -p -- "$store"
 		if [[ -f $record.state ]]; then
-			state | diff -u --label "trusted" --label "now" -- "$record.state" - && { echo "git trust: ${wt#"$HOME"/}: unchanged"; rm -f -- "$record.files.new"; continue; }
+			state | diff -u --label "trusted" --label "now" -- "$record.state" - && { echo "git trust: ${wt#"$HOME"/}: unchanged"; rm -f -- "$record.files.$$"; continue; }
 		else
 			echo "git trust: ${wt#"$HOME"/}: first time"
 			# The settings that make git run something, if it has any; and its hooks.
 			state | grep -E -i '^file:[^	]*	[^=]*(fsmonitor|sshcommand|hookspath|\.cmd|\.clean|\.smudge|\.process|external|editor|pager|askpass|program|helper|textconv|include)[^=]*=|^file [^ ]*hooks/' | sed 's/^/  /'
-			rm -f -- "$record.files.new"
+			rm -f -- "$record.files.$$"
 		fi
 		save
 		echo "git trust: ${wt#"$HOME"/}: trusted"
@@ -210,7 +212,7 @@ done
 if [[ -f $record.stamp ]] && [[ $(stamp) == "$(cat -- "$record.stamp")" ]]; then
 	:
 elif [[ -f $record.state ]] && state | cmp -s -- "$record.state" -; then
-	mv -- "$record.files.new" "$record.files"
+	mv -- "$record.files.$$" "$record.files"
 	stamp >"$record.stamp"
 else
 	{
@@ -220,7 +222,7 @@ else
 		else
 			echo "git: ${wt#"$HOME"/}: a repository host git hasn't seen before."
 		fi
-		rm -f -- "$record.files.new"
+		rm -f -- "$record.files.$$"
 		echo "Look at it (a jailed program may have changed it), then: git -C '$wt' trust"
 	} >&2
 	exit 128
