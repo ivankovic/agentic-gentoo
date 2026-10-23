@@ -1,11 +1,15 @@
-# Reviews updates of watched code for security, within review.toml's daily budget (`deck patches review
-# auto`, tools/deck): run by deck-review.timer. Findings show on the maintenance tile.
+# Scans every pending update for malicious code (`deck patches scan pending`), so that the emerge
+# wrapper's gate mostly finds them scanned already; then reviews updates of watched code for
+# security, within review.toml's daily budget (`deck patches review auto`, tools/deck). Run by
+# deck-review.timer. Findings show on the maintenance tile.
 [Unit]
-Description=Security reviews of updates to watched code (deck patches review auto)
+Description=Scans of pending updates and security reviews of watched code (deck patches)
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=oneshot
+# A scan that fails is retried by the gate: the reviews still run.
+ExecStart=-/usr/bin/deck-patches scan pending
 ExecStart=/usr/bin/deck-patches review auto
 Nice=10

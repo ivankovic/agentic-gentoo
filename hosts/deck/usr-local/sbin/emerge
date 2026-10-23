@@ -8,19 +8,50 @@
 # 5 are kept (btrbk's hourly ones are separate and ignore these). Skipped for commands that change
 # nothing (--pretend, --search, --info, --sync, ...). Roll back from the recovery system with
 # deck-rollback. A failed snapshot is reported and the emerge goes ahead.
+#
+# Before that, the scan gate: what this emerge would install is scanned for malicious code, as the
+# user (`deck patches scan gate`, tools/deck/src/scan.rs: in the jail, with review.toml's agent),
+# and the emerge is refused when anything is flagged or could not be scanned. A security fix
+# (GLSA) is held up only by a flag. --allow-unscanned skips the gate for this one emerge.
 if [[ $EUID != 0 ]] || grep -q '/build\.slice/' /proc/self/cgroup || ! [[ -d /run/systemd/system ]]; then
   exec /usr/bin/emerge "$@"
 fi
 
-changes=1
+changes=1 installs=1 gate=1 args=()
 for arg in "$@"; do
   case $arg in
+    --allow-unscanned) gate=0; continue ;;
     --pretend | --search | --searchdesc | --info | --help | --version | --sync | --check-news | \
       --list-sets | --metadata | --regen | --resume-list) changes=0 ;;
+    # Changes that install nothing: removing, selecting, fetching.
+    --unmerge | --depclean | --prune | --deselect | --config | --fetchonly | --fetch-all-uri) installs=0 ;;
     --*) ;;
     -*[psShV]*) changes=0 ;; # short options, also bundled: -p -pv -s -S -h -V
+    -*[CcPfF]*) installs=0 ;;
   esac
+  args+=("$arg")
 done
+set -- "${args[@]}"
+
+if ((changes && installs)); then
+  if ((gate)); then
+    user=${SUDO_USER:-$(id -nu 1000)}
+    uid=$(id -u "$user")
+    echo "emerge: scanning what this would install (deck patches scan gate, as $user)" >&2
+    if ! runuser -u "$user" -- env -i HOME="$(getent passwd "$user" | cut -d: -f6)" USER="$user" \
+      LOGNAME="$user" PATH=/usr/local/bin:/usr/bin:/bin LANG="${LANG:-C.UTF-8}" TERM="${TERM:-dumb}" \
+      XDG_RUNTIME_DIR="/run/user/$uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+      deck-patches scan gate -- "$@"; then
+      echo "emerge: refused by the scan gate; nothing was installed. After a look:" >&2
+      echo "  deck patches scan allow <category/package-version> --note '...'  (as $user)" >&2
+      echo "  or, for this emerge only: emerge --allow-unscanned ..." >&2
+      exit 1
+    fi
+  else
+    echo "emerge: WARNING: --allow-unscanned: installing without the scan gate" >&2
+    logger -t emerge "scan gate skipped (--allow-unscanned): emerge $*"
+  fi
+fi
 
 if ((changes)); then
   pool=/mnt/btr_pool # btrfs top level, automounted (etc/fstab)

@@ -455,7 +455,11 @@ HTTPS. Offline, servers show as unchecked, not down. Which servers, and how to r
   the tile lists any that aren't).
 - **Updates and rollback.** `sudo emerge` ([usr-local/sbin/emerge](usr-local/sbin/emerge)) first
   takes a read-only snapshot of `@`, `/.snapshots/@.pre-emerge.<time>` (the last 5 kept; btrbk
-  ignores them), unless the command changes nothing (`-p`, `--search`, `--sync`, ...). To go back,
+  ignores them), unless the command changes nothing (`-p`, `--search`, `--sync`, ...). Before
+  that, the **scan gate**: what it would install is scanned for malicious code (`deck patches scan
+  gate`, as the user, an AI agent reading what an automatic triage flags; tools/deck/README.md,
+  "Scan for malicious code"), and the emerge is refused when anything is flagged or could not be
+  scanned, until allowed (`deck patches scan allow`) or for one emerge, `--allow-unscanned`. To go back,
   boot the recovery system and run `deck rollback`: it lists the snapshots of `@`, renames `@` to
   `@.broken.<time>` and makes the chosen snapshot the new `@`, then checks that the kernels on the
   ESP still have their modules in it.

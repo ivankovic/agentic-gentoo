@@ -4,6 +4,7 @@
 mod model;
 mod patches;
 mod review;
+mod scan;
 mod send;
 mod track;
 mod tui;
@@ -37,6 +38,12 @@ enum Cmd {
     Review {
         #[command(subcommand)]
         cmd: Option<ReviewCmd>,
+    },
+    /// Scans for malicious code in what an emerge would install, and the gate the emerge wrapper
+    /// asks before installing
+    Scan {
+        #[command(subcommand)]
+        cmd: ScanCmd,
     },
     /// Print installed packages, tab-separated
     Packages {
@@ -154,6 +161,41 @@ enum ReviewCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum ScanCmd {
+    /// Scan what `emerge --update --deep --newuse @world` would install (the timer runs it)
+    Pending {
+        /// One of review.toml's agents [default: its [scan] agent, else its default]
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// Scan these versions (category/package-version) now, again if they were scanned before
+    Run {
+        #[arg(required = true)]
+        cpvs: Vec<String>,
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// For the emerge wrapper: scan what emerge would install with these arguments, then exit 1
+    /// when anything may not be installed
+    Gate {
+        #[arg(long)]
+        agent: Option<String>,
+        /// emerge's arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        args: Vec<String>,
+    },
+    /// Every verdict, newest last, tab-separated
+    List,
+    /// Let a version be installed after a look at its scan
+    Allow {
+        /// category/package-version
+        cpv: String,
+        #[arg(long, default_value = "")]
+        note: String,
+    },
+}
+
 fn main() -> Result<()> {
     // Die quietly on a closed pipe (`deck patches usage | head`), as command-line tools do.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
@@ -181,6 +223,9 @@ fn main() -> Result<()> {
     }
     if let Some(Cmd::Review { cmd }) = &cli.cmd {
         return review_cmd(&host_dir, cmd.as_ref().unwrap_or(&ReviewCmd::List));
+    }
+    if let Some(Cmd::Scan { cmd }) = &cli.cmd {
+        return scan_cmd(&host_dir, cmd);
     }
     match &cli.cmd {
         Some(Cmd::Fork { dir }) => {
@@ -272,7 +317,7 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Some(Cmd::Usage { .. } | Cmd::Fork { .. } | Cmd::Push { .. } | Cmd::Review { .. }) => unreachable!(),
+        Some(Cmd::Usage { .. } | Cmd::Fork { .. } | Cmd::Push { .. } | Cmd::Review { .. } | Cmd::Scan { .. }) => unreachable!(),
     }
 }
 
@@ -416,6 +461,65 @@ fn review_cmd(host_dir: &std::path::Path, cmd: &ReviewCmd) -> Result<()> {
             }
             Ok(())
         }
+    }
+}
+
+fn scan_cmd(host_dir: &std::path::Path, cmd: &ScanCmd) -> Result<()> {
+    let cfg = review::Config::load(host_dir)?;
+    let agent = |name: &Option<String>| cfg.agent(name.as_deref().or(cfg.scan.agent.as_deref()));
+    let mut log = std::io::stderr();
+    let print = |d: &[scan::Decision]| {
+        for x in d {
+            println!("{}\t{}\t{}\t{}", if x.pass { "ok" } else { "BLOCKED" }, x.label, x.cpv, x.why);
+        }
+    };
+    match cmd {
+        ScanCmd::Pending { agent: a } => {
+            let wanted = scan::pending(&["--update", "--deep", "--newuse", "@world"].map(String::from))?;
+            let d = scan::gate(&cfg, agent(a)?, &scan::resolve(&wanted)?, false, &mut log);
+            print(&d);
+            Ok(())
+        }
+        ScanCmd::Run { cpvs, agent: a } => {
+            let d = scan::gate(&cfg, agent(a)?, &scan::resolve(cpvs)?, true, &mut log);
+            print(&d);
+            Ok(())
+        }
+        ScanCmd::Gate { agent: a, args } => {
+            let wanted = scan::pending(args)?;
+            let d = scan::gate(&cfg, agent(a)?, &scan::resolve(&wanted)?, false, &mut log);
+            print(&d);
+            let blocked = d.iter().filter(|x| !x.pass).count();
+            if blocked > 0 {
+                eprintln!(
+                    "deck-patches: {blocked} of {} blocked. Read the reports (deck patches scan list), then \
+                     `deck patches scan allow <cpv> --note ...` for each you accept.",
+                    d.len()
+                );
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        ScanCmd::List => {
+            println!("when\tstatus\tcpv\tfrom\tsignals\tbuild_files\tagent\twhy\treport\tnote");
+            for v in scan::verdicts() {
+                println!(
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    date(v.when),
+                    v.status.label(),
+                    v.cpv,
+                    v.from.unwrap_or_default(),
+                    v.signals,
+                    v.build_files,
+                    v.agent,
+                    v.why,
+                    v.report.map(|r| r.display().to_string()).unwrap_or_default(),
+                    v.note
+                );
+            }
+            Ok(())
+        }
+        ScanCmd::Allow { cpv, note } => scan::allow(cpv, note),
     }
 }
 

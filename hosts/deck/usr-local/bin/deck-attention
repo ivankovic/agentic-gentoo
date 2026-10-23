@@ -20,6 +20,8 @@ it wants a look, "now", "soon" or "backlog" (in the bar's popup only), its line 
             ~/.cache, that isn't its own subvolume (fix: deck-nosnap DIR)
   reviews   findings of AI reviews (deck patches review, tools/deck) nobody has decided about yet, and
             the daily automatic reviews that failed; decide in deck's Review tab (f, then x/n/w)
+  scans     updates the scan for malicious code (deck patches scan) flagged or couldn't scan in the
+            last 14 days: the emerge wrapper refuses them until allowed
   disk      / or /efi more than 85% full (btrfs slows down and can fail to write when nearly full;
             a full ESP fails the next kernel install)
 
@@ -44,6 +46,8 @@ UNCLEAN = pathlib.Path("/var/lib/deck-health/unclean")
 SEEN = pathlib.Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "deck-attention/seen"
 NEWS = pathlib.Path("/var/lib/gentoo/news")
 REVIEWS = pathlib.Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "deck/reviews/runs"
+SCANS = pathlib.Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "deck/scan"
+SCAN_DAYS = 14
 DAY = 86400
 REPO_GRACE = 1 * DAY
 REPO_SOON = 7 * DAY
@@ -234,6 +238,25 @@ def reviews():
     return found
 
 
+def scans():
+    """[(tile line, detail)]: updates the scan blocks, recent and not installed anyway."""
+    blocked = []
+    for f in SCANS.glob("*/*.json"):
+        try:
+            v = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if (v.get("status") in ("flagged", "failed") and time.time() - v.get("when", 0) < SCAN_DAYS * DAY
+                and not pathlib.Path("/var/db/pkg", v["cpv"]).exists()):
+            blocked.append(v)
+    if not blocked:
+        return []
+    return [(f"Updates blocked by the scan: {', '.join(v['cpv'] for v in blocked)}",
+             "\n".join(f"  {v['cpv']} ({v['status']}): {v.get('why', '')}"
+                       + (f"\n    report: {v['report']}" if v.get("report") else "") for v in blocked)
+             + "\n  After a look: deck patches scan allow <cpv> --note '...'")]
+
+
 def snapshotted():
     """Rebuildable folders that the hourly @home snapshots still include (not subvolumes)."""
     dirs = sorted(SRC.glob("*/target")) + [HOME / ".cache"]
@@ -298,7 +321,7 @@ def main():
                       ["Build output in the hourly snapshots of @home (stop builds, then):",
                        "  deck-nosnap " + " ".join(str(d).replace(str(HOME), "~", 1) for d in snap)]))
 
-    for level, found in (("soon", portage()), ("backlog", reviews()), ("now", disks())):
+    for level, found in (("soon", portage()), ("soon", scans()), ("backlog", reviews()), ("now", disks())):
         for line, detail in found:
             items.append((level, line, [line + ":", detail]))
 

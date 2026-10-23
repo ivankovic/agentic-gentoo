@@ -27,6 +27,11 @@ deck patches review auto                           # security reviews of updates
 deck patches review findings [<subject>] [--all]   # findings, open ones first, and what was decided
 deck patches review decide <run> <n> <open|fixed|not-applicable|wont-fix> [--note TEXT]
 deck patches review recheck <subject>              # an agent marks the open findings it finds fixed
+deck patches scan pending                          # scan every pending @world update for malicious code
+deck patches scan run <cat/pkg-ver>...             # scan these versions now, again if scanned before
+deck patches scan gate -- <emerge args>            # the emerge wrapper's gate: exit 1 when blocked
+deck patches scan list                             # every verdict, tab-separated
+deck patches scan allow <cat/pkg-ver> [--note TEXT]  # let a blocked version be installed
 ```
 
 It reads the host's directory, `~/src/agentic-gentoo/hosts/$(hostname)` unless `--host-dir` or
@@ -189,6 +194,60 @@ not decided yet and failed automatic runs show on the maintenance tile (`deck-at
 **Reports stay private**: `~/.local/state/deck/reviews/reports/<subject>/`, with the agent's
 errors beside each in a `.log`, and one JSON record per run in `runs/`. A finding may be an
 unreported vulnerability: it goes upstream privately, never into this public repository.
+
+## Scan for malicious code
+
+Reviews warn; the scan **blocks**. Everything an emerge would install is scanned for code inserted
+to steal credentials, open a backdoor or tamper with the build, the way xz-utils' release tarball
+and the credential stealers in npm, PyPI and crates.io packages did, before it may be installed.
+Gentoo's binary packages are built from the same source, so they are scanned by their source too.
+
+**What is read.** For each package (`[ebuild]` and `[binary]` lines of `emerge --pretend`), the
+new version is fetched and prepared as Portage builds it, in `jail --no-src` (the same unpacking
+as a review), and kept in `~/.cache/deck/scan/<cat_pkg>/<version>/`: `work/`, Portage's whole work
+directory, vendored crates, Go modules and bundled dependencies included, and `ebuild/`, the
+ebuild (as `<pn>.ebuild`) and its `files/`, which run as root when it installs. Versions are
+taken off the directory names (`xz-5.8.4` → `xz`, `windows-sys-0.59.0` → `windows-sys`), so the
+installed version's tree, prepared the same way, lines up file by file: `diff -ruN` gives the
+change. A package new here is read whole. `-bin` packages and `[scan] prebuilt` (firmware,
+microcode) are upstream's binaries: only their ebuild is read. Live ebuilds (`9999`) build
+whatever a branch holds: blocked, unless `[scan] trusted` lists them (our own code).
+
+**Triage, no agent.** The lines the change adds are checked for signs of what such attacks did:
+paths to keys, tokens and browser profiles (`secret-path`, `token`), paste sites and webhooks
+(`exfil-endpoint`), URLs to public IP addresses, decoding and running in one line, `curl | sh`,
+network access in a build file, npm install scripts, long encoded blobs, very long lines in code,
+and binary files that aren't images, fonts or translations (xz's payload was a "test file"). And
+the files that run at build or install time (`configure`, `*.m4`, Makefiles, CMake, meson,
+`build.rs`, `setup.py`, the ebuild and its files) that changed, beyond an ebuild's KEYWORDS.
+Nothing found: clean, no agent.
+
+**The agent** gets the rest: `<version>.scan.md` lists the signals and the build files' changes, and
+the agent reads both trees and the diff, read-only in the jail, as a review's agent does. Which
+agent is review.toml's `[scan] agent`, or its default `[[agent]]`; `--agent` picks another. Any
+program that reads a prompt on stdin and writes Markdown on stdout will do: nothing in the scan
+is tied to one. It reports what looks deliberate, in the same `findings` block as a review: high
+(very likely malicious) or medium (can't be ruled out) flags the version; low only notes.
+
+**Verdicts** are kept per version, `~/.local/state/deck/scan/<cat>/<pf>.json`, with the agent's
+report (`.md`), its errors (`.log`) and what it was given (`.scan.md`). clean, prebuilt and
+trusted pass; flagged and failed (could not be scanned) block, except that a failed scan never
+holds up a security fix (a package with a GLSA affecting this machine, from the daily sync's
+`/var/lib/gentoo-security/affected`). `deck patches scan allow <cpv> --note ...` lets a blocked
+version through after a look. A flagged version's trees stay in the cache for reading; otherwise
+only the versions the next scan compares with are kept.
+
+**The gate.** `sudo emerge` ([hosts/deck/usr-local/sbin/emerge](../../hosts/deck/usr-local/sbin/emerge))
+runs `deck patches scan gate -- <its arguments>` as the user before anything else, for every
+emerge that installs (not `-C`, `--depclean`, `--fetchonly`, ...): it scans what has no verdict
+yet and refuses the emerge when anything is blocked. `emerge --allow-unscanned ...` skips it for
+that one emerge, and says so in the journal. **Every day** `deck-review.service` runs `deck patches
+scan pending` before the reviews, so an update is mostly scanned before it is wanted. Blocked
+updates show on the maintenance tile. One scan runs at a time.
+
+**What it can't do.** A patient attacker's backdoor, written to look like ordinary code, can get
+past a reader; the scan makes that harder, not impossible. Upstream's binaries are trusted as they
+come. The verdicts are the user's files: whoever controls the account could mark anything clean.
 
 ## Usage accounting: deck-usaged and deck-focusd
 

@@ -30,6 +30,8 @@ pub struct Config {
     pub locals: Vec<Local>,
     #[serde(default, rename = "package")]
     pub packages: Vec<Watched>,
+    #[serde(default)]
+    pub scan: crate::scan::ScanConfig,
 }
 
 #[derive(Deserialize)]
@@ -275,7 +277,7 @@ pub fn versions(repo: &Path, subjects: &[Subject]) -> HashMap<String, Versions> 
 }
 
 /// The ebuild of a version that is neither installed nor the newest (an earlier reviewed one).
-fn find_ebuild(cpv: &str) -> Option<PathBuf> {
+pub fn find_ebuild(cpv: &str) -> Option<PathBuf> {
     let o = Command::new("python3")
         .args(["-I", "-c", "import portage, sys; print(portage.db[portage.root]['porttree'].dbapi.findname(sys.argv[1]) or '')", cpv])
         .stderr(Stdio::null())
@@ -714,57 +716,12 @@ pub fn prepare(repo: &Path, s: &Subject, version: &str, v: &Versions, log: &mut 
                 None => find_ebuild(&format!("{cp}-{version}"))
                     .with_context(|| format!("{cp}-{version}: its ebuild is no longer in the repository"))?,
             };
-            let ebuild = &ebuild;
-            let repo_root = ebuild.ancestors().nth(3).context("ebuild path")?;
-            // The build's own work directory, and the downloads (Portage checks them against the
-            // Manifest): what it can write. Not the rest of the cache, where every subject's
-            // source is kept and reused as the base for the next review.
             let work = cache_dir().join("portage").join(format!("{}-{version}", s.slug()));
-            let dist = cache_dir().join("distfiles");
-            let _ = std::fs::remove_dir_all(&work);
-            std::fs::create_dir_all(&work)?;
-            std::fs::create_dir_all(&dist)?;
-            writeln!(log, "deck-patches: fetching and unpacking {cp}-{version}, in the jail")?;
-            // `ebuild clean <phase>` in the jail, as the user, with our own temporary and
-            // download directories; what is already downloaded is linked from the system's.
-            let ebuild_phase = |phase: &str, log: &mut dyn Write| -> Result<bool> {
-                // The installed-package database too: ebuilds ask it what is installed (Rust for a
-                // Rust package, Vala for GMime's prepare), and without it nothing is.
-                let mut c = jail();
-                c.args(["--ro", "/var/db/repos", "--ro", "/var/db/pkg"]).arg("--ro").arg(repo_root);
-                if Path::new("/var/cache/distfiles").is_dir() {
-                    c.args(["--ro", "/var/cache/distfiles"]);
-                }
-                c.arg("--rw")
-                    .arg(&work)
-                    .arg("--rw")
-                    .arg(&dist)
-                    .args(["--", "env"])
-                    .arg(format!("PORTAGE_TMPDIR={}", work.display()))
-                    .arg(format!("DISTDIR={}", dist.display()))
-                    .arg("PORTAGE_RO_DISTDIRS=/var/cache/distfiles")
-                    .arg(format!("FEATURES={PORTAGE_FEATURES}"))
-                    .arg("ebuild")
-                    .arg(ebuild)
-                    .args(["clean", phase]);
-                let out = c.output().context("running ebuild in the jail")?;
-                log.write_all(&out.stdout)?;
-                log.write_all(&out.stderr)?;
-                Ok(out.status.success())
-            };
-            // prepare applies Gentoo's patches and ours, but some packages' prepare needs build
-            // tools that a package from the binhost never pulled in: then upstream's source.
-            if !ebuild_phase("prepare", log)? {
-                writeln!(log, "deck-patches: prepare failed; unpacking without Gentoo's patches")?;
-                if !ebuild_phase("unpack", log)? {
-                    bail!("ebuild {} unpack failed", ebuild.display());
-                }
+            if !portage_unpack(cp, version, &ebuild, &work, log)? {
                 std::fs::write(dir.with_file_name(format!("{version}.unpatched")), "")?;
             }
             let pn = cp.rsplit('/').next().unwrap_or(cp);
-            let pf = format!("{pn}-{version}");
-            let rel = Path::new("portage").join(cp.split('/').next().unwrap_or("")).join(&pf).join("work");
-            let src = pick_source(&work, &rel, pn)?;
+            let src = pick_source(&work, &portage_workdir(cp, version), pn)?;
             let _ = std::fs::remove_dir_all(&tmp);
             std::fs::rename(&src, &tmp).with_context(|| format!("moving {}", src.display()))?;
             let _ = std::fs::remove_dir_all(&work);
@@ -774,17 +731,80 @@ pub fn prepare(repo: &Path, s: &Subject, version: &str, v: &Versions, log: &mut 
     Ok(dir)
 }
 
+/// Fetches and prepares a package version with Portage, inside the jail, in WORK (emptied
+/// first). Gentoo's patches and ours are applied when the prepare phase works; when it doesn't
+/// (some need build tools a package from the binhost never pulled in), upstream's source is
+/// unpacked as it is. Returns whether the patches are in.
+pub fn portage_unpack(cp: &str, version: &str, ebuild: &Path, work: &Path, log: &mut dyn Write) -> Result<bool> {
+    let repo_root = ebuild.ancestors().nth(3).context("ebuild path")?;
+    // The build's own work directory, and the downloads (Portage checks them against the
+    // Manifest): what it can write. Not the rest of the cache, where sources are kept and reused
+    // as the base for the next review.
+    let dist = cache_dir().join("distfiles");
+    let _ = std::fs::remove_dir_all(work);
+    std::fs::create_dir_all(work)?;
+    std::fs::create_dir_all(&dist)?;
+    writeln!(log, "deck-patches: fetching and unpacking {cp}-{version}, in the jail")?;
+    // `ebuild clean <phase>` in the jail, as the user, with our own temporary and download
+    // directories; what is already downloaded is linked from the system's.
+    let ebuild_phase = |phase: &str, log: &mut dyn Write| -> Result<bool> {
+        // The installed-package database too: ebuilds ask it what is installed (Rust for a Rust
+        // package, Vala for GMime's prepare), and without it nothing is.
+        let mut c = jail();
+        c.args(["--ro", "/var/db/repos", "--ro", "/var/db/pkg"]).arg("--ro").arg(repo_root);
+        if Path::new("/var/cache/distfiles").is_dir() {
+            c.args(["--ro", "/var/cache/distfiles"]);
+        }
+        c.arg("--rw")
+            .arg(work)
+            .arg("--rw")
+            .arg(&dist)
+            .args(["--", "env"])
+            .arg(format!("PORTAGE_TMPDIR={}", work.display()))
+            .arg(format!("DISTDIR={}", dist.display()))
+            .arg("PORTAGE_RO_DISTDIRS=/var/cache/distfiles")
+            .arg(format!("FEATURES={PORTAGE_FEATURES}"))
+            .arg("ebuild")
+            .arg(ebuild)
+            .args(["clean", phase]);
+        let out = c.output().context("running ebuild in the jail")?;
+        log.write_all(&out.stdout)?;
+        log.write_all(&out.stderr)?;
+        Ok(out.status.success())
+    };
+    if ebuild_phase("prepare", log)? {
+        return Ok(true);
+    }
+    writeln!(log, "deck-patches: prepare failed; unpacking without Gentoo's patches")?;
+    if !ebuild_phase("unpack", log)? {
+        bail!("ebuild {} unpack failed", ebuild.display());
+    }
+    Ok(false)
+}
+
+/// Where Portage unpacks a package, relative to its PORTAGE_TMPDIR: `portage/<cat>/<pf>/work`.
+pub fn portage_workdir(cp: &str, version: &str) -> PathBuf {
+    let (cat, pn) = cp.split_once('/').unwrap_or(("", cp));
+    Path::new("portage").join(cat).join(format!("{pn}-{version}")).join("work")
+}
+
+/// ROOT/REL, checked to really be there: not reached through a symlink, which the build could
+/// have made to lead a read-only mount anywhere.
+pub fn checked_dir(root: &Path, rel: &Path) -> Result<PathBuf> {
+    let dir = root.join(rel);
+    let real = dir.canonicalize().with_context(|| format!("reading {}", dir.display()))?;
+    if real != root.canonicalize()?.join(rel) {
+        bail!("{} leads elsewhere ({})", dir.display(), real.display());
+    }
+    Ok(dir)
+}
+
 /// The unpacked source in Portage's work directory: the one entry named after the package (others
 /// are vendored dependencies), or the only one, or all of it. Never a symlink: the build made them,
 /// and one could lead the agent's read-only mount anywhere.
 fn pick_source(root: &Path, rel: &Path, pn: &str) -> Result<PathBuf> {
     // Nor on the way there, from the build's ROOT to its work directory REL.
-    let work = root.join(rel);
-    let real = work.canonicalize().with_context(|| format!("reading {}", work.display()))?;
-    if real != root.canonicalize()?.join(rel) {
-        bail!("{} leads elsewhere ({})", work.display(), real.display());
-    }
-    let work = &work;
+    let work = &checked_dir(root, rel)?;
     let entries: Vec<PathBuf> = std::fs::read_dir(work)
         .with_context(|| format!("reading {}", work.display()))?
         .flatten()
@@ -1032,25 +1052,10 @@ pub fn run(repo: &Path, req: Request, v: &Versions, log: &mut dyn Write) -> Resu
         } else {
             prompt(s, req.kind, &target, diffed, &req.usage, unpatched, &known_text)
         };
-        let out = std::fs::File::create(&report)?;
-        let err = std::fs::File::create(report.with_extension("log"))?;
+        let (out, err) = report_files(&report)?;
         writeln!(log, "deck-patches: {} reviewing {} ({}) in {}", req.agent.name, s.name(), req.kind.label(), dir.display())?;
-        let mut c = jail();
-        c.arg("--ro")
-            .arg(&dir)
-            .arg("--chdir")
-            .arg(&dir)
-            .arg("--")
-            .args(&req.agent.command)
-            .stdin(Stdio::piped())
-            .stdout(out)
-            .stderr(err);
-        let mut child = c.spawn().context("starting the agent in the jail")?;
-        child.stdin.take().unwrap().write_all(text.as_bytes())?;
-        let st = child.wait()?;
-        if !st.success() {
-            bail!("the agent exited with {st}; its errors are in {}", report.with_extension("log").display());
-        }
+        run_agent(req.agent, &dir, &text, out, err)
+            .with_context(|| format!("its errors are in {}", report.with_extension("log").display()))?;
         let text = std::fs::read_to_string(&report)?;
         // What the agent found fixed of the open findings it was given. Only in another version
         // than the one it was found in: code that didn't change can't have fixed it, and text in
@@ -1094,6 +1099,34 @@ pub fn run(repo: &Path, req: Request, v: &Versions, log: &mut dyn Write) -> Resu
     // newer version or the owner decides: a review talked into reporting nothing closes nothing.
     r.save()?;
     Ok(r)
+}
+
+/// The report file and, beside it, the log for the agent's errors.
+pub fn report_files(report: &Path) -> Result<(std::fs::File, std::fs::File)> {
+    std::fs::create_dir_all(report.parent().context("report path")?)?;
+    Ok((std::fs::File::create(report)?, std::fs::File::create(report.with_extension("log"))?))
+}
+
+/// Runs an agent, any of review.toml's: in `jail --no-src` with only DIR mounted, read-only, and
+/// started there. It reads PROMPT on stdin and writes its report to OUT, its errors to ERR.
+pub fn run_agent(agent: &Agent, dir: &Path, prompt: &str, out: std::fs::File, err: std::fs::File) -> Result<()> {
+    let mut c = jail();
+    c.arg("--ro")
+        .arg(dir)
+        .arg("--chdir")
+        .arg(dir)
+        .arg("--")
+        .args(&agent.command)
+        .stdin(Stdio::piped())
+        .stdout(out)
+        .stderr(err);
+    let mut child = c.spawn().with_context(|| format!("starting the agent {} in the jail", agent.name))?;
+    child.stdin.take().unwrap().write_all(prompt.as_bytes())?;
+    let st = child.wait()?;
+    if !st.success() {
+        bail!("the agent {} exited with {st}", agent.name);
+    }
+    Ok(())
 }
 
 /// Starts `deck patches review run` as a user unit, so it goes on after the caller is gone.
@@ -1396,7 +1429,9 @@ mod tests {
     fn the_repository_config_reads() {
         let host = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hosts/deck");
         let cfg = Config::load(&host).unwrap();
-        assert_eq!(cfg.agent(None).unwrap().name, "claude");
+        // Whichever agent it is: none is built in.
+        let agent = cfg.agent(None).unwrap();
+        assert!(!agent.command.is_empty());
         let names: Vec<String> = subjects(&cfg, []).iter().map(Subject::name).collect();
         assert!(names.contains(&"ours/jail".to_string()) && names.contains(&"dev-libs/gmime".to_string()));
     }

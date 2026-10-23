@@ -28,6 +28,14 @@ command = [
     "--no-session-persistence",
 ]
 
+# The scan for malicious code in everything an emerge installs (`deck patches scan`; the emerge
+# wrapper's gate). `agent` names one of the [[agent]]s above; without it, the default one.
+[scan]
+# Our own code, built from the clones on this machine by live ebuilds: not scanned.
+trusted = ["app-portage/deck", "mail-client/mmm", "dev-util/omnidiff"]
+# Upstream's binaries (besides -bin packages): only their ebuild can be read.
+prebuilt = ["sys-kernel/linux-firmware", "sys-firmware/intel-microcode", "sys-firmware/sof-firmware"]
+
 # Our own code, from this repository: the version is the last commit that touched its paths.
 # `package` is the installed package it runs as, for its measured usage.
 
