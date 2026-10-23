@@ -357,7 +357,8 @@ reopen as they were and a notification says so. ssh, nvim, vim, mmm and deck run
 resumes its session (`claude --resume`, found by the window title); any other command waits on ↑
 ([home/.bashrc](home/.bashrc), `DECK_RESTORE_CMD`). `deck-terminals --show` prints what would be
 saved now; `deck-terminals --relogin` logs out so that they reopen at the next login, as after a
-crash (for a niri rebuilt in place, say). Scrollback and anything mid-run (a build, an emerge) don't come back.
+crash (for a niri rebuilt in place, say), and `deck-terminals --reboot` reboots so that they reopen
+after it. Scrollback and anything mid-run (a build, an emerge) don't come back.
 
 ## Security
 

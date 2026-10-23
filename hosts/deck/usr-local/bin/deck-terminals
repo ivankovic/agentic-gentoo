@@ -10,6 +10,7 @@ the file clean, except when the battery is nearly empty and discharging: that sh
 upower's (CriticalPowerAction; the deck can't hibernate, so it powers off), not yours.
 `deck-terminals --relogin` logs out so that they come back: it saves them now, leaves a marker
 that keeps the stop from marking the file clean, and quits niri; log in again and they reopen.
+`deck-terminals --reboot` does the same and reboots.
 
 At the start of a session, a file that isn't marked clean means the previous one ended in a
 crash, reset, power loss or flat battery. If no foot window is open yet, each terminal is opened again in its
@@ -39,7 +40,7 @@ import sys
 import time
 
 STATE = pathlib.Path.home() / ".local/state/deck-terminals/session.json"
-# Left by --relogin: the coming logout is to be undone, like a crash.
+# Left by --relogin and --reboot: the coming logout is to be undone, like a crash. It holds why.
 RELOGIN = STATE.with_name("relogin")
 PROJECTS = pathlib.Path.home() / ".claude/projects"
 # What /usr/local/bin/jail gives jailed programs as their home.
@@ -262,12 +263,16 @@ def main():
     if sys.argv[1:] == ["--show"]:  # what would be saved now
         print(json.dumps(snapshot(), indent=1, ensure_ascii=False))
         return 0
-    if sys.argv[1:] == ["--relogin"]:
-        write({"clean": False, "why": "logging in again", "saved": time.strftime("%Y-%m-%d %H:%M:%S"),
+    if sys.argv[1:] in (["--relogin"], ["--reboot"]):
+        why = "logging in again" if sys.argv[1] == "--relogin" else "a reboot"
+        write({"clean": False, "why": why, "saved": time.strftime("%Y-%m-%d %H:%M:%S"),
                "terminals": snapshot()})
-        RELOGIN.touch()
+        RELOGIN.write_text(why)
         try:
-            action("quit", "--skip-confirmation")
+            if sys.argv[1] == "--relogin":
+                action("quit", "--skip-confirmation")
+            else:
+                subprocess.run(["systemctl", "reboot"], check=True)
         except (subprocess.SubprocessError, OSError):
             RELOGIN.unlink(missing_ok=True)
             raise
@@ -318,7 +323,7 @@ def main():
     try:
         state = json.loads(STATE.read_text())
         if RELOGIN.exists():
-            state["why"] = "logging in again"
+            state["why"] = RELOGIN.read_text().strip() or "logging in again"
             RELOGIN.unlink()
         elif battery_flat():
             state["why"] = "the battery ran out"
