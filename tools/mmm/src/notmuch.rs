@@ -178,7 +178,15 @@ pub fn show_thread(thread: &str) -> Result<Vec<Message>> {
         }
         r => r?,
     };
-    let v: Value = serde_json::from_slice(&out).context("reading notmuch show")?;
+    parse_show(&out)
+}
+
+fn parse_show(out: &[u8]) -> Result<Vec<Message>> {
+    // Each reply nests two levels deeper: a long back-and-forth (70 messages) goes past
+    // serde_json's limit of 128.
+    let mut de = serde_json::Deserializer::from_slice(out);
+    de.disable_recursion_limit();
+    let v = Value::deserialize(&mut de).context("reading notmuch show")?;
     let mut msgs = vec![];
     // [thread] → thread: [node] → node: [message, [node]]
     for t in v.as_array().into_iter().flatten() {
@@ -224,4 +232,24 @@ pub fn part(id: &str, part: u64) -> Result<Vec<u8>> {
         &format!("--part={part}"),
         &format!("id:{}", quote(id)),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_reply_chain() {
+        // 100 messages, each a reply to the one before: [[[msg, [[msg, [...]]]]]]
+        let msg = |n: usize| {
+            format!(r#"{{"id":"m{n}","timestamp":{n},"tags":[],"headers":{{"Subject":"Top"}},"body":[]}}"#)
+        };
+        let mut node = format!("[{}, []]", msg(99));
+        for n in (0..99).rev() {
+            node = format!("[{}, [{node}]]", msg(n));
+        }
+        let msgs = parse_show(format!("[[{node}]]").as_bytes()).unwrap();
+        assert_eq!(msgs.len(), 100);
+        assert_eq!(msgs[99].id, "m99");
+    }
 }
