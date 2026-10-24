@@ -185,13 +185,16 @@ if [[ $sub = clone || $sub = init ]]; then
 	((rc == 0)) || exit "$rc"
 	pos=()
 	for a in "${args[@]:i+1}"; do [[ $a = -* ]] || pos+=("$a"); done
+	# (${pos[-1]} is an error on an empty array, default or not.)
 	if [[ $sub = init ]]; then
-		target=${pos[-1]-.}
+		target=.
+		((${#pos[@]})) && target=${pos[-1]}
 	elif ((${#pos[@]} == 1)); then
 		# Only the URL: git names the directory after its last part.
 		target=${pos[0]%/}; target=${target##*[/:]}; target=${target%.git}
 	else
-		target=${pos[-1]-}
+		target=
+		((${#pos[@]})) && target=${pos[-1]}
 	fi
 	[[ $target = /* ]] || target=$dir/$target
 	gitdir_opt=
