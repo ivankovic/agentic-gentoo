@@ -69,7 +69,7 @@ PanelWindow {
             onClicked: bar.toggle("network", net)
         }
 
-        // deck, then each server in hosts.toml's order: a dot and a name, problems after it.
+        // This machine, then each server in hosts.toml's order: a dot and a name, problems after it.
         Segment {
             id: deck
             readonly property string state: Status.age < 0 || Status.age > 900 ? "unchecked"
@@ -77,10 +77,10 @@ PanelWindow {
             dot: bar.stateDot(state)
             dotColor: bar.stateColor(state)
             color: state === "ok" ? Theme.taupe : bar.stateColor(state)
-            text: Status.age < 0 ? "deck: deck-status isn't running"
-                : Status.age > 900 ? `deck: status ${Math.round(Status.age / 60)} min old`
-                : state === "ok" ? "deck"
-                : "deck: " + [Status.now.length ? Status.now[0] + (Status.now.length > 1 ? ` +${Status.now.length - 1}` : "") : "",
+            text: Status.age < 0 ? `${Status.host}: deck-status isn't running`
+                : Status.age > 900 ? `${Status.host}: status ${Math.round(Status.age / 60)} min old`
+                : state === "ok" ? Status.host
+                : Status.host + ": " + [Status.now.length ? Status.now[0] + (Status.now.length > 1 ? ` +${Status.now.length - 1}` : "") : "",
                    Status.soon ? `${Status.soon} to look at` : ""].filter(t => t).join(" · ")
             onClicked: bar.toggle("maintenance", deck)
         }
@@ -136,7 +136,7 @@ PanelWindow {
                         Layout.fillWidth: true
                         Text {
                             Layout.fillWidth: true
-                            text: bar.open === "network" ? "Network" : bar.open === "maintenance" ? "deck" : bar.open
+                            text: bar.open === "network" ? "Network" : bar.open === "maintenance" ? Status.host : bar.open
                             color: Theme.parchment
                             font.family: Theme.serif
                             font.pixelSize: 16

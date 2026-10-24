@@ -10,6 +10,8 @@ Singleton {
     id: root
 
     property real value: 0
+    // A backlight to set: not on a desktop's external monitor, where all of this does nothing.
+    property bool present: false
 
     signal adjusted
 
@@ -28,6 +30,8 @@ Singleton {
     }
 
     function set(v) {
+        if (!present)
+            return;
         value = Math.max(0.01, Math.min(1, v));
         writer.restart();
         adjusted();
@@ -57,7 +61,8 @@ Singleton {
         stdout: StdioCollector {
             onStreamFinished: {
                 const f = text.trim().split(",");
-                if (f.length >= 5)
+                root.present = f.length >= 5;
+                if (root.present)
                     root.value = Number(f[2]) / Number(f[4]);
             }
         }

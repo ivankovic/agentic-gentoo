@@ -19,6 +19,8 @@ Singleton {
             return {};
         }
     }
+    // This machine's name, as the bar's first segment calls it.
+    property string host: "this machine"
     readonly property var network: data.network ?? {state: "unknown", line: "Status not gathered yet"}
     readonly property var hosts: data.hosts ?? []
     // Deck's own: each server's problems are on its own segment, not counted again here.
@@ -66,5 +68,10 @@ Singleton {
                 root.clock = Date.now();
             } catch (e) {}
         }
+    }
+
+    FileView {
+        path: "/etc/hostname"
+        onLoaded: root.host = text().trim() || root.host
     }
 }

@@ -516,6 +516,7 @@ PanelWindow {
                     columnSpacing: 10
 
                     Tile {
+                        visible: root.wifi !== null
                         icon: Networking.wifiEnabled ? 0xF05A9 : 0xF05AA
                         label: "Wi-Fi"
                         detail: !Networking.wifiEnabled ? "Off"
@@ -528,6 +529,7 @@ PanelWindow {
                     }
 
                     Tile {
+                        visible: root.bluetooth !== null
                         icon: root.bluetooth?.enabled ? 0xF00AF : 0xF00B2
                         label: "Bluetooth"
                         detail: !root.bluetooth ? "No adapter"
@@ -581,6 +583,7 @@ PanelWindow {
                 }
 
                 SliderRow {
+                    visible: Brightness.present
                     icon: 0xF00DF
                     value: Brightness.value
                     onMoved: v => Brightness.set(v)
