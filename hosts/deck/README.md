@@ -345,6 +345,13 @@ boot while the test lasts). Resets carrying on: step B adds `power_saving` in
 RC6, or the display side, instead). Vitals now samples every second on AC, with `gpu_req`,
 `gpu_rc6`, `gpu_thr` (pl4 and vr_tdc are the power-delivery limits) and `gpu_boost`/`gpu_profile`,
 so the last second before a reset shows what the graphics was doing.
+Result: step A set 2026-10-18 09:30; no reset in the 5.2 days until a planned reboot on 2026-10-23
+14:53, the longest stretch since the resets began. That reboot dropped the setting (it wasn't
+persistent yet), and deck reset again 2026-10-24 ~09:18, 18.5 h later, in Firefox on GitHub. As
+before: no pstore, no kernel message, the last vitals sample (09:17:56) quiet (6.8 W package, GPU
+asleep). So the boost to 1500 MHz is the likely trigger, and step A is now permanent:
+[etc/tmpfiles.d/gpu-boost.conf](etc/tmpfiles.d/gpu-boost.conf) writes 300 at every boot. Steps B
+and C stay unneeded unless resets come back with it in force.
 
 **Terminals come back after a crash or a flat battery.**
 [deck-terminals](usr-local/bin/deck-terminals), run by the user service
