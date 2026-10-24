@@ -13,11 +13,18 @@
 #     recovery system's files, which its update (etc/deck-recovery/update.sh) puts on it
 # Everything else (state/, README.md, ...) is a record, not deployed.
 #
+# A host kept elsewhere: DECK_HOST_DIR=<dir> ./deploy.sh <host> takes the host's files from <dir>
+# (a git checkout) instead of hosts/<host>. A host can share another's files: hosts/<host>/inherit
+# (or <dir>/inherit) names repository paths, one per line, e.g. hosts/deck/home/.config/niri,
+# deployed as if they were its own. Its own files win over inherited ones with the same target.
+#
 # Only files tracked by git are deployed, in their working-tree version. Deploying only ever goes
 # repo -> system, and never deletes anything on the system: a file removed from the repo stays on
 # the machine until you remove it by hand.
 set -euo pipefail
 
+# Resolved before the cd below, so a relative directory means one relative to where you are.
+ext=${DECK_HOST_DIR:+$(realpath -- "$DECK_HOST_DIR")}
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "$root"
 
@@ -26,19 +33,21 @@ mode=diff
 for arg in "$@"; do
   case $arg in
     diff | apply) mode=$arg ;;
-    -h | --help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) host=$arg ;;
   esac
 done
 
-dir=hosts/$host
+dir=${ext:-hosts/$host}
 [[ -d $dir ]] || { echo "deploy: no $dir; hosts: $(ls hosts | tr '\n' ' ')" >&2; exit 2; }
 
-# Prints "<repo path>\t<target path>\t<sudo|user>" for every tracked, deployable file.
-targets() {
-  git ls-files -z -- "$dir/home" "$dir/etc" "$dir/portage" "$dir/usr-local" "$dir/recovery/root" \
-    "$dir/recovery/README.md" | while IFS= read -r -d '' src; do
-    rel=${src#"$dir"/}
+# Prints "<file>\t<target path>\t<sudo|user>" for every tracked, deployable file in host directory
+# $1, limited to the paths after it (relative to it).
+host_files() {
+  local hd=$1; shift
+  git -C "$hd" ls-files -z -- "$@" | while IFS= read -r -d '' rel; do
+    src=${hd%/}/$rel
+    src=${src#./}
     case $rel in
       home/*) printf '%s\t%s\tuser\n' "$src" "$HOME/${rel#home/}" ;;
       etc/*) printf '%s\t%s\tsudo\n' "$src" "/etc/${rel#etc/}" ;;
@@ -48,6 +57,26 @@ targets() {
       recovery/README.md) printf '%s\t%s\tsudo\n' "$src" /etc/deck-recovery/RECOVERY.md ;;
     esac
   done
+}
+
+# What the host inherits: "<host directory>\t<path in it>" per line of its inherit file.
+inherited=()
+if [[ -f $dir/inherit ]]; then
+  while read -r p; do
+    [[ -z $p || $p == '#'* ]] && continue
+    [[ $p =~ ^(hosts/[^/]+)/((home|etc|portage|usr-local)(/.*)?)$ && -e $p ]] \
+      || { echo "deploy: $dir/inherit: $p is not a deployable path under hosts/<host>/" >&2; exit 2; }
+    inherited+=("${BASH_REMATCH[1]}"$'\t'"${BASH_REMATCH[2]}")
+  done <"$dir/inherit"
+fi
+
+# The host's own files, then what it inherits; the first file for a target wins.
+targets() {
+  {
+    host_files "$dir" home etc portage usr-local recovery/root recovery/README.md
+    local e
+    for e in "${inherited[@]}"; do host_files "${e%%$'\t'*}" "${e#*$'\t'}"; done
+  } | awk -F'\t' '!seen[$2]++'
 }
 
 readable() { [[ -r $1 ]]; }
