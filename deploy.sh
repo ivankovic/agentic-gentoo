@@ -80,6 +80,7 @@ targets() {
 }
 
 readable() { [[ -r $1 ]]; }
+exe() { [[ -x $1 ]] && echo yes || echo no; }
 
 changed=()   # "src\tdst\tsudo|user"
 unreadable=()
@@ -93,6 +94,10 @@ while IFS=$'\t' read -r src dst who; do
   elif ! cmp -s "$src" "$dst"; then
     echo "changed:  $dst"
     [[ $mode == diff ]] && { diff -u --label "$dst (system)" --label "$src (repo)" "$dst" "$src" || true; }
+    changed+=("$src"$'\t'"$dst"$'\t'"$who")
+  elif [[ $(exe "$src") != $(exe "$dst") ]]; then
+    # Same content, but git's executable bit differs: install keeps the repo's mode.
+    echo "mode:     $dst (executable in the repo: $(exe "$src"))"
     changed+=("$src"$'\t'"$dst"$'\t'"$who")
   fi
 done < <(targets)
