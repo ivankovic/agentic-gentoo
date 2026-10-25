@@ -98,6 +98,8 @@ daemons and what units run (`deck-usaged`, `deck-focusd`, `deck-attention`, `dec
   `sys-boot/plymouth` (`-gtk -pango`; 22.02, since 24.004 is package-masked as breaking some
   systems) with the overlay's `x11-themes/plymouth-theme-academia`, `x11-themes/papirus-icon-theme`,
   `x11-themes/bibata-xcursors` (GURU, `~amd64`), `app-text/zathura` with `zathura-pdf-mupdf`.
+  Music: `media-sound/supersonic` (GURU, `~amd64`), a player for Subsonic servers such as
+  Navidrome; it runs through xwayland-satellite (X11 only) and plays with libmpv.
 - **Admin tools** in world: nmap (with ncat and nping), tcpdump, mtr (`-gui`), `net-dns/bind`
   for `dig` (`bind-tools` is gone from ::gentoo; the server stays disabled), iperf3, socat, whois,
   btop, lsof, strace, iotop-c, tmux, usbutils, dmidecode, lm-sensors. USE in
