@@ -1,0 +1,2 @@
+category = "portage"
+task = "emerge -uDN @world stopped working, it complains about something in the world file. Fix it, and keep everything I installed."

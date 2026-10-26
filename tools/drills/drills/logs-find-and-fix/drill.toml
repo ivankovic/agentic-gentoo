@@ -1,0 +1,2 @@
+category = "logs"
+task = "Something on this machine keeps failing since yesterday. Find it in the logs and fix it."

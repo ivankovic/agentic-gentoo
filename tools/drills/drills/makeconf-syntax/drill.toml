@@ -1,0 +1,2 @@
+category = "portage"
+task = "Every emerge command fails now with an error about make.conf. Fix it."

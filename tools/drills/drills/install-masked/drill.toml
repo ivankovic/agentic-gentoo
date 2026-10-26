@@ -1,0 +1,2 @@
+category = "install"
+task = "I tried to install pv with emerge and it refuses. Get pv installed."

@@ -1,0 +1,2 @@
+category = "logs"
+task = "ingest.service failed. Why? Only find out and tell me the cause; don't change anything."

@@ -1,0 +1,2 @@
+category = "services"
+task = "hello.service won't start. Fix it."

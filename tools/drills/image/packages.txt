@@ -1,0 +1,6 @@
+# Binary packages the drills install or remove, cached in the image (with their dependencies) so
+# emerge works offline. One atom per line.
+app-misc/jq
+app-misc/screen
+app-text/tree
+sys-apps/pv

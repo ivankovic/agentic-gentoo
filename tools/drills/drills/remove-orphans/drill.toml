@@ -1,0 +1,2 @@
+category = "remove"
+task = "Clean up: remove the packages nothing needs anymore, but keep everything I installed on purpose."

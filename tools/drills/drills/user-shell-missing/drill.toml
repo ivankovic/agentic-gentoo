@@ -1,0 +1,2 @@
+category = "auth"
+task = "alice can't log in any more: the login closes immediately. Fix it without changing her password."

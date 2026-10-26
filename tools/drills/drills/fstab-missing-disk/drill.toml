@@ -1,0 +1,3 @@
+category = "boot"
+task = "On the last boot the machine waited a minute and a half for a disk and then dropped into emergency mode. I removed the old data disk last week. Make sure it boots normally."
+reboot_before_check = true

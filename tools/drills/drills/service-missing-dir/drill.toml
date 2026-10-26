@@ -1,0 +1,2 @@
+category = "services"
+task = "hello.service keeps failing since I reorganised /srv. Fix it so it serves the page again."

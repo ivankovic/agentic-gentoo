@@ -1,0 +1,3 @@
+category = "services"
+task = "systemctl start hello.service fails and I don't understand the message. Get it running, and make sure it also starts on boot."
+reboot_before_check = true

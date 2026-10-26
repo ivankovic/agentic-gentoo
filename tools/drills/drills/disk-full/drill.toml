@@ -1,0 +1,2 @@
+category = "filesystem"
+task = "emerge fails with 'No space left on device'. Free up space, but don't delete anything of mine."

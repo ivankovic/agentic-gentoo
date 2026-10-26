@@ -1,0 +1,2 @@
+category = "auth"
+task = "sudo stopped working for alice; it complains about a syntax error in sudoers. Fix it."

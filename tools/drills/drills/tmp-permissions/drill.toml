@@ -1,0 +1,2 @@
+category = "filesystem"
+task = "Since this morning, programs run by my user alice fail with 'Permission denied' when they write temporary files. root is fine. Fix it."
