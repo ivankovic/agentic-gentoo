@@ -1,27 +1,28 @@
 #!/bin/bash
-cat > /etc/worker.conf <<'X'
-# worker settings
-queue = /var/lib/worker
-threads = many
+cat > "/etc/$D_NAME.conf" <<X
+# $D_NAME settings
+queue = /var/lib/$D_NAME
+$KEY = $BAD
 X
-mkdir -p /var/lib/worker
-cat > /usr/local/bin/worker <<'X'
+mkdir -p "/var/lib/$D_NAME"
+cat > "/usr/local/bin/$D_NAME" <<X
 #!/bin/bash
-t=$(sed -n 's/^threads *= *//p' /etc/worker.conf)
-[[ $t =~ ^[0-9]+$ ]] || { echo "worker: /etc/worker.conf: invalid value for threads: '$t' (expected a number)" >&2; exit 1; }
-echo "worker: running with $t threads"; exec sleep infinity
+v=\$(sed -n 's/^$KEY *= *//p' /etc/$D_NAME.conf)
+[[ \$v =~ ^[0-9]+\$ ]] || { echo "$D_NAME: /etc/$D_NAME.conf: invalid value for $KEY: '\$v' (expected a number)" >&2; exit 1; }
+echo "$D_NAME: running with $KEY=\$v"; exec sleep infinity
 X
-chmod 755 /usr/local/bin/worker
-cat > /etc/systemd/system/worker.service <<'X'
+chmod 755 "/usr/local/bin/$D_NAME"
+remember program "/usr/local/bin/$D_NAME"
+cat > "/etc/systemd/system/$D_NAME.service" <<X
 [Unit]
-Description=Queue worker
+Description=$D_DESC
 
 [Service]
-ExecStart=/usr/local/bin/worker
+ExecStart=/usr/local/bin/$D_NAME
 Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 X
-systemctl daemon-reload; systemctl enable --now worker.service 2>/dev/null || true
+systemctl daemon-reload; systemctl enable --now "$D_NAME.service" 2>/dev/null || true

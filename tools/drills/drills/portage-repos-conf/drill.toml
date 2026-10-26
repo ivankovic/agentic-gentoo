@@ -1,0 +1,8 @@
+category = "portage"
+task = [
+  "emerge says it can't find the gentoo repository. Fix it.",
+  "Portage lost the main repository after I edited repos.conf. Fix it; the repository is still on the disk.",
+]
+
+[vars]
+KIND = ["old-path", "typo", "usr-portage"]

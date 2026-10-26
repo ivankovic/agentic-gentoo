@@ -1,0 +1,9 @@
+category = "network"
+task = [
+  "ssh ${HOST} says 'Could not resolve hostname ${HOST}'. It worked last week and nothing changed on the network. Fix it.",
+  "The backup script can't reach '${HOST}' any more: the name doesn't resolve. Fix it.",
+]
+
+[vars]
+HOST = ["nas", "printer", "pi", "media"]
+KIND = ["typo", "commented", "swapped"]

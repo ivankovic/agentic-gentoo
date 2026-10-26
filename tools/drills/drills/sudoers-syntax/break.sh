@@ -1,7 +1,8 @@
 #!/bin/bash
-useradd -m -G wheel alice
+useradd -m -G wheel "$U_NAME"
 mkdir -p /etc/sudoers.d
-echo 'alice ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/alice
+echo "$U_NAME ALL=(ALL) NOPASSWD: ALL" > "/etc/sudoers.d/$U_NAME"
 # A half-finished edit, left behind.
-printf 'Defaults env_keep += "HTTP_PROXY\n' > /etc/sudoers.d/proxy
+printf '%s\n' "$BAD" > "/etc/sudoers.d/$FILE"
 chmod 440 /etc/sudoers.d/*
+! visudo -c >/dev/null 2>&1

@@ -1,0 +1,10 @@
+category = "auth"
+task = [
+  "${U_NAME} gets 'Permission denied' in /srv/${GRP}. ${U_NAME} is on the ${GRP} team and should have access like the others.",
+  "${U_NAME} joined the ${GRP} team but can't write to /srv/${GRP}. Give the same access the team has.",
+]
+
+[vars]
+U = "@users"
+MATE = "@users"
+GRP = ["projects", "media", "finance", "devs"]

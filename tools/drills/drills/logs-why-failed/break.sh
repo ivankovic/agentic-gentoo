@@ -1,21 +1,22 @@
 #!/bin/bash
-useradd -r -s /sbin/nologin ingest
-mkdir -p /var/lib/ingest/spool && chown root:root /var/lib/ingest/spool && chmod 700 /var/lib/ingest/spool
-cat > /usr/local/bin/ingest <<'X'
+useradd -r -s /sbin/nologin "$D_NAME"
+dir=/var/lib/$D_NAME/$SUB
+mkdir -p "$dir" && chown root:root "$dir" && chmod 700 "$dir"
+cat > "/usr/local/bin/$D_NAME" <<X
 #!/bin/bash
-echo "ingest: starting, spool /var/lib/ingest/spool"
-touch /var/lib/ingest/spool/.lock || { echo "ingest: cannot write to spool directory" >&2; exit 3; }
+echo "$D_NAME: starting, $SUB directory $dir"
+touch $dir/.lock || { echo "$D_NAME: cannot write to $SUB directory" >&2; exit 3; }
 X
-chmod 755 /usr/local/bin/ingest
-cat > /etc/systemd/system/ingest.service <<'X'
+chmod 755 "/usr/local/bin/$D_NAME"
+cat > "/etc/systemd/system/$D_NAME.service" <<X
 [Unit]
-Description=Ingest queue
+Description=$D_DESC
 
 [Service]
-User=ingest
-ExecStart=/usr/local/bin/ingest
+User=$D_NAME
+ExecStart=/usr/local/bin/$D_NAME
 X
-systemctl daemon-reload; systemctl start ingest.service || true
+systemctl daemon-reload; systemctl start "$D_NAME.service" || true
 # What the check compares: nothing may change.
-stat -c '%U %a' /var/lib/ingest/spool > /var/lib/.drill-ingest-state
-sha256sum /etc/systemd/system/ingest.service /usr/local/bin/ingest >> /var/lib/.drill-ingest-state
+stat -c '%U %a' "$dir" > /var/lib/.drill-dirstate
+remember files "/etc/systemd/system/$D_NAME.service" "/usr/local/bin/$D_NAME" /var/lib/.drill-dirstate

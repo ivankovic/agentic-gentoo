@@ -1,0 +1,9 @@
+category = "portage"
+task = [
+  "Every emerge prints errors about package.use since my last edit. Fix it, keep my settings.",
+  "emerge complains about an invalid atom in /etc/portage. Fix it.",
+]
+
+[vars]
+PKG = "@packages"
+KIND = ["version-no-op", "no-category", "space"]

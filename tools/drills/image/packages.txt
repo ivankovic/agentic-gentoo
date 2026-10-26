@@ -1,6 +1,20 @@
 # Binary packages the drills install or remove, cached in the image (with their dependencies) so
-# emerge works offline. One atom per line.
+# emerge works offline. One atom per line. The [[packages]] pool in pools.toml draws from these;
+# the shells are for user-shell-missing.
 app-misc/jq
 app-misc/screen
 app-text/tree
 sys-apps/pv
+app-misc/tmux
+app-arch/zip
+app-arch/unzip
+sys-apps/ripgrep
+sys-process/btop
+app-admin/sysstat
+net-misc/whois
+app-misc/mc
+net-misc/socat
+app-misc/figlet
+games-misc/cowsay
+app-shells/zsh
+app-shells/mksh

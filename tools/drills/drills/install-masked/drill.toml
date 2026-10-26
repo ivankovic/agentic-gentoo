@@ -1,2 +1,11 @@
 category = "install"
-task = "I tried to install pv with emerge and it refuses. Get pv installed."
+task = [
+  "I tried to install ${PKG_NAME} with emerge and it refuses. Get it installed.",
+  "emerge ${PKG_ATOM} says something about a mask. I need ${PKG_NAME}, please sort it out.",
+  "Why won't ${PKG_NAME} install? Make it work.",
+]
+
+[vars]
+PKG = "@packages"
+KEEP = "@packages"
+FILE = ["local", "testing", "misc", "old"]

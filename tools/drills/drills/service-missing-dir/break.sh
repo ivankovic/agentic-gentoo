@@ -1,15 +1,6 @@
 #!/bin/bash
-# The page moved to /srv/www/hello; the unit still points at the old place.
-mkdir -p /srv/www/hello && echo hello > /srv/www/hello/index.html
-cat > /etc/systemd/system/hello.service <<'X'
-[Unit]
-Description=Hello web page
-
-[Service]
-WorkingDirectory=/srv/hello
-ExecStart=/usr/bin/python3 -m http.server 8080
-
-[Install]
-WantedBy=multi-user.target
-X
-systemctl daemon-reload; systemctl enable hello.service 2>/dev/null; systemctl start hello.service || true
+# The page moved; the unit still points at the old place.
+web_root "$BASE/$SVC_NAME" "$SVC_NAME"
+web_unit "/etc/systemd/system/$SVC_NAME.service" "$SVC_DESC" "/srv/$SVC_NAME" "$SVC_PORT"
+systemctl daemon-reload; systemctl enable "$SVC_NAME.service" 2>/dev/null
+systemctl start "$SVC_NAME.service" || true

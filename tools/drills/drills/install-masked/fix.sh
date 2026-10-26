@@ -1,3 +1,3 @@
 #!/bin/bash
-sed -i '/^sys-apps\/pv$/d' /etc/portage/package.mask/local
-emerge sys-apps/pv
+sed -i "\|^$PKG_ATOM\$|d" "/etc/portage/package.mask/$FILE"
+emerge "$PKG_ATOM"

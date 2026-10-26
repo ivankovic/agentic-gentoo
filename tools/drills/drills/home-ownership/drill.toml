@@ -1,0 +1,8 @@
+category = "filesystem"
+task = [
+  "${U_NAME} gets 'Permission denied' for everything in the home directory since I restored it from backup. Fix it.",
+  "After the restore, ${U_NAME} can't save files at home or even write .bash_history. Fix it.",
+]
+
+[vars]
+U = "@users"

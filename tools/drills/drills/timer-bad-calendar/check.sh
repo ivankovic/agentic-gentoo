@@ -1,9 +1,8 @@
 #!/bin/bash
 set -e
-systemctl is-enabled -q backup.timer
-systemctl is-active -q backup.timer
-# The next run is at 02:30.
-systemctl show -P NextElapseUSecRealtime backup.timer | grep -q ' 02:30:00'
+systemctl is-enabled -q "$JOB.timer"
+systemctl is-active -q "$JOB.timer"
+systemctl show -P NextElapseUSecRealtime "$JOB.timer" | grep -q " $HH:$MM:00"
 # And the job itself works.
-systemctl start backup.service
-test -s /var/backups/etc.tar.gz
+systemctl start "$JOB.service"
+test -s "/var/backups/$JOB.tar.gz"

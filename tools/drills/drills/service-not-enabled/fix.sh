@@ -1,2 +1,2 @@
 #!/bin/bash
-systemctl enable --now hello.service
+systemctl enable --now "$SVC_NAME.service"

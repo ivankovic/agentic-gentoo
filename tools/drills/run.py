@@ -6,6 +6,7 @@
     run.py --image DIR --model URL [--label NAME] [--think] [DRILL ...]
                                                      a model behind an OpenAI-compatible chat API
                                                      (llama-server --jinja) repairs each drill
+    --variants N --seed S                            N variants of each drill, from seed S on
 
 DIR is build.sh's output. Each drill is a directory under drills/: drill.toml (category, task,
 optional reboot_before_check), break.sh, check.sh, fix.sh. The machine boots from a copy-on-write
@@ -16,6 +17,7 @@ Results go to DIR/results/<label>-<time>.jsonl, one line per drill with the tran
 import argparse
 import json
 import os
+import random
 import shlex
 import socket
 import subprocess
@@ -26,6 +28,7 @@ import tomllib
 import urllib.error
 import urllib.request
 from pathlib import Path
+from string import Template
 
 HERE = Path(__file__).resolve().parent
 OUTPUT_LIMIT = 3000   # characters of a command's output the model sees: the head and the tail
@@ -136,6 +139,10 @@ class ContextFull(Exception):
     """The conversation no longer fits the model's context: the model's limit, so a fail."""
 
 
+class BadToolCall(Exception):
+    """The server could not parse the model's tool call: the model's mistake, so a fail."""
+
+
 def chat(url, messages, think):
     body = {"messages": messages, "tools": TOOLS, "temperature": 0.2, "max_tokens": 4096,
             "chat_template_kwargs": {"enable_thinking": think}}
@@ -148,6 +155,8 @@ def chat(url, messages, think):
         body = e.read().decode(errors="replace")
         if "exceeds the available context" in body or "exceed_context_size" in body:
             raise ContextFull() from None
+        if "Failed to parse tool call" in body:
+            raise BadToolCall() from None
         raise RuntimeError(f"HTTP {e.code}: {body[:300]}") from None
 
 
@@ -161,6 +170,8 @@ def agent(machine, task, url, think):
             reply = chat(url, messages, think)
         except ContextFull:
             return "", transcript, tokens, "context"
+        except BadToolCall:
+            return "", transcript, tokens, "bad_call"
         usage = reply.get("usage", {})
         tokens["prompt"] += usage.get("prompt_tokens", 0)
         tokens["completion"] += usage.get("completion_tokens", 0)
@@ -183,31 +194,66 @@ def agent(machine, task, url, think):
     return "", transcript, tokens, "steps"
 
 
-def run_drill(drill: Path, args):
+def variant(meta, name, seed):
+    """One variant of a drill: its task and the variables its scripts get, chosen by the seed.
+
+    [vars] maps a name to a list (one value is picked) or to "@pool" (a row of pools.toml,
+    different for each entry drawing from the same pool, exported field by field as NAME_FIELD).
+    task may be a list of phrasings; it is a template over the same variables."""
+    rng = random.Random(f"{name}:{seed}")
+    pools = tomllib.loads((HERE / "pools.toml").read_text())
+    taken = {}
+    env = {}
+    for var, spec in meta.get("vars", {}).items():
+        if isinstance(spec, str) and spec.startswith("@"):
+            pool = spec[1:]
+            rows = [r for i, r in enumerate(pools[pool]) if i not in taken.setdefault(pool, set())]
+            i = pools[pool].index(rng.choice(rows))
+            taken[pool].add(i)
+            env.update({f"{var}_{k.upper()}": str(v) for k, v in pools[pool][i].items()})
+        else:
+            env[var] = str(rng.choice(spec))
+    task = meta["task"]
+    if isinstance(task, list):
+        task = rng.choice(task)
+    return Template(task.strip()).substitute(env), env
+
+
+def script(drill, name):
+    """A drill's script with lib.sh put in after its #! line."""
+    first, _, rest = (drill / name).read_text().partition("\n")
+    return f"{first}\n{(HERE / 'lib.sh').read_text()}\n{rest}"
+
+
+def run_drill(drill: Path, args, seed):
     meta = tomllib.loads((drill / "drill.toml").read_text())
-    rec = {"drill": drill.name, "category": meta["category"], "label": args.label}
+    task, env = variant(meta, drill.name, seed)
+    rec = {"drill": drill.name, "category": meta["category"], "label": args.label, "seed": seed,
+           "vars": env, "task": task}
+    # The scripts run with the variant's variables in their environment.
+    exports = "export " + " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items()) + "; " if env else ""
     t0 = time.time()
     with tempfile.TemporaryDirectory(prefix=f"drill-{drill.name}-", dir=args.image) as tmp:
         m = Machine(args.image, Path(tmp))
         try:
             m.boot()
-            m.put("/run/drill/break.sh", (drill / "break.sh").read_text())
-            r = m.ssh("/run/drill/break.sh && rm -f /run/drill/break.sh")
+            m.put("/run/drill/break.sh", script(drill, "break.sh"))
+            r = m.ssh(exports + "/run/drill/break.sh && rm -f /run/drill/break.sh")
             if r.returncode != 0:
                 return {**rec, "result": "invalid", "why": "break.sh failed: " + clip(r.stdout + r.stderr)}
             if meta.get("reboot_after_break"):
                 m.reboot()
-            m.put("/run/drill/check.sh", (drill / "check.sh").read_text())
-            if m.ssh("/run/drill/check.sh").returncode == 0:
+            m.put("/run/drill/check.sh", script(drill, "check.sh"))
+            if m.ssh(exports + "/run/drill/check.sh").returncode == 0:
                 return {**rec, "result": "invalid", "why": "check passes before any fix"}
             m.ssh("rm -f /run/drill/check.sh")
 
             if args.reference:
-                m.put("/run/drill/fix.sh", (drill / "fix.sh").read_text())
-                r = m.ssh("/run/drill/fix.sh; s=$?; rm -f /run/drill/fix.sh; exit $s")
+                m.put("/run/drill/fix.sh", script(drill, "fix.sh"))
+                r = m.ssh(exports + "/run/drill/fix.sh; s=$?; rm -f /run/drill/fix.sh; exit $s")
                 answer, transcript, tokens, gave_up = (r.stdout + r.stderr)[-2000:], None, None, False
             else:
-                answer, transcript, tokens, gave_up = agent(m, meta["task"].strip(), args.model, args.think)
+                answer, transcript, tokens, gave_up = agent(m, task, args.model, args.think)
             rec["fix_seconds"] = round(time.time() - t0)
 
             if meta.get("reboot_before_check"):
@@ -218,8 +264,8 @@ def run_drill(drill: Path, args):
                             "transcript": transcript, "tokens": tokens}
             # check.sh sees the final answer, for drills that ask a question.
             m.put("/run/drill/answer", answer, mode="600")
-            m.put("/run/drill/check.sh", (drill / "check.sh").read_text())
-            c = m.ssh("/run/drill/check.sh")
+            m.put("/run/drill/check.sh", script(drill, "check.sh"))
+            c = m.ssh(exports + "/run/drill/check.sh")
             rec.update(result="pass" if c.returncode == 0 else "fail", check=clip(c.stdout + c.stderr),
                        answer=answer, gave_up=gave_up, tokens=tokens, transcript=transcript,
                        steps=sum(1 for x in transcript or [] if x["role"] == "tool"))
@@ -238,6 +284,8 @@ def main():
     g.add_argument("--model", help="base URL of an OpenAI-compatible server")
     p.add_argument("--label", help="name for the results (default: reference or the model URL's host)")
     p.add_argument("--think", action="store_true", help="let the model think before answering")
+    p.add_argument("--variants", type=int, default=1, help="variants of each drill (default 1)")
+    p.add_argument("--seed", type=int, default=0, help="the first variant's seed (default 0)")
     p.add_argument("drills", nargs="*", help="drill names (default: all)")
     args = p.parse_args()
     args.image = args.image.resolve()
@@ -249,14 +297,14 @@ def main():
     out = results / f"{args.label}-{time.strftime('%Y%m%d-%H%M%S')}.jsonl"
     tally = {}
     with out.open("w") as f:
-        for name in names:
+        for name, seed in [(n, s) for n in names for s in range(args.seed, args.seed + args.variants)]:
             t0 = time.time()
-            rec = run_drill(HERE / "drills" / name, args)
+            rec = run_drill(HERE / "drills" / name, args, seed)
             rec["seconds"] = round(time.time() - t0)
             f.write(json.dumps(rec) + "\n")
             f.flush()
             tally[rec["result"]] = tally.get(rec["result"], 0) + 1
-            print(f"{rec['result']:8} {name:28} {rec.get('seconds', 0):5} s  {rec.get('why', '')[:100]}", flush=True)
+            print(f"{rec['result']:8} {name:28} {seed:3} {rec.get('seconds', 0):5} s  {rec.get('why', '')[:100]}", flush=True)
     print(" ".join(f"{k}: {v}" for k, v in sorted(tally.items())), f"-> {out}")
     sys.exit(0)
 

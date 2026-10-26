@@ -1,2 +1,8 @@
 category = "portage"
-task = "Every emerge command fails now with an error about make.conf. Fix it."
+task = [
+  "Every emerge command fails now with an error about make.conf. Fix it.",
+  "I edited make.conf and now emerge won't run at all. Fix it, and keep my settings.",
+]
+
+[vars]
+KIND = ["common-quote", "makeopts-quote", "use-quote"]

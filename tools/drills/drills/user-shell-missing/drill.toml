@@ -1,2 +1,9 @@
 category = "auth"
-task = "alice can't log in any more: the login closes immediately. Fix it without changing her password."
+task = [
+  "${U_NAME} can't log in any more: the login closes immediately. Fix it without changing the password.",
+  "When ${U_NAME} logs in, the session ends right away. Fix it, but don't touch the password.",
+]
+
+[vars]
+U = "@users"
+SH = ["/bin/zsh", "/bin/mksh", "/usr/bin/fish", "/bin/tcsh"]

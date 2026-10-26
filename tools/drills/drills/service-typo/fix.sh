@@ -1,5 +1,5 @@
 #!/bin/bash
-sed -i 's|/usr/bin/pyhton3|/usr/bin/python3|' /etc/systemd/system/hello.service
-# It restarted until systemd gave up; the counter has to be cleared too.
-systemctl reset-failed hello.service
-systemctl daemon-reload && systemctl restart hello.service
+sed -i "s|^ExecStart=$BAD|ExecStart=/usr/bin/python3|" "/etc/systemd/system/$SVC_NAME.service"
+# With Restart=, it restarted until systemd gave up; the counter has to be cleared too.
+systemctl reset-failed "$SVC_NAME.service"
+systemctl daemon-reload && systemctl restart "$SVC_NAME.service"

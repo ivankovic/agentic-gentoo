@@ -1,2 +1,9 @@
 category = "portage"
-task = "emerge -uDN @world stopped working, it complains about something in the world file. Fix it, and keep everything I installed."
+task = [
+  "emerge -uDN @world stopped working, it complains about something in the world file. Fix it, and keep everything I installed.",
+  "Updating the system fails: emerge says there are no ebuilds for something in @world. Fix it without dropping my packages.",
+]
+
+[vars]
+PKG = "@packages"
+KIND = ["double-last", "category"]

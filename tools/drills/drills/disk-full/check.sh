@@ -1,5 +1,5 @@
 #!/bin/bash
 set -e
 (( $(df --output=avail -B1M / | tail -1) > 3000 ))
-test -s /root/archive/photos-2025.tar
-qlist -I net-misc/openssh | grep -q openssh
+[[ $(stat -c %s "/home/$U_NAME/$MINE") == 1073741824 ]]
+installed net-misc/openssh

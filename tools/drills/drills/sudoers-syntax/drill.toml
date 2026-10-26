@@ -1,2 +1,15 @@
 category = "auth"
-task = "sudo stopped working for alice; it complains about a syntax error in sudoers. Fix it."
+task = [
+  "sudo stopped working for ${U_NAME}; it complains about a syntax error in sudoers. Fix it.",
+  "${U_NAME} gets '>>> /etc/sudoers.d/${FILE}: syntax error' from sudo. Fix sudo.",
+]
+
+[vars]
+U = "@users"
+FILE = ["proxy", "backup", "99-local", "tools"]
+BAD = [
+  'Defaults env_keep += "HTTP_PROXY',
+  'Cmnd_Alias BACKUP = /usr/bin/rsync, /usr/bin/tar,',
+  'Host_Alias SERVERS =',
+  'Defaults timestamp_timeout=',
+]

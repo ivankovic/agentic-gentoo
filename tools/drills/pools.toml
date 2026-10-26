@@ -1,0 +1,174 @@
+# What drill variants are made of. A drill's [vars] entry "@<pool>" takes one row (a different
+# one for each such entry in the same drill) and exports its fields as <VAR>_<FIELD>.
+
+# Packages cached in the image (image/packages.txt): what the user calls it, the command it
+# installs, and a test that it works.
+[[packages]]
+atom = "app-misc/jq"
+name = "jq"
+cmd = "jq"
+test = "echo '{\"a\":1}' | jq -e '.a == 1'"
+
+[[packages]]
+atom = "app-misc/screen"
+name = "screen"
+cmd = "screen"
+test = "screen -ls; command -v screen"
+
+[[packages]]
+atom = "app-text/tree"
+name = "tree"
+cmd = "tree"
+test = "tree -d /etc/portage"
+
+[[packages]]
+atom = "sys-apps/pv"
+name = "pv"
+cmd = "pv"
+test = "echo hi | pv -q"
+
+[[packages]]
+atom = "app-misc/tmux"
+name = "tmux"
+cmd = "tmux"
+test = "tmux -V"
+
+[[packages]]
+atom = "app-arch/zip"
+name = "zip"
+cmd = "zip"
+test = "zip -v"
+
+[[packages]]
+atom = "app-arch/unzip"
+name = "unzip"
+cmd = "unzip"
+test = "unzip -v"
+
+[[packages]]
+atom = "sys-apps/ripgrep"
+name = "ripgrep"
+cmd = "rg"
+test = "rg -q root /etc/passwd"
+
+[[packages]]
+atom = "sys-process/btop"
+name = "btop"
+cmd = "btop"
+test = "btop --version"
+
+[[packages]]
+atom = "app-admin/sysstat"
+name = "iostat (sysstat)"
+cmd = "iostat"
+test = "iostat -V"
+
+[[packages]]
+atom = "net-misc/whois"
+name = "whois"
+cmd = "whois"
+test = "whois --version"
+
+[[packages]]
+atom = "app-misc/mc"
+name = "Midnight Commander"
+cmd = "mc"
+test = "mc --version"
+
+[[packages]]
+atom = "net-misc/socat"
+name = "socat"
+cmd = "socat"
+test = "socat -V"
+
+[[packages]]
+atom = "app-misc/figlet"
+name = "figlet"
+cmd = "figlet"
+test = "figlet hi"
+
+[[packages]]
+atom = "games-misc/cowsay"
+name = "cowsay"
+cmd = "cowsay"
+test = "cowsay hi"
+
+# Local accounts.
+[[users]]
+name = "alice"
+[[users]]
+name = "bob"
+[[users]]
+name = "carol"
+[[users]]
+name = "dave"
+[[users]]
+name = "erin"
+[[users]]
+name = "frank"
+[[users]]
+name = "grace"
+[[users]]
+name = "heidi"
+[[users]]
+name = "ivan"
+[[users]]
+name = "judy"
+[[users]]
+name = "mira"
+[[users]]
+name = "tomo"
+
+# Small web services, each a python3 http.server on its own port serving /srv/<name>.
+[[services]]
+name = "hello"
+desc = "Hello web page"
+port = "8080"
+[[services]]
+name = "docs"
+desc = "Documentation site"
+port = "8000"
+[[services]]
+name = "status"
+desc = "Status page"
+port = "8081"
+[[services]]
+name = "wiki"
+desc = "Team wiki export"
+port = "8888"
+[[services]]
+name = "reports"
+desc = "Report viewer"
+port = "9000"
+[[services]]
+name = "gallery"
+desc = "Photo gallery"
+port = "5000"
+[[services]]
+name = "dashboard"
+desc = "Metrics dashboard"
+port = "3000"
+[[services]]
+name = "preview"
+desc = "Site preview"
+port = "4000"
+
+# Background daemons with a configuration file and a state directory.
+[[daemons]]
+name = "worker"
+desc = "Queue worker"
+[[daemons]]
+name = "ingest"
+desc = "Ingest queue"
+[[daemons]]
+name = "mailer"
+desc = "Outgoing mail queue"
+[[daemons]]
+name = "indexer"
+desc = "Search indexer"
+[[daemons]]
+name = "syncd"
+desc = "File sync daemon"
+[[daemons]]
+name = "thumbs"
+desc = "Thumbnail generator"

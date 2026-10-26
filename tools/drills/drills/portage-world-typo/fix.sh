@@ -1,2 +1,2 @@
 #!/bin/bash
-emerge --deselect app-misc/jqq
+emerge --deselect "$(cat /var/lib/.drill-bad)"

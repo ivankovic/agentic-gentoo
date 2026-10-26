@@ -1,14 +1,4 @@
 #!/bin/bash
-mkdir -p /srv/hello && echo hello > /srv/hello/index.html
-cat > /etc/systemd/system/hello.service <<'X'
-[Unit]
-Description=Hello web page
-
-[Service]
-WorkingDirectory=/srv/hello
-ExecStart=/usr/bin/python3 -m http.server 8080
-
-[Install]
-WantedBy=multi-user.target
-X
+web_root "/srv/$SVC_NAME" "$SVC_NAME"
+web_unit "/etc/systemd/system/$SVC_NAME.service" "$SVC_DESC" "/srv/$SVC_NAME" "$SVC_PORT"
 systemctl daemon-reload

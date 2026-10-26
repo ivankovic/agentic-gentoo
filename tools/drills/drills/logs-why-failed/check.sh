@@ -1,8 +1,7 @@
 #!/bin/bash
-# The answer names the cause: the ingest user can't write to the root-owned spool directory.
-a=$(tr 'A-Z' 'a-z' < /run/drill/answer)
-grep -q 'spool' <<<"$a" || exit 1
-grep -qE 'permission|owned by root|owner|not writable|cannot write|can.t write|write access' <<<"$a" || exit 1
+# The answer names the cause: the service's user can't write to its root-owned directory.
+set -e
+answer_has "$SUB" 'permission|owned by root|owner|not writable|cannot write|can.t write|write access'
 # Nothing changed.
-s=$(stat -c '%U %a' /var/lib/ingest/spool; sha256sum /etc/systemd/system/ingest.service /usr/local/bin/ingest)
-[[ $s == "$(cat /var/lib/.drill-ingest-state)" ]]
+stat -c '%U %a' "/var/lib/$D_NAME/$SUB" > /var/lib/.drill-dirstate
+unchanged files

@@ -1,2 +1,9 @@
 category = "services"
-task = "hello.service keeps failing since I reorganised /srv. Fix it so it serves the page again."
+task = [
+  "${SVC_NAME}.service keeps failing since I moved the site files around. Fix it so it serves the page again.",
+  "The ${SVC_DESC} broke after I reorganised where the web files live. Get it serving its page again.",
+]
+
+[vars]
+SVC = "@services"
+BASE = ["/srv/www", "/var/www", "/srv/sites", "/opt/web"]

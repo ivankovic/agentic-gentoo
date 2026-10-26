@@ -1,2 +1,2 @@
 #!/bin/bash
-systemctl unmask hello.service && systemctl enable --now hello.service
+systemctl unmask "$SVC_NAME.service" && systemctl enable --now "$SVC_NAME.service"

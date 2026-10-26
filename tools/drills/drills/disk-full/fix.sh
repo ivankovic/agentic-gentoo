@@ -1,2 +1,2 @@
 #!/bin/bash
-rm -rf /var/tmp/portage/www-client
+rm -f "$JUNK"

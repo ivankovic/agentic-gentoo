@@ -1,2 +1,2 @@
 #!/bin/bash
-chmod 1777 /tmp
+chmod 1777 "$DIR"

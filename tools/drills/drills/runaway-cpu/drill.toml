@@ -1,0 +1,10 @@
+category = "processes"
+task = [
+  "The machine has been slow since yesterday; something is using all the CPU. Find it and stop it for good, but don't uninstall or delete anything.",
+  "Load is through the roof. Find the culprit and make sure it stays stopped, even after a reboot. Don't delete anything.",
+]
+reboot_before_check = true
+
+[vars]
+D = "@daemons"
+KIND = ["service", "timer"]

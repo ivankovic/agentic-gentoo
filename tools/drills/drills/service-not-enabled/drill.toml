@@ -1,3 +1,10 @@
 category = "services"
-task = "Every time I reboot, hello.service is down and I have to start it by hand. Make it come up on boot."
+task = [
+  "Every time I reboot, ${SVC_NAME}.service is down and I have to start it by hand. Make it come up on boot.",
+  "After a reboot the ${SVC_DESC} (port ${SVC_PORT}) is never there. Fix that.",
+  "Make sure ${SVC_NAME} survives a reboot, it keeps disappearing.",
+]
 reboot_before_check = true
+
+[vars]
+SVC = "@services"

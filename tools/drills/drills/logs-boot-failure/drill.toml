@@ -1,0 +1,10 @@
+category = "logs"
+task = [
+  "Something failed during the last boot. Which unit, and why? Don't change anything, just tell me.",
+  "systemctl says the system is 'degraded'. What failed and what's the cause? Only report, no changes.",
+]
+reboot_after_break = true
+
+[vars]
+D = "@daemons"
+KIND = ["missing-config", "bad-port"]
