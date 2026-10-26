@@ -1,0 +1,12 @@
+# Compares the local sysadmin model with the main agent on the last two days' sysadmin commands
+# (fix-shadow run). Run by fix-shadow.timer; `fix-shadow report` shows the result.
+[Unit]
+Description=Compare the local sysadmin model with the main agent (fix-shadow)
+
+[Service]
+Type=oneshot
+# Override in a drop-in to use another model.
+Environment=FIX_MODEL=%h/models/Qwen3.5-2B-Q5_K_M.gguf
+ExecStart=/usr/bin/fix-shadow run --serve ${FIX_MODEL}
+Nice=19
+IOSchedulingClass=idle

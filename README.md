@@ -15,6 +15,8 @@ Records of real installs, kept as reference for the installer:
   the host's `upstream.toml`.
 - [tools/drills](tools/drills/) — breakage drills for a sysadmin model: a throwaway Gentoo VM is
   broken in a known way, a model repairs it over a root shell, and a script checks the result.
+- [tools/fix](tools/fix/) — an offline sysadmin model's tools: `fix-shadow` asks the local model,
+  at each of the main agent's sysadmin commands, what it would have run, and records both.
 
 ## Deploying
 

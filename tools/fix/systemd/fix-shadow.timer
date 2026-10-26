@@ -1,0 +1,12 @@
+# Nightly; a missed run happens at the next boot. Enable once:
+# systemctl --user enable --now fix-shadow.timer
+[Unit]
+Description=Nightly comparison of the local sysadmin model with the main agent
+
+[Timer]
+OnCalendar=*-*-* 03:00
+RandomizedDelaySec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
