@@ -1,0 +1,2 @@
+# llama.cpp on the Iris Xe through Vulkan, besides the CPU.
+sci-misc/llama-cpp vulkan
