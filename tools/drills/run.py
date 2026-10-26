@@ -23,6 +23,7 @@ import sys
 import tempfile
 import time
 import tomllib
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -104,7 +105,8 @@ class Machine:
                 "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", "root@127.0.0.1",
                 "TERM=dumb PAGER=cat SYSTEMD_PAGER=cat SYSTEMD_COLORS=0 bash -lc " + shlex.quote(command)]
         try:
-            return subprocess.run(args, input=stdin, capture_output=True, text=True, timeout=timeout)
+            return subprocess.run(args, input=stdin, capture_output=True, text=True, errors="replace",
+                                  timeout=timeout)
         except subprocess.TimeoutExpired as e:
             out = (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
             return subprocess.CompletedProcess(args, 124, out, f"timed out after {timeout} s")
@@ -130,29 +132,45 @@ def clip(text):
     return f"{text[:half]}\n[... {len(text) - OUTPUT_LIMIT} characters left out ...]\n{text[-half:]}"
 
 
+class ContextFull(Exception):
+    """The conversation no longer fits the model's context: the model's limit, so a fail."""
+
+
 def chat(url, messages, think):
     body = {"messages": messages, "tools": TOOLS, "temperature": 0.2, "max_tokens": 4096,
             "chat_template_kwargs": {"enable_thinking": think}}
     req = urllib.request.Request(url.rstrip("/") + "/v1/chat/completions", json.dumps(body).encode(),
                                  {"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=1800) as r:
-        return json.load(r)
+    try:
+        with urllib.request.urlopen(req, timeout=1800) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        if "exceeds the available context" in body or "exceed_context_size" in body:
+            raise ContextFull() from None
+        raise RuntimeError(f"HTTP {e.code}: {body[:300]}") from None
 
 
 def agent(machine, task, url, think):
     """The model's loop: tool calls run on the machine until it answers without one."""
     messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": task}]
+    transcript = list(messages)
     tokens = {"prompt": 0, "completion": 0}
     for _ in range(MAX_STEPS):
-        reply = chat(url, messages, think)
+        try:
+            reply = chat(url, messages, think)
+        except ContextFull:
+            return "", transcript, tokens, "context"
         usage = reply.get("usage", {})
         tokens["prompt"] += usage.get("prompt_tokens", 0)
         tokens["completion"] += usage.get("completion_tokens", 0)
         msg = reply["choices"][0]["message"]
-        messages.append({k: v for k, v in msg.items() if k in ("role", "content", "tool_calls", "reasoning_content")})
+        # Earlier turns' thinking is not sent back: the transcript keeps it, the context doesn't.
+        transcript.append({k: v for k, v in msg.items() if k in ("role", "content", "tool_calls", "reasoning_content")})
+        messages.append({k: v for k, v in msg.items() if k in ("role", "content", "tool_calls")})
         calls = msg.get("tool_calls") or []
         if not calls:
-            return msg.get("content") or "", messages, tokens, False
+            return msg.get("content") or "", transcript, tokens, False
         for call in calls:
             try:
                 command = json.loads(call["function"]["arguments"])["command"]
@@ -161,7 +179,8 @@ def agent(machine, task, url, think):
             except (KeyError, json.JSONDecodeError) as e:
                 result = f"bad tool call: {e}"
             messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": result})
-    return "", messages, tokens, True
+            transcript.append(messages[-1])
+    return "", transcript, tokens, "steps"
 
 
 def run_drill(drill: Path, args):
@@ -202,14 +221,13 @@ def run_drill(drill: Path, args):
             m.put("/run/drill/check.sh", (drill / "check.sh").read_text())
             c = m.ssh("/run/drill/check.sh")
             rec.update(result="pass" if c.returncode == 0 else "fail", check=clip(c.stdout + c.stderr),
-                       answer=answer, out_of_steps=gave_up, tokens=tokens, transcript=transcript,
+                       answer=answer, gave_up=gave_up, tokens=tokens, transcript=transcript,
                        steps=sum(1 for x in transcript or [] if x["role"] == "tool"))
             return rec
         except Exception as e:  # a drill that cannot run is reported, not fatal to the run
             return {**rec, "result": "error", "why": f"{type(e).__name__}: {e}"}
         finally:
             m.stop()
-            rec["seconds"] = round(time.time() - t0)
 
 
 def main():
@@ -232,7 +250,9 @@ def main():
     tally = {}
     with out.open("w") as f:
         for name in names:
+            t0 = time.time()
             rec = run_drill(HERE / "drills" / name, args)
+            rec["seconds"] = round(time.time() - t0)
             f.write(json.dumps(rec) + "\n")
             f.flush()
             tally[rec["result"]] = tally.get(rec["result"], 0) + 1

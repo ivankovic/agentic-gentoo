@@ -38,7 +38,9 @@ drill itself is wrong) or error, with the model's transcript, its final answer a
 
 The model gets one tool, `run` (a bash command as root, at most 5 minutes, 3,000 characters of
 output: head and tail), the system prompt in [run.py](run.py), and the drill's task, worded the way a
-user would report it. It stops when it answers without a tool call, or after 30 commands.
+user would report it. It stops when it answers without a tool call, after 30 commands, or when the
+conversation no longer fits its context; the check decides pass or fail either way. Earlier turns'
+thinking is kept in the transcript but not sent back to the model.
 
 ## Drills
 
