@@ -33,8 +33,9 @@ def main():
             if key not in best or r["steps"] < best[key]["steps"]:
                 best[key] = r
     for (drill, seed), r in sorted(best.items()):
-        # Thinking is left out: the student learns the actions, not the teacher's private notes.
-        messages = [{k: v for k, v in m.items() if k != "reasoning_content"} for m in r["transcript"]]
+        # Thinking is left out: the student learns the actions, not the teacher's private notes;
+        # so are memory notes, which were never part of the conversation.
+        messages = [{k: v for k, v in m.items() if k not in ("reasoning_content", "memory")} for m in r["transcript"]]
         print(json.dumps({"messages": messages, "tools": TOOLS, "drill": drill, "seed": seed,
                           "label": r["label"]}))
     print(f"export: {len(best)} repairs", file=sys.stderr)

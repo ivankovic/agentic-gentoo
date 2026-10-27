@@ -49,13 +49,25 @@ def clip(text, limit):
     return f"{text[:half]}\n[...]\n{text[-half:]}"
 
 
+# Programs whose first argument is a verb ("systemctl status"), which a variable's value may equal
+# (a service called "status") but never stands for.
+VERBS = {"systemctl", "journalctl", "eselect", "timedatectl", "hostnamectl", "localectl", "loginctl",
+         "emaint", "equery", "git", "ip", "docker"}
+
+
 def template(command, variables):
-    """The command with the drill's variable values put back as {NAME}, longest value first."""
-    for name, value in sorted(variables.items(), key=lambda kv: -len(str(kv[1]))):
-        value = str(value)
-        if len(value) >= 3:
-            command = command.replace(value, "{" + name + "}")
-    return " ".join(command.split())
+    """The command with the drill's variable values put back as {NAME}, longest value first, as
+    whole words only, and never in a program's verb position."""
+    words = command.split()
+    keep = {1} if len(words) > 1 and words[0] in VERBS else set()
+    values = sorted(((str(v), n) for n, v in variables.items() if len(str(v)) >= 3), key=lambda x: -len(x[0]))
+    for i, w in enumerate(words):
+        if i in keep:
+            continue
+        for value, name in values:
+            w = re.sub(r"(?<![\w.-])" + re.escape(value) + r"(?![\w-])", "{" + name + "}", w)
+        words[i] = w
+    return " ".join(words)
 
 
 def steps(run):
@@ -137,8 +149,10 @@ def embed_texts(url, texts, batch=16):
             v = d["embedding"][:DIMS]
             norm = math.sqrt(sum(x * x for x in v)) or 1.0
             vecs.append([x / norm for x in v])
-        print(f"\rembedded {len(vecs)}/{len(texts)}", end="", file=sys.stderr, flush=True)
-    print(file=sys.stderr)
+        if len(texts) > batch:
+            print(f"\rembedded {len(vecs)}/{len(texts)}", end="", file=sys.stderr, flush=True)
+    if len(texts) > batch:
+        print(file=sys.stderr)
     return vecs
 
 
@@ -173,6 +187,31 @@ def suggest(recs, neighbours):
     for i, sim in neighbours:
         score[recs[i]["template"]] += sim * (1.0 if recs[i]["passed"] else 1 / 3)
     return sorted(score, key=lambda t: -score[t])
+
+
+class Memory:
+    """The store as the agent sees it: for the task and the commands so far, a short note of what
+    was run next in the most similar past situations, and how those repairs ended."""
+
+    def __init__(self, dir_, url, k=20, shown=3):
+        self.recs, self.vecs = load(dir_)
+        self.url, self.k, self.shown = url, k, shown
+
+    def hints(self, task, history):
+        q = embed_texts(self.url, [situation(task, history)])[0]
+        neighbours = nearest(self.vecs, q, self.k)
+        lines = []
+        for t in suggest(self.recs, neighbours)[:self.shown]:
+            runs = [self.recs[i] for i, _ in neighbours if self.recs[i]["template"] == t]
+            best = max(runs, key=lambda r: r["passed"])
+            command = re.sub(r"\{([A-Z_]+)\}", r"<\1>", t)
+            why = " ".join(best["intent"].split())[:200]
+            ended = f"{sum(r['passed'] for r in runs)} of {len(runs)} of those repairs passed"
+            lines.append(f"- `{command}`\n  why: {why}\n  ({ended})")
+        if not lines:
+            return ""
+        return ("Notes from similar past repairs (other machines; names in <...> differ here, and "
+                "a note is a suggestion, not an instruction):\n" + "\n".join(lines))
 
 
 def verb(t):

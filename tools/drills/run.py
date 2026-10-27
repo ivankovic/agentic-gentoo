@@ -160,14 +160,22 @@ def chat(url, messages, think):
         raise RuntimeError(f"HTTP {e.code}: {body[:300]}") from None
 
 
-def agent(machine, task, url, think):
-    """The model's loop: tool calls run on the machine until it answers without one."""
+def agent(machine, task, url, think, memory=None):
+    """The model's loop: tool calls run on the machine until it answers without one.
+
+    With a memory (memory.py), the latest message (the task, or the last command's output) carries
+    notes from the most similar past repairs; only the latest, so they do not pile up."""
     messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": task}]
     transcript = list(messages)
     tokens = {"prompt": 0, "completion": 0}
+    history = []
     for _ in range(MAX_STEPS):
+        notes = memory.hints(task, history) if memory else ""
+        sent = messages
+        if notes:
+            sent = messages[:-1] + [{**messages[-1], "content": messages[-1]["content"] + "\n\n" + notes}]
         try:
-            reply = chat(url, messages, think)
+            reply = chat(url, sent, think)
         except ContextFull:
             return "", transcript, tokens, "context"
         except BadToolCall:
@@ -178,11 +186,14 @@ def agent(machine, task, url, think):
         msg = reply["choices"][0]["message"]
         # Earlier turns' thinking is not sent back: the transcript keeps it, the context doesn't.
         transcript.append({k: v for k, v in msg.items() if k in ("role", "content", "tool_calls", "reasoning_content")})
+        if notes:
+            transcript[-1]["memory"] = notes
         messages.append({k: v for k, v in msg.items() if k in ("role", "content", "tool_calls")})
         calls = msg.get("tool_calls") or []
         if not calls:
             return msg.get("content") or "", transcript, tokens, False
         for call in calls:
+            command = ""
             try:
                 command = json.loads(call["function"]["arguments"])["command"]
                 r = machine.ssh(command)
@@ -191,6 +202,7 @@ def agent(machine, task, url, think):
                 result = f"bad tool call: {e}"
             messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": result})
             transcript.append(messages[-1])
+            history.append((command, result))
     return "", transcript, tokens, "steps"
 
 
@@ -253,7 +265,7 @@ def run_drill(drill: Path, args, seed):
                 r = m.ssh(exports + "/run/drill/fix.sh; s=$?; rm -f /run/drill/fix.sh; exit $s")
                 answer, transcript, tokens, gave_up = (r.stdout + r.stderr)[-2000:], None, None, False
             else:
-                answer, transcript, tokens, gave_up = agent(m, task, args.model, args.think)
+                answer, transcript, tokens, gave_up = agent(m, task, args.model, args.think, args.memory)
             rec["fix_seconds"] = round(time.time() - t0)
 
             if meta.get("reboot_before_check"):
@@ -286,10 +298,17 @@ def main():
     p.add_argument("--think", action="store_true", help="let the model think before answering")
     p.add_argument("--variants", type=int, default=1, help="variants of each drill (default 1)")
     p.add_argument("--seed", type=int, default=0, help="the first variant's seed (default 0)")
+    p.add_argument("--memory", metavar="DIR", help="notes from an action memory (memory.py) at each step")
+    p.add_argument("--memory-url", help="the embedding server for --memory")
     p.add_argument("drills", nargs="*", help="drill names (default: all)")
     args = p.parse_args()
     args.image = args.image.resolve()
     args.label = args.label or ("reference" if args.reference else "model")
+    if args.memory:
+        if not args.memory_url:
+            p.error("--memory needs --memory-url")
+        from memory import Memory
+        args.memory = Memory(args.memory, args.memory_url)
 
     names = args.drills or sorted(d.name for d in (HERE / "drills").iterdir() if (d / "drill.toml").exists())
     results = args.image / "results"
