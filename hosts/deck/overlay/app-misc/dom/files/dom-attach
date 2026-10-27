@@ -1,0 +1,4 @@
+#!/bin/sh
+# Shows the TUI of the Dom service (dom.service). Ctrl-\ detaches and leaves Dom running; q quits
+# Dom, and the service starts it again.
+exec sudo -u dom dtach -a /run/dom/tui -r winch -z "$@"

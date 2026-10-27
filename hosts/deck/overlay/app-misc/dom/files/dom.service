@@ -1,0 +1,43 @@
+[Unit]
+Description=Dom home automation
+Documentation=https://github.com/ivankovic/dom
+Wants=network-online.target
+After=network-online.target time-sync.target
+
+[Service]
+User=dom
+Group=dom
+StateDirectory=dom
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/dom
+# Dom draws its TUI on dtach's terminal and keeps collecting while nobody is attached; dom-attach
+# attaches. Quitting the TUI ends Dom, so the service starts it again.
+RuntimeDirectory=dom
+Environment=TERM=xterm-256color
+ExecStart=/usr/bin/dtach -N /run/dom/tui -z /usr/bin/dom
+Restart=always
+RestartSec=5
+
+# ICMP for the ping scan, on hosts where net.ipv4.ping_group_range does not cover the dom group.
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
