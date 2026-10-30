@@ -1,15 +1,26 @@
 # Shown on every interactive login (cleared first, so boot messages don't bury it), and by `help`.
+# The host's name, network and mount point come from /etc/deck-recovery.conf (update.sh).
 deck_help() {
-	cat <<'TXT'
+	local name="Recovery" main=main net
+	if [[ -r /etc/deck-recovery.conf ]]; then
+		name=$(. /etc/deck-recovery.conf && echo "$RECOVERY_NAME")
+		main=$(. /etc/deck-recovery.conf && echo "$MAIN_NAME")
+	fi
+	if [[ $(. /etc/deck-recovery.conf 2>/dev/null && echo "$NETWORK") == wired ]]; then
+		net="Wired, by DHCP. Check:  ping -c1 gentoo.org     (networkctl shows the link)"
+	else
+		net="Saved Wi-Fi networks connect by themselves. Check:  ping -c1 gentoo.org
+                  Otherwise:  iwctl station wlan0 connect <SSID>"
+	fi
+	cat <<TXT
 
-  Deck recovery: a root shell, no desktop. The main system is untouched until you mount it.
+  $name: a root shell, no desktop. The main system is untouched until you mount it.
 
-  1. Network      Saved Wi-Fi networks connect by themselves. Check:  ping -c1 gentoo.org
-                  Otherwise:  iwctl station wlan0 connect <SSID>
+  1. Network      $net
 
-  2. Look         deck mount                  main system read-only at /mnt/deck
-                  journalctl --root=/mnt/deck -b -1 -p warning              last boot's warnings
-                  journalctl --root=/mnt/deck --namespace=vitals -b -1 -n 50  its last temperatures and power
+  2. Look         deck mount                  main system read-only at /mnt/$main
+                  journalctl --root=/mnt/$main -b -1 -p warning              last boot's warnings
+                  journalctl --root=/mnt/$main --namespace=vitals -b -1 -n 50  its last temperatures and power
                   deck mount check            offline btrfs check, read-only (when not mounted)
 
   3. Repair       deck rollback               root back to a snapshot (hourly, or from before an emerge)
@@ -18,7 +29,7 @@ deck_help() {
                   deck mount off              when done, then: reboot
 
   4. Help         curl -fsSL https://claude.ai/install.sh | bash     (or just: install-claude)
-                  export PATH=$HOME/.local/bin:$PATH; claude
+                  export PATH=\$HOME/.local/bin:\$PATH; claude
 
   deck lists these tools; help prints this again; less /usr/local/share/RECOVERY.md has the rest.
 

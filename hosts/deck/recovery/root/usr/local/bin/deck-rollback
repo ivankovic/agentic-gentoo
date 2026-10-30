@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# deck-rollback: put deck's root (@) back to one of its snapshots. Run with deck unmounted.
+# deck-rollback: put the main system's root (@) back to one of its snapshots. Run with it unmounted
+# (deck mount off).
 #
 # Lists the snapshots of @ (btrbk's hourly @.<time> and the emerge wrapper's @.pre-emerge.<time>),
 # asks which, then on the btrfs top level: renames @ to @.broken.<now> and makes a writable
@@ -10,16 +11,18 @@
 # that boots by default, it says so: pick a matching kernel in the boot menu (Space at power-on), or
 # reinstall it from inside: deck mount rw; deck chroot; emerge --config sys-kernel/gentoo-kernel.
 set -euo pipefail
-LUKS=/dev/disk/by-uuid/9e6393f4-5800-4971-aa10-aa2ea004c044
-TOP=/mnt/deck-top
+. /etc/deck-recovery.conf
+LUKS=$MAIN_LUKS
+NAME=$MAIN_NAME
+TOP=/mnt/$NAME-top
 
-findmnt -rn /mnt/deck >/dev/null && { echo "deck-rollback: deck is mounted; run 'deck mount off' first" >&2; exit 1; }
-if [[ -e /dev/mapper/deck ]] && cryptsetup status deck | grep -q readonly; then
-  echo "deck-rollback: deck is open read-only; run 'deck mount off' first" >&2; exit 1
+findmnt -rn "/mnt/$NAME" >/dev/null && { echo "deck-rollback: $NAME is mounted; run 'deck mount off' first" >&2; exit 1; }
+if [[ -e /dev/mapper/$NAME ]] && cryptsetup status "$NAME" | grep -q readonly; then
+  echo "deck-rollback: $NAME is open read-only; run 'deck mount off' first" >&2; exit 1
 fi
-[[ -e /dev/mapper/deck ]] || cryptsetup open "$LUKS" deck
+[[ -e /dev/mapper/$NAME ]] || cryptsetup open "$LUKS" "$NAME"
 mkdir -p "$TOP"
-mount -o subvolid=5 /dev/mapper/deck "$TOP"
+mount -o subvolid=5 "/dev/mapper/$NAME" "$TOP"
 trap 'umount "$TOP"' EXIT
 
 mapfile -t snaps < <(cd "$TOP/@snapshots" && ls -d @.* 2>/dev/null | awk -F. '{print $NF "\t" $0}' | sort | cut -f2)  # by time
@@ -39,7 +42,7 @@ read -r -p "Type ROLLBACK to go ahead: " answer
 mv "$TOP/@" "$TOP/@.broken.$now"
 btrfs subvolume snapshot "$TOP/@snapshots/$pick" "$TOP/@" >/dev/null
 echo "deck-rollback: @ is now $pick; the previous root is @.broken.$now (delete it once happy:"
-echo "  mount -o subvolid=5 /dev/mapper/deck /mnt/deck-top; btrfs subvolume delete /mnt/deck-top/@.broken.$now)"
+echo "  mount -o subvolid=5 /dev/mapper/$NAME $TOP; btrfs subvolume delete $TOP/@.broken.$now)"
 
 # Does the restored root have modules for the kernels on the ESP?
 echo

@@ -2,7 +2,7 @@
 # deck: one name for this machine's own tools, as git does it. `deck <tool> [args]` runs
 # deck-<tool>; `deck` alone (or `deck help`) lists the tools this system has; `deck help <tool>`
 # shows a script's header comment, and a program's --help (scripts aren't asked: deck-nosnap
-# --help would make a subvolume named --help, and deck-rollback would roll back). The same script is in Deck recovery (recovery/build.sh), which has tools
+# --help would make a subvolume named --help, and deck-rollback would roll back). The same script is in the recovery system (recovery/build.sh), which has tools
 # of its own: there it lists those, and says where the main system's are.
 #
 # A deck-* file is one of ours; it's typed as `deck <tool>`. Those not listed below (daemons, what
@@ -17,15 +17,16 @@ main=(
 	"terminals|reboot or log out with the terminals coming back (--reboot, --relogin)"
 )
 recovery=(
-	"mount|the main system at /mnt/deck, read-only (rw, off, check)"
+	"mount|the main system at /mnt/<name>, read-only (rw, off, check)"
 	"chroot|a shell inside the main system, after deck mount rw"
 	"rollback|root back to one of its snapshots"
 )
 
-in_recovery() { grep -qx 'NAME="Deck recovery"' /etc/os-release 2>/dev/null; }
+# Only a recovery system has it (update.sh writes it there); the main system's is /etc/deck-recovery/.
+in_recovery() { [[ -e /etc/deck-recovery.conf ]]; }
 
 list() {
-	local here=("${main[@]}") there=("${recovery[@]}") where="Deck recovery (boot it from the menu)"
+	local here=("${main[@]}") there=("${recovery[@]}") where="the recovery system (boot it from the menu)"
 	if in_recovery; then
 		here=("${recovery[@]}") there=("${main[@]}") where="the main system (deck mount rw, then deck chroot)"
 		echo "deck, in recovery: the tools this system has"
@@ -53,7 +54,7 @@ elsewhere() {
 		done
 	else
 		for t in "${recovery[@]}"; do
-			[[ ${t%%|*} == "$1" ]] && { echo "deck $1 is in Deck recovery: boot it from the menu" >&2; return; }
+			[[ ${t%%|*} == "$1" ]] && { echo "deck $1 is in the recovery system: boot it from the menu" >&2; return; }
 		done
 	fi
 	echo "deck: no tool $1; deck lists them" >&2

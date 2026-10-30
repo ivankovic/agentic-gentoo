@@ -70,6 +70,14 @@ shows a failed update, and warns when the last one is over 6 weeks old or was ne
   given the ESP, builds its UKI as `EFI/Linux/deck-recovery.efi`. The main system's `gentoo-*.efi`
   are never touched. It lives under `etc/` so deploy.sh installs it for the timer below.
 - [install.sh](install.sh): shrinks the main partition by 32 GiB online (btrfs, then the dm-crypt
-  mapping, then the partition, each checked) and puts the built root on the new p3.
-- [root/](root/): the recovery's own files: portage config, dracut, fstab, os-release, iwd,
-  autologin, and the `deck mount`, `deck chroot`, `deck rollback` and `install-claude` helpers.
+  mapping, then the partition, each checked) and puts the built root on the new p3. A host whose
+  recovery partition exists already (named as in host.conf) skips the shrinking.
+- [root/](root/): the recovery's own files: portage config, dracut, iwd, autologin, and the
+  `deck mount`, `deck chroot`, `deck rollback` and `install-claude` helpers.
+- [../etc/deck-recovery/host.conf](../etc/deck-recovery/host.conf): what differs from host to host,
+  so another machine can have the same recovery with its own host.conf (deploy.sh installs it to
+  `/etc/deck-recovery/`): the name, partition label, the main LUKS partition and its name, the ESP,
+  Wi-Fi or wired, and SSH. With `SSH=yes` the recovery unlocks over SSH (dracut-crypt-ssh) and runs
+  sshd, both on port 2222 with the main system's initramfs host key and allowed keys. update.sh
+  writes the rest from it: hostname, os-release (the menu title), fstab, network, `20-host.conf`
+  for dracut, and `/etc/deck-recovery.conf` for the helpers and the login help.

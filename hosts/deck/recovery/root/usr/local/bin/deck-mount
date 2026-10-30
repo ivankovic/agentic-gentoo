@@ -1,51 +1,54 @@
 #!/usr/bin/env bash
-# deck mount [rw]: open deck's main LUKS partition and mount its subvolumes under /mnt/deck.
+# deck mount [rw]: open the main system's LUKS partition and mount its subvolumes under /mnt/<name>
+# (MAIN_LUKS and MAIN_NAME in /etc/deck-recovery.conf: /mnt/deck on deck).
 # Read-only by default, so looking can't change anything; `deck mount rw` remounts writable for
 # repairs (and `deck chroot` needs it). `deck mount off` unmounts and closes.
 # `deck mount check` opens it read-only without mounting and runs `btrfs check --readonly`: the
 # offline check of btrfs's metadata, which can't run on the live system. It changes nothing.
 # (Never `btrfs check --repair` without a backup and advice: it can make damage worse.)
 set -euo pipefail
-LUKS=/dev/disk/by-uuid/9e6393f4-5800-4971-aa10-aa2ea004c044
-MNT=/mnt/deck
+. /etc/deck-recovery.conf
+LUKS=$MAIN_LUKS
+NAME=$MAIN_NAME
+MNT=/mnt/$NAME
 mode=${1:-ro}
 
 if [[ $mode == off ]]; then
   for m in $(findmnt -rn -o TARGET | grep "^$MNT" | sort -r); do umount "$m"; done
-  cryptsetup close deck 2>/dev/null || true
+  cryptsetup close "$NAME" 2>/dev/null || true
   echo "deck-mount: closed"; exit 0
 fi
 
 if [[ $mode == check ]]; then
   findmnt -rn "$MNT" >/dev/null && { echo "deck-mount: mounted; run 'deck mount off' first" >&2; exit 1; }
-  [[ -e /dev/mapper/deck ]] || cryptsetup open --readonly "$LUKS" deck
+  [[ -e /dev/mapper/$NAME ]] || cryptsetup open --readonly "$LUKS" "$NAME"
   rc=0
-  btrfs check --readonly --progress /dev/mapper/deck || rc=$?
+  btrfs check --readonly --progress "/dev/mapper/$NAME" || rc=$?
   echo "deck-mount: btrfs check exited $rc ($([[ $rc == 0 ]] && echo 'no errors' || echo 'errors: see above')); 'deck mount off' closes it"
   exit $rc
 fi
 
-if [[ ! -e /dev/mapper/deck ]]; then
-  if [[ $mode == rw ]]; then cryptsetup open "$LUKS" deck; else cryptsetup open --readonly "$LUKS" deck; fi
+if [[ ! -e /dev/mapper/$NAME ]]; then
+  if [[ $mode == rw ]]; then cryptsetup open "$LUKS" "$NAME"; else cryptsetup open --readonly "$LUKS" "$NAME"; fi
 fi
 
 if findmnt -rn "$MNT" >/dev/null; then
-  [[ $mode == rw ]] && { cryptsetup status deck | grep -q readonly && { echo "deck-mount: opened read-only; run 'deck mount off' then 'deck mount rw'" >&2; exit 1; }; mount -o remount,rw "$MNT"; }
+  [[ $mode == rw ]] && { cryptsetup status "$NAME" | grep -q readonly && { echo "deck-mount: opened read-only; run 'deck mount off' then 'deck mount rw'" >&2; exit 1; }; mount -o remount,rw "$MNT"; }
 else
   mkdir -p "$MNT"
   opts=$([[ $mode == rw ]] && echo rw || echo ro)
-  mount -o "$opts,subvol=@" /dev/mapper/deck "$MNT"
+  mount -o "$opts,subvol=@" "/dev/mapper/$NAME" "$MNT"
   for sub in home:@home var/log:@var_log var/tmp:@var_tmp .snapshots:@snapshots; do
-    mount -o "$opts,subvol=${sub#*:}" /dev/mapper/deck "$MNT/${sub%%:*}"
+    mount -o "$opts,subvol=${sub#*:}" "/dev/mapper/$NAME" "$MNT/${sub%%:*}"
   done
   findmnt /efi >/dev/null && mount --bind /efi "$MNT/efi"
 fi
 findmnt -R "$MNT" -o TARGET,OPTIONS | cut -c1-100
-cat <<'TXT'
+cat <<TXT
 
-Look:     journalctl --root=/mnt/deck --list-boots
-          journalctl --root=/mnt/deck -b -1 -p warning
-          journalctl --root=/mnt/deck --namespace=vitals -b -1 -n 50    (hardware, last 100 s)
-          ls /mnt/deck/var/lib/systemd/pstore        btrfs subvolume list /mnt/deck/.snapshots
+Look:     journalctl --root=$MNT --list-boots
+          journalctl --root=$MNT -b -1 -p warning
+          journalctl --root=$MNT --namespace=vitals -b -1 -n 50    (hardware, last 100 s)
+          ls $MNT/var/lib/systemd/pstore        btrfs subvolume list $MNT/.snapshots
 Repair:   deck mount rw && deck chroot
 TXT
