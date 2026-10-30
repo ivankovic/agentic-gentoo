@@ -34,8 +34,10 @@ deck patches scan list                             # every verdict, tab-separate
 deck patches scan allow <cat/pkg-ver> [--note TEXT]  # let a blocked version be installed
 ```
 
-It reads the host's directory, `~/src/agentic-gentoo/hosts/$(hostname)` unless `--host-dir` or
-`DECK_HOST_DIR` says otherwise. Nothing is cached: every start reads the system afresh.
+It reads the host's directory, `~/src/agentic-gentoo/hosts/$(hostname)` unless `--host-dir`,
+`DECK_HOST_DIR` or `~/.config/deck/host-dir` says otherwise (the file, a path relative to the home or
+absolute, is for a host kept in another repository; it holds where the environment is cleared, as
+in the emerge wrapper's gate). Nothing is cached: every start reads the system afresh.
 
 ## Origin
 

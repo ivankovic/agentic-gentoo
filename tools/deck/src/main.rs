@@ -25,7 +25,7 @@ use vdb::Filter;
     about = "Installed packages, their origin, local patches and their way upstream"
 )]
 struct Cli {
-    /// This host's directory in agentic-gentoo [default: ~/src/agentic-gentoo/hosts/<hostname>]
+    /// This host's directory [default: ~/.config/deck/host-dir's, else ~/src/agentic-gentoo/hosts/<hostname>]
     #[arg(long, env = "DECK_HOST_DIR", global = true)]
     host_dir: Option<PathBuf>,
     #[command(subcommand)]

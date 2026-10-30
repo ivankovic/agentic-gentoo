@@ -39,19 +39,23 @@ pub fn date(epoch: i64) -> String {
     }
 }
 
+/// ~/.config/deck/host-dir names the directory of a host kept outside this repository (a path,
+/// relative to the home or absolute); it holds even where the environment is cleared, as for the
+/// emerge wrapper's gate. Without it, ~/src/agentic-gentoo/hosts/<hostname>.
 pub fn default_host_dir() -> Result<PathBuf> {
-    let home = std::env::var_os("HOME").context("HOME is not set")?;
+    let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
+    if let Ok(dir) = fs::read_to_string(home.join(".config/deck/host-dir")) {
+        return Ok(home.join(dir.trim()));
+    }
     let host = fs::read_to_string("/etc/hostname").context("reading /etc/hostname")?;
-    Ok(PathBuf::from(home)
-        .join("src/agentic-gentoo/hosts")
-        .join(host.trim()))
+    Ok(home.join("src/agentic-gentoo/hosts").join(host.trim()))
 }
 
 impl Model {
     pub fn load(host_dir: PathBuf) -> Result<Model> {
         if !host_dir.is_dir() {
             bail!(
-                "{} is not a directory; pass --host-dir or set DECK_HOST_DIR",
+                "{} is not a directory; pass --host-dir, set DECK_HOST_DIR or name it in ~/.config/deck/host-dir",
                 host_dir.display()
             );
         }
