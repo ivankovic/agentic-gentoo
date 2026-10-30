@@ -15,8 +15,9 @@
 #
 # A host kept elsewhere: DECK_HOST_DIR=<dir> ./deploy.sh <host> takes the host's files from <dir>
 # (a git checkout) instead of hosts/<host>. A host can share another's files: hosts/<host>/inherit
-# (or <dir>/inherit) names repository paths, one per line, e.g. hosts/deck/home/.config/niri,
-# deployed as if they were its own. Its own files win over inherited ones with the same target.
+# (or <dir>/inherit) names repository paths, one per line, e.g. hosts/deck/home/.config/niri or
+# hosts/deck/recovery/root, deployed as if they were its own. Its own files win over inherited ones
+# with the same target.
 #
 # Only files tracked by git are deployed, in their working-tree version. Deploying only ever goes
 # repo -> system, and never deletes anything on the system: a file removed from the repo stays on
@@ -64,7 +65,7 @@ inherited=()
 if [[ -f $dir/inherit ]]; then
   while read -r p; do
     [[ -z $p || $p == '#'* ]] && continue
-    [[ $p =~ ^(hosts/[^/]+)/((home|etc|portage|usr-local)(/.*)?)$ && -e $p ]] \
+    [[ $p =~ ^(hosts/[^/]+)/(((home|etc|portage|usr-local|recovery/root)(/.*)?)|recovery/README\.md)$ && -e $p ]] \
       || { echo "deploy: $dir/inherit: $p is not a deployable path under hosts/<host>/" >&2; exit 2; }
     inherited+=("${BASH_REMATCH[1]}"$'\t'"${BASH_REMATCH[2]}")
   done <"$dir/inherit"
