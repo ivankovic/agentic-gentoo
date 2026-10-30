@@ -98,6 +98,9 @@ if [[ $SSH == yes ]]; then
     [[ -s /etc/dropbear/$f ]] || { echo "update.sh: SSH=yes but no /etc/dropbear/$f" >&2; exit 1; }
   done
   packages+=(sys-kernel/dracut-crypt-ssh net-misc/openssh)
+  # dracut-crypt-ssh is only in testing (~amd64), as on the main system.
+  mkdir -p "$ROOT/etc/portage/package.accept_keywords"
+  echo "sys-kernel/dracut-crypt-ssh ~amd64" > "$ROOT/etc/portage/package.accept_keywords/ssh"
   install -D -m 600 /etc/dropbear/initramfs.authorized_keys "$ROOT/etc/dropbear/initramfs.authorized_keys"
   install -D -m 600 /etc/dropbear/initramfs_ed25519_key "$ROOT/etc/dropbear/initramfs_ed25519_key"
   install -D -m 600 /etc/dropbear/initramfs.authorized_keys "$ROOT/root/.ssh/authorized_keys"
