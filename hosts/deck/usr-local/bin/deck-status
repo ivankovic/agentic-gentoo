@@ -14,7 +14,9 @@ Hosts:    each server in ~/.config/deck/hosts.toml, every 5 minutes while online
           over ssh with a key that can only run that (usr-local/share/deck-status/hoststatus,
           installed there by hand), and its sites over HTTPS. A host marked home_only is checked
           only at home; away, `via` tells from another host's listening ports whether its tunnel
-          is up. Offline, nothing is checked: hosts show as unchecked, not down.
+          is up; `unlock` tells a host that booted and waits for its disk's passphrase (its
+          initramfs answers on that port) from one that is down. Offline, nothing is checked:
+          hosts show as unchecked, not down.
 Local:    failed units, security advisories (the daily sync's list), firmware (hourly),
           the recovery's age, and deck-attention --json; every 5 minutes.
 
@@ -35,6 +37,8 @@ only). The host list stays out of the repository, which is public:
   key = "~/.ssh/id_deck_status"
   home_only = true
   via = { host = "server", ports = [2222] }   # away: up when server listens on these
+  # Unreachable, but its initramfs answers here: booted and waiting for its disk to be unlocked.
+  unlock = { probe = "192.0.2.20:2222", hint = "ssh nas-unlock" }
 """
 import concurrent.futures
 import datetime
@@ -157,6 +161,11 @@ def judge(h, report, sites):
         detail.append(f"{'ok  ' if ok else 'DOWN'} {code or '---'} {url}")
         if not ok:
             problems.append(f"{url.split('//')[-1].split('/')[0]} down")
+    unlock = h.get("unlock", {})
+    if isinstance(report, str) and unlock.get("probe") and reachable(unlock["probe"]):
+        line = f"{name}: waiting for unlock" + (f" ({unlock['hint']})" if unlock.get("hint") else "")
+        detail.insert(0, f"its initramfs answers on {unlock['probe']}: booted, the disk still locked")
+        return "down", line, [item("now", line, "\n".join(detail))], detail
     if isinstance(report, str) and sites and all(ok for _, ok in sites.values()):
         state = "partial"
     elif isinstance(report, str) and not any(ok for _, ok in sites.values()):
