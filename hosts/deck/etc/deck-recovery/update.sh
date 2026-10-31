@@ -114,11 +114,16 @@ nspawn=(systemd-nspawn --quiet --directory="$ROOT" --resolv-conf=copy-host --sli
 "${nspawn[@]}" emerge --quiet --depclean
 
 if [[ $SSH == yes ]]; then
-  # sshd with the same host key as dropbear, converted to OpenSSH's format on the main system
-  # (dracut-crypt-ssh brought dropbear there too), keys only.
-  dropbearconvert dropbear openssh /etc/dropbear/initramfs_ed25519_key \
-    "$ROOT/etc/ssh/ssh_host_ed25519_key" >/dev/null
-  chmod 600 "$ROOT/etc/ssh/ssh_host_ed25519_key"
+  # sshd with the same host key as dropbear, keys only. dracut-crypt-ssh takes the key in OpenSSH's
+  # format (it converts it for dropbear itself), so it's usually copied as it is; a key in dropbear's
+  # format is converted on the main system, which has dropbearconvert.
+  key=/etc/dropbear/initramfs_ed25519_key
+  if ssh-keygen -y -f "$key" >/dev/null 2>&1; then
+    install -m 600 "$key" "$ROOT/etc/ssh/ssh_host_ed25519_key"
+  else
+    dropbearconvert dropbear openssh "$key" "$ROOT/etc/ssh/ssh_host_ed25519_key" >/dev/null
+    chmod 600 "$ROOT/etc/ssh/ssh_host_ed25519_key"
+  fi
   ssh-keygen -y -f "$ROOT/etc/ssh/ssh_host_ed25519_key" > "$ROOT/etc/ssh/ssh_host_ed25519_key.pub"
   mkdir -p "$ROOT/etc/ssh/sshd_config.d"
   cat > "$ROOT/etc/ssh/sshd_config.d/10-recovery.conf" <<'EOF'
