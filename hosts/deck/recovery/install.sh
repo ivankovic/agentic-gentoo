@@ -157,7 +157,8 @@ cp -a /root/luks-header-"$MAIN_NAME"-*.img "$mnt/root/"
 cryptsetup luksHeaderBackup "$PART" --header-backup-file "/root/luks-header-recovery-$(date +%Y%m%d).img" 2>/dev/null || true
 
 echo "7. UKI"
-"$here/../etc/deck-recovery/update.sh" "$mnt" /efi
+RECOVERY_FILES=$here/root RECOVERY_DOC=$here/README.md RECOVERY_ROUTER=$here/../usr-local/bin/deck \
+  "$here/../etc/deck-recovery/update.sh" "$mnt" /efi
 ls -la /efi/EFI/Linux/
 echo
 echo "Done. In the systemd-boot menu: \"$RECOVERY_NAME\". The main system stays the default."
