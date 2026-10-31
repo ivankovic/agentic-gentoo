@@ -114,10 +114,12 @@ nspawn=(systemd-nspawn --quiet --directory="$ROOT" --resolv-conf=copy-host --sli
 "${nspawn[@]}" emerge --quiet --depclean
 
 if [[ $SSH == yes ]]; then
-  # sshd with the same host key as dropbear (converted to OpenSSH's format), keys only.
-  "${nspawn[@]}" dropbearconvert dropbear openssh /etc/dropbear/initramfs_ed25519_key \
-    /etc/ssh/ssh_host_ed25519_key >/dev/null
-  "${nspawn[@]}" sh -c 'ssh-keygen -y -f /etc/ssh/ssh_host_ed25519_key > /etc/ssh/ssh_host_ed25519_key.pub'
+  # sshd with the same host key as dropbear, converted to OpenSSH's format on the main system
+  # (dracut-crypt-ssh brought dropbear there too), keys only.
+  dropbearconvert dropbear openssh /etc/dropbear/initramfs_ed25519_key \
+    "$ROOT/etc/ssh/ssh_host_ed25519_key" >/dev/null
+  chmod 600 "$ROOT/etc/ssh/ssh_host_ed25519_key"
+  ssh-keygen -y -f "$ROOT/etc/ssh/ssh_host_ed25519_key" > "$ROOT/etc/ssh/ssh_host_ed25519_key.pub"
   mkdir -p "$ROOT/etc/ssh/sshd_config.d"
   cat > "$ROOT/etc/ssh/sshd_config.d/10-recovery.conf" <<'EOF'
 # Written by update.sh (SSH=yes): the port and host key of the main system's initramfs unlock.
