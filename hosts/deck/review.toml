@@ -32,7 +32,7 @@ command = [
 # wrapper's gate). `agent` names one of the [[agent]]s above; without it, the default one.
 [scan]
 # Our own code, built from the clones on this machine by live ebuilds: not scanned.
-trusted = ["app-portage/deck", "mail-client/mmm", "dev-util/omnidiff"]
+trusted = ["app-portage/deck", "mail-client/mmm", "dev-util/omnidiff", "app-admin/fix"]
 # Upstream's binaries (besides -bin packages): only their ebuild can be read.
 prebuilt = ["sys-kernel/linux-firmware", "sys-firmware/intel-microcode", "sys-firmware/sof-firmware"]
 
