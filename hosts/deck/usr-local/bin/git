@@ -1,5 +1,6 @@
 #!/bin/bash
-# git, guarded: in ~/src, host git only runs when the repository's git configuration and hooks are
+# git, guarded: in ~/src (and the work roots in ~/.config/jail/roots, as jail has them), host git only
+# runs when the repository's git configuration and hooks are
 # as they were when you last used git there. Everything else is /usr/bin/git, unchanged.
 #
 # Why: jailed programs (/usr/local/bin/jail) write ~/src. A repository's own config can make git
@@ -10,7 +11,7 @@
 # the git directory's layout. Changed (or never seen): git refuses and shows what changed.
 #
 #   git trust [DIR...]   accept the current state of the repository (in DIR, default here), after
-#                        a look at what it shows; --all: every repository in ~/src
+#                        a look at what it shows; --all: every repository in the work roots
 #
 # Git commands that can change the config themselves (config, remote, branch, push, init, clone,
 # submodule, worktree, switch, checkout) record the state afterwards: what you do with host git
@@ -25,6 +26,23 @@ real=/usr/bin/git
 # No home, no ~/src to guard: system services (gentoo-sync runs git in /var/db/repos as root).
 [[ -n ${HOME-} ]] || exec "$real" "$@"
 src=$HOME/src
+# Work roots: ~/src, and the directories ~/.config/jail/roots lists (one per line, relative to the
+# home or absolute, inside the home), treated the same: writable in the jail, their repositories
+# protected, host git guarded there. The jail never sees ~/.config, so it can't add one.
+roots=("$HOME/src")
+if [[ -r ${XDG_CONFIG_HOME:-$HOME/.config}/jail/roots ]]; then
+	while read -r r; do
+		[[ -z $r || $r == '#'* ]] && continue
+		[[ $r == /* ]] || r=$HOME/$r
+		r=$(realpath -m -- "$r")
+		[[ -d $r && $r/ == "$HOME"/?* && $r != "$HOME" ]] && roots+=("$r")
+	done <"${XDG_CONFIG_HOME:-$HOME/.config}/jail/roots"
+fi
+in_roots() { # PATH: inside one of the roots? Prints which.
+	local r
+	for r in "${roots[@]}"; do [[ $1/ == "$r"/* ]] && { printf '%s' "$r"; return 0; }; done
+	return 1
+}
 store=${XDG_STATE_HOME:-$HOME/.local/state}/git-guard
 
 # The directory git will work in, from the leading -C options (git's own order), and the
@@ -136,14 +154,14 @@ save() {
 	stamp >"$record.stamp"
 }
 
-# Sets wt, gd and record for a directory; false when it isn't a repository in ~/src.
+# Sets wt, gd and record for a directory; false when it isn't a repository in a work root.
 guarded() {
 	if [[ -n $gitdir_opt ]]; then
 		gd=$(realpath -m -- "$gitdir_opt") wt=${gd%/.git}
 	else
 		locate "$1" || return 1
 	fi
-	[[ $wt/ = "$src"/* || $gd/ = "$src"/* ]] || return 1
+	in_roots "$wt" >/dev/null || in_roots "$gd" >/dev/null || return 1
 	record=$store/$(printf '%s' "$gd" | sha256sum | cut -c1-32)
 	# Work files of this git's own (.$$): two gits at once writing one file saved a hook list cut short.
 	trap 'rm -f -- "$record.files.$$" "$record.state.$$"' EXIT
@@ -152,12 +170,12 @@ guarded() {
 trust() {
 	local dirs=("$@") d
 	if [[ ${dirs[0]-} = --all ]]; then
-		mapfile -t dirs < <(find "$src" -mindepth 2 -maxdepth 4 -name .git -prune -printf '%h\n' 2>/dev/null)
+		mapfile -t dirs < <(find "${roots[@]}" -mindepth 2 -maxdepth 4 -name .git -prune -printf '%h\n' 2>/dev/null)
 	fi
 	((${#dirs[@]})) || dirs=("$PWD")
 	for d in "${dirs[@]}"; do
 		gitdir_opt=
-		guarded "$d" || { echo "git trust: $d is not a repository in $src" >&2; continue; }
+		guarded "$d" || { echo "git trust: $d is not a repository in ~/src or a work root" >&2; continue; }
 		mkdir -p -- "$store"
 		if [[ -f $record.state ]]; then
 			state | diff -u --label "trusted" --label "now" -- "$record.state" - && { echo "git trust: ${wt#"$HOME"/}: unchanged"; rm -f -- "$record.files.$$"; continue; }

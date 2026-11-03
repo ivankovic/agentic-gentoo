@@ -1,7 +1,8 @@
 #!/bin/bash
 # jail: run a command (default: a shell) where only ~/src is writable and nothing secret is reachable.
 #
-#   jail                 a shell in the jail, in the current directory if it is under ~/src
+#   jail                 a shell in the jail, in the current directory if it is under ~/src (or
+#                        another work root, ~/.config/jail/roots), else in ~/src
 #   jail claude          any program, e.g. a coding agent
 #   jail [OPTIONS] [--] COMMAND
 #     --no-src           without ~/src: for programs that read untrusted code (deck patches review)
@@ -17,6 +18,8 @@
 #                        alone can't keep host git safe (a new repository, a renamed .git,
 #                        .git/commondir...): /usr/local/bin/git, the host's git, refuses to run in
 #                        a repository whose config or hooks changed until `git trust`
+#   work roots           the same as ~/src, for each line of ~/.config/jail/roots (a directory in
+#                        the home, e.g. `uni`)
 #   home                 its own, ~/.local/share/jail/home, kept between runs: the tools' logins,
 #                        settings, history and caches (cargo registry, Go modules, sccache, npm)
 #   from the real home   read-only: toolchains (~/.rustup, ~/.cargo/bin, ~/go/bin, ~/.local/bin
@@ -42,6 +45,23 @@ set -euo pipefail
 # from repositories are opened there and handed to bwrap as descriptors, which pasta wouldn't pass
 # on from outside.
 src=$HOME/src
+# Work roots: ~/src, and the directories ~/.config/jail/roots lists (one per line, relative to the
+# home or absolute, inside the home), treated the same: writable in the jail, their repositories
+# protected, host git guarded there. The jail never sees ~/.config, so it can't add one.
+roots=("$HOME/src")
+if [[ -r ${XDG_CONFIG_HOME:-$HOME/.config}/jail/roots ]]; then
+	while read -r r; do
+		[[ -z $r || $r == '#'* ]] && continue
+		[[ $r == /* ]] || r=$HOME/$r
+		r=$(realpath -m -- "$r")
+		[[ -d $r && $r/ == "$HOME"/?* && $r != "$HOME" ]] && roots+=("$r")
+	done <"${XDG_CONFIG_HOME:-$HOME/.config}/jail/roots"
+fi
+in_roots() { # PATH: inside one of the roots? Prints which.
+	local r
+	for r in "${roots[@]}"; do [[ $1/ == "$r"/* ]] && { printf '%s' "$r"; return 0; }; done
+	return 1
+}
 jhome=${XDG_DATA_HOME:-$HOME/.local/share}/jail/home
 DNS_ADDR=169.254.1.1
 resolv=${XDG_RUNTIME_DIR:-/tmp}/jail-resolv.conf
@@ -65,10 +85,8 @@ while (($#)); do
 	shift
 done
 
-case $PWD/ in
-"$src"/*) dir=$PWD ;;
-*) dir=$src ;;
-esac
+dir=$src
+in_roots "$PWD" >/dev/null && dir=$PWD
 [[ -n $nosrc ]] && dir=$HOME
 [[ -n $chdir ]] && dir=$chdir
 
@@ -123,7 +141,7 @@ args=(
 tiocsti=
 read -r tiocsti </proc/sys/dev/tty/legacy_tiocsti 2>/dev/null || true
 [[ $tiocsti == 0 ]] || args+=(--new-session)
-[[ -n $nosrc ]] || args+=(--bind "$src" "$src")
+[[ -n $nosrc ]] || for r in "${roots[@]}"; do args+=(--bind "$r" "$r"); done
 
 ro=(
 	.rustup .cargo/bin .cargo/config.toml .cargo/env go/bin
@@ -157,7 +175,7 @@ pin() { # PATH ROOT
 	pinned+=("$fd" "$1" "$2")
 }
 gits=()
-[[ -n $nosrc ]] || mapfile -d '' gits < <(find "$src" -mindepth 2 -maxdepth 3 -name .git -type d -prune -print0 2>/dev/null)
+[[ -n $nosrc ]] || mapfile -d '' gits < <(find "${roots[@]}" -mindepth 2 -maxdepth 3 -name .git -type d -prune -print0 2>/dev/null)
 if ((${#gits[@]})); then
 	mapfile -d '' repos < <(realpath -m -z -- "${gits[@]%/.git}")
 	for i in "${!gits[@]}"; do
@@ -172,10 +190,10 @@ if ((${#gits[@]})); then
 			# the current directory's repository too, whatever its config is (a FIFO hangs it).
 			hooks=$(/usr/bin/git -C / config --file "$git/config" --get core.hooksPath 2>/dev/null || true)
 			[[ -n $hooks && $hooks != /* ]] && hooks=$repo/$hooks
-			# In ~/src it is the jail's to write: protected. Elsewhere the jail can't reach it, or
-			# it's in the jail home, where it is the jail's anyway (the host git guard watches it).
-			if [[ -n $hooks && $(realpath -m -- "$hooks")/ = "$src"/* ]] && [[ -e $hooks || -L $hooks ]]; then
-				pin "$hooks" "$src"
+			# In a work root it is the jail's to write: protected. Elsewhere the jail can't reach it,
+			# or it's in the jail home, where it is the jail's anyway (the host git guard watches it).
+			if [[ -n $hooks ]] && hroot=$(in_roots "$(realpath -m -- "$hooks")") && [[ -e $hooks || -L $hooks ]]; then
+				pin "$hooks" "$hroot"
 			fi
 		fi
 	done
