@@ -172,7 +172,7 @@ trust() {
 	if [[ ${dirs[0]-} = --all ]]; then
 		mapfile -t dirs < <(find "${roots[@]}" -mindepth 2 -maxdepth 4 -name .git -prune -printf '%h\n' 2>/dev/null)
 	fi
-	((${#dirs[@]})) || dirs=("$PWD")
+	((${#dirs[@]})) || dirs=("$dir") # -C DIR trust, as the refusal suggests
 	for d in "${dirs[@]}"; do
 		gitdir_opt=
 		guarded "$d" || { echo "git trust: $d is not a repository in ~/src or a work root" >&2; continue; }
