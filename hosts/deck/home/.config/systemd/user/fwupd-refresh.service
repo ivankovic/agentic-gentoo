@@ -8,6 +8,9 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+# After a resume the timer fires before Wi-Fi is back: wait up to a minute for DNS; still none (on
+# the road, offline), skip the run instead of failing it.
+ExecCondition=/bin/sh -c 'for i in $(seq 60); do getent hosts cdn.fwupd.org >/dev/null && exit 0; sleep 1; done; exit 1'
 ExecStart=/usr/bin/fwupdmgr refresh
 # 2: metadata already up to date.
 SuccessExitStatus=2

@@ -11,6 +11,9 @@ Type=oneshot
 Nice=19
 IOSchedulingClass=idle
 StateDirectory=gentoo-security
+# After a resume the timer fires before Wi-Fi is back: wait up to a minute for DNS; still none,
+# skip the run instead of failing it.
+ExecCondition=/bin/sh -c 'for i in $(seq 60); do getent hosts github.com >/dev/null && exit 0; sleep 1; done; exit 1'
 ExecStart=/usr/bin/emerge --sync --quiet
 # glsa-check prints its legend on stderr and one line per affected advisory on stdout.
 ExecStart=/bin/sh -c 'glsa-check -l affected -n 2>/dev/null > /var/lib/gentoo-security/affected.new; mv /var/lib/gentoo-security/affected.new /var/lib/gentoo-security/affected'
