@@ -714,18 +714,84 @@ fn prune(cp: &str, keep: &[&str]) {
 
 fn diff(base: &Path, from: &str, to: &str) -> Result<PathBuf> {
     let out = base.join(format!("{from}..{to}.diff"));
+    // GNU diff can't do -N --no-dereference for a symlink on one side only (exit 2, "No such file
+    // or directory" or "Bad file descriptor": json-c 0.19 and wireplumber 0.5.18 add some under
+    // tests/). Those are left out of hard-linked copies of the trees, diffed instead, and listed
+    // after the diff as an added or removed line naming the target. The trees stay as they are.
+    let mut lonely = one_sided_symlinks(&base.join(from), &base.join(to), from)?;
+    lonely.extend(one_sided_symlinks(&base.join(to), &base.join(from), to)?);
+    let (dir, tmp) = if lonely.is_empty() {
+        (base.to_path_buf(), None)
+    } else {
+        let tmp = base.join(".diff-tmp");
+        remove_tree(&tmp);
+        std::fs::create_dir(&tmp)?;
+        for v in [from, to] {
+            let st = Command::new("cp").args(["-al", "--"]).arg(base.join(v)).arg(tmp.join(v)).status()?;
+            if !st.success() {
+                remove_tree(&tmp);
+                bail!("diff failed: hard-linking {v} for the diff");
+            }
+        }
+        for l in &lonely {
+            std::fs::remove_file(tmp.join(&l.side).join(&l.rel))?;
+        }
+        (tmp.clone(), Some(tmp))
+    };
     let o = Command::new("diff")
         .args(["-ruN", "--no-dereference", "-x", ".git"])
         .arg(from)
         .arg(to)
-        .current_dir(base)
+        .current_dir(&dir)
         .output()
-        .context("running diff")?;
+        .context("running diff");
+    if let Some(t) = &tmp {
+        remove_tree(t);
+    }
+    let o = o?;
     if o.status.code() == Some(2) {
         bail!("diff failed: {}", String::from_utf8_lossy(&o.stderr).trim());
     }
-    std::fs::write(&out, &o.stdout)?;
+    let mut text = o.stdout;
+    for l in &lonely {
+        let rel = l.rel.display();
+        let (sign, hunk) = if l.side == to { ('+', "-0,0 +1") } else { ('-', "-1 +0,0") };
+        writeln!(text, "diff -ruN --no-dereference -x .git {from}/{rel} {to}/{rel}")?;
+        writeln!(text, "--- {from}/{rel}\n+++ {to}/{rel}\n@@ {hunk} @@\n{sign}symbolic link to {}", l.target.display())?;
+    }
+    std::fs::write(&out, &text)?;
     Ok(out)
+}
+
+/// A symlink in one version's tree with nothing at its path in the other.
+struct Lonely {
+    side: String,
+    rel: PathBuf,
+    target: PathBuf,
+}
+
+/// The symlinks under ROOT (as diff -x .git sees it) that have nothing at the same path under OTHER.
+fn one_sided_symlinks(root: &Path, other: &Path, side: &str) -> Result<Vec<Lonely>> {
+    let mut found = vec![];
+    let mut stack = vec![PathBuf::new()];
+    while let Some(rel) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(root.join(&rel)) else { continue };
+        for e in rd.flatten() {
+            if e.file_name() == ".git" {
+                continue;
+            }
+            let r = rel.join(e.file_name());
+            let ft = e.file_type()?;
+            if ft.is_symlink() {
+                if other.join(&r).symlink_metadata().is_err() {
+                    found.push(Lonely { side: side.to_string(), target: std::fs::read_link(e.path())?, rel: r });
+                }
+            } else if ft.is_dir() {
+                stack.push(r);
+            }
+        }
+    }
+    Ok(found)
 }
 
 // ---- The agent ----
@@ -1007,6 +1073,26 @@ diff -ruN --no-dereference -x .git 1.0/ebuild/x.ebuild 1.1/ebuild/x.ebuild
 -KEYWORDS=\"~amd64\"
 +KEYWORDS=\"amd64\"
 ";
+
+    #[test]
+    fn diff_lists_symlinks_on_one_side() {
+        let base = std::env::temp_dir().join(format!("deck-scan-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        for v in ["1.0/t", "1.1/t"] {
+            std::fs::create_dir_all(base.join(v)).unwrap();
+        }
+        std::fs::write(base.join("1.0/t/a.test"), "a\n").unwrap();
+        std::fs::write(base.join("1.1/t/a.test"), "a\nb\n").unwrap();
+        std::os::unix::fs::symlink("a.test", base.join("1.1/t/new.test")).unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", base.join("1.0/t/gone.test")).unwrap();
+        let text = std::fs::read_to_string(diff(&base, "1.0", "1.1").unwrap()).unwrap();
+        assert!(text.contains("+b\n"), "{text}");
+        assert!(text.contains("+++ 1.1/t/new.test\n@@ -0,0 +1 @@\n+symbolic link to a.test\n"), "{text}");
+        assert!(text.contains("-symbolic link to /etc/passwd\n"), "{text}");
+        assert!(base.join("1.1/t/new.test").symlink_metadata().is_ok(), "the tree itself kept its symlink");
+        assert!(!base.join(".diff-tmp").exists());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 
     #[test]
     fn triage_finds_what_xz_did() {
