@@ -492,13 +492,18 @@ user    you                                # its login
 pass    nextcloud/deck                     # the `pass` entry holding a Nextcloud app password
 folder  Family Archive                     # where in Nextcloud
 # Where in the folder, from: {category} {name} (from archive-names), {year} {month} {day}
-# {date} (YYYY-MM-DD) {sender} {subject} {file}. Each file also gets its category as a tag.
+# {date} (YYYY-MM-DD) {sender} {subject} {file}. Each file also gets its category as a tag (Nextcloud).
 layout  {year}/{month}/{day}-{category} - {name}
+# The server: nextcloud (default) or webdav, any plain WebDAV server (url is then the WebDAV root;
+# no tags, the category stays in the name). cert: a PEM file with a client certificate and its
+# key, for a server that asks for one.
+#server webdav
+#cert   ~/.local/share/ffca/deck.pem
 # File names as they are, or "hyphens": ASCII, words joined by hyphens (17-Kuca-racun-12.pdf)
 style   spaces
 local   ~/Documents/Archive                # a copy on deck, same layout
 """
-ARCHIVE_KEYS = ("url", "user", "pass", "folder", "layout", "local", "style")
+ARCHIVE_KEYS = ("url", "user", "pass", "folder", "layout", "local", "style", "server", "cert")
 
 
 def archive_config(upload=True):
@@ -600,17 +605,28 @@ def mail_pdfs(path):
 
 
 def webdav(conf, password):
-    """Nextcloud over WebDAV: call(method, path in the user's files), put(path, data) that
-    creates the folders and never overwrites (a file already there gets " (2)", " (3)"…, or
-    -2, -3… in the hyphens style) and
-    returns the path used, and tag(path, name), which gives the file that Nextcloud tag."""
+    """The archive over WebDAV (Nextcloud's, or a plain server with `server webdav`):
+    call(method, path in the user's files), put(path, data) that creates the folders and never
+    overwrites (a file already there gets " (2)", " (3)"…, or -2, -3… in the hyphens style) and
+    returns the path used, and tag(path, name), which gives the file that Nextcloud tag (on a
+    plain server, nothing: the category is in the name)."""
     import base64
+    import ssl
     import urllib.error
     import urllib.parse
     import urllib.request
     import xml.etree.ElementTree as ET
-    dav = f"{conf['url'].rstrip('/')}/remote.php/dav/"
-    files = f"files/{urllib.parse.quote(conf['user'])}/"
+    plain = conf.get("server", "nextcloud") == "webdav"
+    label = "WebDAV" if plain else "Nextcloud"
+    if plain:
+        dav, files = f"{conf['url'].rstrip('/')}/", ""
+    else:
+        dav = f"{conf['url'].rstrip('/')}/remote.php/dav/"
+        files = f"files/{urllib.parse.quote(conf['user'])}/"
+    context = None
+    if conf.get("cert"):  # a client certificate, for a server that asks for one
+        context = ssl.create_default_context()
+        context.load_cert_chain(os.path.expanduser(conf["cert"]))
     auth = "Basic " + base64.b64encode(f"{conf['user']}:{password}".encode()).decode()
     made, tags = set(), None
     ns = {"d": "DAV:", "oc": "http://owncloud.org/ns"}
@@ -621,7 +637,7 @@ def webdav(conf, password):
                                      headers={"Authorization": auth, "User-Agent": "deck-mail",
                                               **(headers or {})})
         try:
-            with urllib.request.urlopen(req, timeout=120) as r:
+            with urllib.request.urlopen(req, timeout=120, context=context) as r:
                 return r.status, r.headers, r.read()
         except urllib.error.HTTPError as e:
             return e.code, e.headers, b""
@@ -632,7 +648,7 @@ def webdav(conf, password):
         status, _, xml = request("PROPFIND", path, body,
                                  {"Depth": depth, "Content-Type": "application/xml"})
         if status != 207:
-            raise OSError(f"Nextcloud: PROPFIND {path} failed ({status})")
+            raise OSError(f"{label}: PROPFIND {path} failed ({status})")
         return ET.fromstring(xml).findall("d:response", ns)
 
     def call(method, rel, data=None):
@@ -644,7 +660,7 @@ def webdav(conf, password):
             d = "/".join(parts[:i])
             if d not in made:
                 if call("MKCOL", d) not in (201, 405):  # 405: it exists
-                    raise OSError(f"Nextcloud: can't create {d}")
+                    raise OSError(f"{label}: can't create {d}")
                 made.add(d)
         def same(rel):  # a file already there with these bytes: sent before, its answer lost
             status, _, body = request("GET", files + urllib.parse.quote(rel))
@@ -667,10 +683,12 @@ def webdav(conf, password):
             if status is not None and status < 500:
                 break
             time.sleep(10 * (attempt + 1))
-        raise OSError(f"Nextcloud: uploading {rel} failed ({status})")
+        raise OSError(f"{label}: uploading {rel} failed ({status})")
 
     def tag(rel, name):
         nonlocal tags
+        if plain:
+            return
         if tags is None or name not in tags:  # Nextcloud's tags, by name: made once, then reused
             tags = {}
             for r in propfind("systemtags/", "<oc:id/><oc:display-name/>", "1"):
@@ -751,7 +769,7 @@ def archive(dry_run, quiet=False, limit=None):
             return 1
         call, put, tag = webdav(conf, pw.stdout.splitlines()[0])
         if call("PROPFIND", conf["folder"]) != 207:
-            print(f"deck-mail: archive: no folder {conf['folder']!r} in Nextcloud for {conf['user']}")
+            print(f"deck-mail: archive: no folder {conf['folder']!r} on {conf['url']} for {conf['user']}")
             return 1
     local = pathlib.Path(os.path.expanduser(conf["local"])) if conf.get("local") else None
     sent, left_out, unknown, waiting = 0, [], [], []

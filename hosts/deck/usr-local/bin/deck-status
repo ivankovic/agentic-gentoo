@@ -31,6 +31,7 @@ only). The host list stays out of the repository, which is public:
   ssh = ["server"]                 # ssh arguments; the key and -o options are added
   key = "~/.ssh/id_deck_status"
   sites = ["https://example.org/health"]
+  cert = "~/.local/share/ffca/deck.pem"   # a client certificate for its sites, if they ask for one
   [[host]]
   name = "nas"
   ssh = ["nas"]
@@ -125,9 +126,11 @@ def host_report(h):
         return "no status from it"
 
 
-def site(url):
+def site(url, cert=None):
+    # cert: a PEM file with a client certificate and key, for sites that ask for one.
+    tls = ["--cert", os.path.expanduser(cert)] if cert else []
     rc, out = run("curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "8",
-                  "-A", "deck-status", url, timeout=12)
+                  "-A", "deck-status", *tls, url, timeout=12)
     code = int(out) if out.isdigit() else 0
     return code, 0 < code < 500
 
@@ -187,7 +190,7 @@ def hosts(config, net):
     reports = {}
     with concurrent.futures.ThreadPoolExecutor(8) as pool:
         futures = {h["name"]: pool.submit(host_report, h) for h in hs if at_home or not h.get("home_only")}
-        site_futures = {(h["name"], u): pool.submit(site, u) for h in hs for u in h.get("sites", [])
+        site_futures = {(h["name"], u): pool.submit(site, u, h.get("cert")) for h in hs for u in h.get("sites", [])
                         if at_home or not h.get("home_only")}
         reports = {n: f.result() for n, f in futures.items()}
         site_results = {k: f.result() for k, f in site_futures.items()}
