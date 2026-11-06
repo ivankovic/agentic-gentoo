@@ -1,0 +1,19 @@
+# Two-way sync of ~/Files with the rclone remote `files:` (rclone bisync), run by files-sync.timer.
+# Which server, its client certificate and the name to wait for are local, not in this repository:
+# ~/.config/rclone/rclone.conf (the remote) and ~/.config/rclone/files.env (RCLONE_CLIENT_CERT,
+# RCLONE_CLIENT_KEY, FILES_HOST). A file changed on both sides is kept twice (.conflict1/2); more
+# than 10% deleted in one run stops the sync instead of passing it on. First run, by hand:
+#   set -a; . ~/.config/rclone/files.env; set +a; rclone bisync ~/Files files: --resync
+[Unit]
+Description=Sync ~/Files with the file server (rclone bisync)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/rclone/files.env
+# After a resume or offline: wait up to a minute for the server's name; still none, skip the run.
+ExecCondition=/bin/sh -c 'for i in $(seq 60); do getent hosts "$FILES_HOST" >/dev/null && exit 0; sleep 1; done; exit 1'
+ExecStart=/usr/bin/rclone bisync %h/Files files: --create-empty-src-dirs --compare size,modtime --resilient --recover --max-delete 10 --conflict-resolve none --conflict-loser num --log-level NOTICE
+Nice=10
+IOSchedulingClass=idle
