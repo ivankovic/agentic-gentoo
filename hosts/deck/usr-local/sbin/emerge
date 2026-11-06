@@ -3,6 +3,7 @@
 # in build.slice (memory-capped: etc/systemd/system/build.slice). Found before /usr/bin/emerge on
 # root's PATH (and sudo's). As a user, or when already in build.slice, it's plain emerge. Bypass
 # with /usr/bin/emerge. Afterwards it refreshes the panel's Portage status (deck-portage.service).
+# Packages with user patches (/etc/portage/patches) are built from source, never from the binhost.
 #
 # The snapshot, @snapshots/@.pre-emerge.<time>, is the exact state before the change; the last
 # 5 are kept (btrbk's hourly ones are separate and ignore these). Skipped for commands that change
@@ -32,6 +33,19 @@ for arg in "$@"; do
   args+=("$arg")
 done
 set -- "${args[@]}"
+
+# A package with user patches (/etc/portage/patches/<category>/<name>[-version][:slot], from the
+# host's portage/patches) is built from source: a binary package never runs eapply_user, so its
+# patch would be deployed but not in what is installed (deck patches packages: origin binhost).
+excl=()
+for d in /etc/portage/patches/*/*/; do
+  [[ -d $d ]] || continue
+  p=${d%/}
+  pn=$(sed -E 's/:.*$//; s/-[0-9].*$//' <<<"${p##*/}")
+  c=${p%/*}
+  excl+=("${c##*/}/$pn")
+done
+((${#excl[@]})) && set -- --usepkg-exclude "${excl[*]}" "$@"
 
 if ((changes && installs)); then
   if ((gate)); then
