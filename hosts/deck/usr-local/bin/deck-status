@@ -130,7 +130,8 @@ def site(url, cert=None):
     # cert: a PEM file with a client certificate and key, for sites that ask for one.
     tls = ["--cert", os.path.expanduser(cert)] if cert else []
     rc, out = run("curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "8",
-                  "-A", "deck-status", *tls, url, timeout=12)
+                  # stop-bots turns away requests without the Accept-Language a browser sends.
+                  "-A", "deck-status", "-H", "Accept-Language: en", *tls, url, timeout=12)
     code = int(out) if out.isdigit() else 0
     return code, 0 < code < 500
 
