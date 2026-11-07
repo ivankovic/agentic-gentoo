@@ -27,6 +27,9 @@ Fields, all optional (a missing sensor is left out):
   load                        1-minute load average
   mem_avail swap_used         GiB
   psi_cpu psi_mem psi_io      pressure: % of time stalled over the last 10 s ("some")
+  top top_rss top_swap top_cg the process using the most memory: its name, resident and swapped
+                              GiB, and its cgroup's last part (a unit: emerge-gate-123.scope);
+                              every line while memory is short, else every 10th
   throttle                    package thermal-throttle events since the previous line
   aer                         PCIe errors (correctable+nonfatal+fatal) since the previous line
   idle_off                    CPU idle states switched off (on cpu0, e.g. C3_ACPI), every
@@ -189,6 +192,35 @@ def memory():
     return out
 
 
+PAGE = os.sysconf("SC_PAGE_SIZE")
+
+
+def top_memory():
+    """The process with the largest resident set: a walk of /proc, about 5 ms."""
+    best, best_rss = None, 0
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            with open(f"/proc/{pid}/statm") as f:
+                rss = int(f.read().split()[1])
+        except (OSError, IndexError, ValueError):
+            continue
+        if rss > best_rss:
+            best, best_rss = pid, rss
+    if best is None:
+        return {}
+    out = {"top": (read(f"/proc/{best}/comm") or "?").strip().replace(" ", "_"),
+           "top_rss": best_rss * PAGE / 2**30}
+    for line in (read(f"/proc/{best}/status") or "").splitlines():
+        if line.startswith("VmSwap:"):
+            out["top_swap"] = float(line.split()[1]) / 1048576
+    cg = (read(f"/proc/{best}/cgroup") or "").strip().rpartition("/")[2]
+    if cg:
+        out["top_cg"] = cg
+    return out
+
+
 def pressure():
     out = {}
     for res in ("cpu", "memory", "io"):
@@ -285,6 +317,8 @@ def main():
         f["load"] = float((read("/proc/loadavg") or "0").split()[0])
         f.update(memory())
         f.update(pressure())
+        if n % 10 == 0 or f.get("mem_avail", 99) < 12 or f.get("psi_mem", 0) > 1:
+            f.update(top_memory())
         f["throttle"] = delta("throttle", counter_sum("/sys/devices/system/cpu/cpu*/thermal_throttle/package_throttle_count"))
         if n % 60 == 0:
             f["aer"] = delta("aer", counter_sum("/sys/bus/pci/devices/*/aer_dev_*", field=True))

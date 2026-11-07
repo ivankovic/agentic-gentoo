@@ -52,7 +52,12 @@ if ((changes && installs)); then
     user=${SUDO_USER:-$(id -nu 1000)}
     uid=$(id -u "$user")
     echo "emerge: scanning what this would install (deck patches scan gate, as $user)" >&2
-    if ! runuser -u "$user" -- env -i HOME="$(getent passwd "$user" | cut -d: -f6)" USER="$user" \
+    # In a scope of its own in build.slice: the gate's diff and triage read every unpacked file, and
+    # left in the caller's terminal they had no limit. Its jails have theirs (jail.slice). Above
+    # MemoryHigh it is reclaimed hard; at MemoryMax the kernel kills it here, and the emerge stops.
+    if ! systemd-run --scope --quiet --collect --slice=build.slice --unit="emerge-gate-$$.scope" \
+      -p MemoryHigh=8G -p MemoryMax=10G -p MemorySwapMax=1G -- \
+      runuser -u "$user" -- env -i HOME="$(getent passwd "$user" | cut -d: -f6)" USER="$user" \
       LOGNAME="$user" PATH=/usr/local/bin:/usr/bin:/bin LANG="${LANG:-C.UTF-8}" TERM="${TERM:-dumb}" \
       XDG_RUNTIME_DIR="/run/user/$uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
       deck-patches scan gate -- "$@"; then
