@@ -1,1 +1,3 @@
 net-firewall/iptables nftables
+# netavark (podman networking, 2.x) drives nftables through its JSON API; the binhost builds it without.
+net-firewall/nftables json
