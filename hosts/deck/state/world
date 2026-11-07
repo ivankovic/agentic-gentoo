@@ -1,3 +1,4 @@
+app-admin/fix
 app-admin/pass
 app-admin/sudo
 app-backup/btrbk
@@ -62,6 +63,7 @@ media-gfx/imv
 media-gfx/orcaslicer-bin
 media-libs/libva-intel-media-driver
 media-sound/playerctl
+media-sound/supersonic
 media-video/pipewire
 media-video/wireplumber
 net-analyzer/mtr
@@ -74,9 +76,12 @@ net-mail/isync
 net-mail/notmuch
 net-misc/iperf
 net-misc/networkmanager
+net-misc/rclone
 net-misc/socat
 net-misc/whois
+net-print/cups-filters
 net-wireless/bluez
+sci-misc/llama-cpp
 sys-apps/dmidecode
 sys-apps/fd
 sys-apps/fwupd

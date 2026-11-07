@@ -31,6 +31,7 @@ Recorded 2026-10-09.
 | Desktop  | niri, quickshell (clock overlay, status bar, Mod+D omni panel), foot, mako, swaylock, greetd + tuigreet; GURU overlay enabled |
 | Fonts    | Iosevka everywhere (Iosevka Term for monospace, Iosevka Etoile for the shell's serif, Iosevka Aile for GTK UI); Symbols Nerd Font for icons; Noto + Noto Color Emoji as fallback |
 | Laptop   | power-profiles-daemon (thermal control is the firmware's: thermald refuses this model), fwupd, battery charge 75–80 % (Mod+D "Full charge" lifts it to 100 % until reboot) |
+| Printing | CUPS (socket-activated) with cups-filters; the home laser printer as a driverless IPP Everywhere queue, the default |
 
 ## Files
 
