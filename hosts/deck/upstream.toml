@@ -27,6 +27,12 @@ at = "2026-11-06T13:55:53+01:00"
 state = "unsent"
 note = "0.3.28 rewrote xb_silo_get_node's bounds check as off + 1 > strtab; restores off >= strtab. Found by the scan gate (2026-11-03)."
 
+[[patch.event]]
+at = "2026-11-08T10:53:25+01:00"
+state = "backport"
+url = "https://github.com/hughsie/libxmlb/commit/0fa4ca1e6c845e4f5ae5476d55d56917895aa16d"
+note = "Fixed by upstream before I reported it"
+
 [[patch]]
 id = "games-board/chess-tui/0001-resume-local-and-bot-games.patch"
 upstream = "https://github.com/thomas-mauran/chess-tui"
