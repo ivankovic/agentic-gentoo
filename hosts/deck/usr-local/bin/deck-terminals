@@ -19,6 +19,7 @@ What was running comes back through ~/.bashrc (DECK_RESTORE_CMD):
 
   ssh, nvim, vim   run again as they were (nvim offers its swap file for recovery)
   mmm, deck        run again (a draft mmm was editing: e on it, and nvim offers the swap file)
+  ghr              run again (it keeps its own tab, selection and scroll in ~/.ghr)
   claude           resumed: `claude --resume <session>`, the session found by the window title
                    (Claude Code's title for it) in ~/.claude/projects/<directory>/; when no title
                    matches, `claude --continue`
@@ -46,7 +47,7 @@ PROJECTS = pathlib.Path.home() / ".claude/projects"
 # What /usr/local/bin/jail gives jailed programs as their home.
 JAIL_HOME = pathlib.Path(os.environ.get("XDG_DATA_HOME") or pathlib.Path.home() / ".local/share") / "jail/home"
 INTERVAL = 10
-RERUN = {"ssh", "nvim", "vim", "mmm", "deck-patches"}
+RERUN = {"ssh", "nvim", "vim", "mmm", "deck-patches", "ghr"}
 # Discharging at this or less when the service stops: upower is powering off (its
 # PercentageAction is 2%), so the session should come back.
 LOW_BATTERY = 5
