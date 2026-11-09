@@ -3,6 +3,7 @@
 
 mod model;
 mod patches;
+mod patchview;
 mod review;
 mod scan;
 mod send;
@@ -63,6 +64,12 @@ enum Cmd {
         url: String,
         #[arg(long, default_value = "")]
         note: String,
+    },
+    /// Show a patch in omnidiff: the files it changes, before and after, from the installed
+    /// version's source (less when that can't be)
+    Show {
+        /// The patch, as `deck patches patches` prints it: category/package/file
+        id: String,
     },
     /// Set the upstream project a patch is meant for
     Upstream { id: String, url: String },
@@ -280,6 +287,12 @@ fn main() -> Result<()> {
         }
         Some(Cmd::Mark { id, state, url, note }) => m.record(&id, state, url, note),
         Some(Cmd::Upstream { id, url }) => m.set_upstream(&id, url),
+        Some(Cmd::Show { id }) => {
+            let row = m.rows.iter().find(|r| r.id == id).with_context(|| format!("no patch {id}"))?;
+            let f = &m.files[row.file.with_context(|| format!("{id}: its file is gone"))?];
+            let target = f.applies.map(|i| (m.pkgs[i].cp(), m.pkgs[i].pvr.clone()));
+            patchview::show(&repo_of(&m.host_dir), &m.host_dir.join(&f.rel), target)
+        }
         Some(Cmd::Stage { id, no_terminal }) => {
             let s = m.stage(&id)?;
             if s.fresh {

@@ -130,7 +130,7 @@ impl Subject {
         }
     }
 
-    fn slug(&self) -> String {
+    pub fn slug(&self) -> String {
         self.name().replace(['/', ' '], "_")
     }
 

@@ -149,7 +149,7 @@ const HELP: &[&str] = &[
     "Patches",
     "  m, Enter            record a change of state: pick it, then URL and note (both optional);",
     "                      Enter on an untracked patch shows it instead",
-    "  v                   the patch, with less in a terminal",
+    "  v                   the patch in omnidiff: its files before and after (less without it)",
     "  U                   set the upstream project the patch is meant for",
     "  S                   the next step upstream: stage in ~/3p, commit (by hand), fork, push, PR;",
     "                      fork and push ask first, nothing is public before push",
@@ -1176,8 +1176,8 @@ impl App {
                 if let Some(r) = self.selected_patch() {
                     let row = &self.m.rows[r];
                     self.status = match row.file.map(|i| &self.m.files[i]) {
-                        Some(f) => match review::view(&self.m.host_dir.join(&f.rel)) {
-                            Ok(()) => format!("{} opened in a terminal", f.rel),
+                        Some(f) => match crate::patchview::open(&self.m.host_dir, &row.id) {
+                            Ok(()) => format!("{} opened in omnidiff, in a terminal", f.rel),
                             Err(e) => format!("{e:#}"),
                         },
                         None => format!("{}: its file is gone", row.id),
