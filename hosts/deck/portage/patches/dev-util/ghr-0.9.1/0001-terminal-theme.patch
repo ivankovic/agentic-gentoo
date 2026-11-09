@@ -39,7 +39,7 @@ index 88db0e9..c6d3374 100644
              Self::Monokai => ThemeFamily::Dark,
              Self::GitHubDark => ThemeFamily::Dark,
              Self::GitHubLight => ThemeFamily::Light,
-+            // Unknown: most terminals are dark, and its colors are right either way.
++            // Terminal is not really any family, it will work on both. Most terminal apps are Dark by default though.
 +            Self::Terminal => ThemeFamily::Dark,
          }
      }
