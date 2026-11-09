@@ -16,8 +16,9 @@ it wants a look, "now", "soon" or "backlog" (in the bar's popup only), its line 
   portage   no @world update for 14 days, unread Gentoo news, preserved libraries waiting for
             `emerge @preserved-rebuild`, depclean blocked; from /var/lib/deck-health/portage.json
             (etc/deck-health/portage.py, run as root after syncs and emerges)
-  snapshots build output inside the hourly snapshots of @home: a cargo target/ in ~/src, or
-            ~/.cache, that isn't its own subvolume (fix: deck-nosnap DIR)
+  snapshots build output inside the hourly snapshots of @home: ~/.cache, or any folder in the
+            home marked as a cache (CACHEDIR.TAG: every cargo target/), that isn't its own
+            subvolume (fix: deck-nosnap DIR)
   reviews   findings of AI reviews (deck patches review, tools/deck) nobody has decided about yet, and
             the daily automatic reviews that failed; decide in deck's Review tab (f, then x/n/w)
   scans     updates the scan for malicious code (deck patches scan) flagged or couldn't scan in the
@@ -257,10 +258,48 @@ def scans():
              + "\n  After a look: deck patches scan allow <cpv> --note '...'")]
 
 
+# How deep under the home to look for build output: ~/.claude/jobs/<id>/tmp/target is 5.
+SNAP_DEPTH = 5
+
+
 def snapshotted():
-    """Rebuildable folders that the hourly @home snapshots still include (not subvolumes)."""
-    dirs = sorted(SRC.glob("*/target")) + [HOME / ".cache"]
-    return [d for d in dirs if d.is_dir() and not d.is_symlink() and d.stat().st_ino != 256]
+    """Rebuildable folders that the hourly @home snapshots still include: ~/.cache, and any
+    folder under the home that says it is a cache (a CACHEDIR.TAG, as cargo writes in every
+    target/), that isn't its own subvolume. Subvolumes and symlinks aren't gone into."""
+    found = []
+
+    def subvolume(path):
+        # A subvolume's root is inode 256 for stat; readdir (scandir) reports another number.
+        try:
+            return os.stat(path, follow_symlinks=False).st_ino == 256
+        except OSError:
+            return True
+
+    def walk(d, depth):
+        try:
+            entries = list(os.scandir(d))
+        except OSError:
+            return
+        if any(e.name == "CACHEDIR.TAG" and e.is_file(follow_symlinks=False) for e in entries):
+            # Not the small caches tools keep in a project (.pytest_cache, .venv, .ruff_cache),
+            # nor uv's tool environments: what churns is build output.
+            name = pathlib.Path(d).name
+            if not name.startswith(".") and "/.local/share/uv/" not in d + "/":
+                found.append(pathlib.Path(d))
+            return
+        if depth == SNAP_DEPTH:
+            return
+        for e in entries:
+            if e.is_dir(follow_symlinks=False) and e.name not in (".git", "node_modules") and not subvolume(e.path):
+                walk(e.path, depth + 1)
+
+    cache = HOME / ".cache"
+    if cache.is_dir() and not cache.is_symlink() and not subvolume(cache):
+        found.append(cache)
+    for e in os.scandir(HOME):
+        if e.is_dir(follow_symlinks=False) and e.name != ".cache" and not subvolume(e.path):
+            walk(e.path, 1)
+    return sorted(found)
 
 
 def disks():
