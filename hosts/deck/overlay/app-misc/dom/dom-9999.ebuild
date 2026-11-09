@@ -24,7 +24,10 @@ RDEPEND="
 
 src_unpack() {
 	git-r3_src_unpack
+	# cargo.eclass runs cargo fetch where it is called from: here, the crate's directory.
+	pushd "${S}" >/dev/null || die
 	cargo_live_src_unpack
+	popd >/dev/null || die
 }
 
 src_install() {

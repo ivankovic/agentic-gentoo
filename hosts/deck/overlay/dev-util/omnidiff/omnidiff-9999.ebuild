@@ -23,7 +23,10 @@ SLOT="0"
 
 src_unpack() {
 	git-r3_src_unpack
+	# cargo.eclass runs cargo fetch where it is called from: here, the crate's directory.
+	pushd "${S}" >/dev/null || die
 	cargo_live_src_unpack
+	popd >/dev/null || die
 }
 
 # Every tree-sitter grammar is compiled from C at build time, so a C compiler is required. It is
