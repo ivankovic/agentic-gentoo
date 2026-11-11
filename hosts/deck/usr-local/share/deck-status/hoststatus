@@ -12,10 +12,20 @@ it writes nothing and takes no input. Needs python3 (Debian and Ubuntu have it).
   containers          docker ps, when this user may; else a list root keeps in
                       /run/deck-status/containers (docker ps --format '{{json .}}' lines), else null
   listening           TCP ports listened on, as addr:port (another host's tunnel shows up here)
+  gentoo              on Gentoo only (/etc/gentoo-release), each part when its file is there:
+                      world_age_days, days since the last world update (null: none on record;
+                      /var/lib/deck-health/portage.json), advisories, how many apply
+                      (/var/lib/gentoo-security/affected), scrubs, per mounted btrfs filesystem the
+                      result of its last scrub (ok, failed, running, never; ran: before the
+                      last reboot, the result not kept) and its age in days, from
+                      btrfs-scrub@<mount>.service or, for /, btrfs-scrub.service, and hints:
+                      "no sync timer", "no scrub timer for <mount>"
 """
+import datetime
 import json
 import os
 import subprocess
+import time
 
 
 def run(*cmd):
@@ -63,16 +73,103 @@ def listening():
     return sorted({l.split()[3] for l in out.splitlines() if len(l.split()) >= 4})
 
 
-reboot_pkgs = read("/run/reboot-required.pkgs")
-print(json.dumps({
-    "host": os.uname().nodename,
-    "uptime": int(float((read("/proc/uptime") or "0").split()[0])),
-    "load": float((read("/proc/loadavg") or "0").split()[0]),
-    "cpus": os.cpu_count(),
-    "reboot": os.path.exists("/run/reboot-required"),
-    "reboot_pkgs": sorted(set(reboot_pkgs.split())) if reboot_pkgs else [],
-    "failed": [l.split()[0] for l in (run("systemctl", "--failed", "--no-legend", "--plain") or "").splitlines() if l.strip()],
-    "disks": disks(),
-    "containers": containers(),
-    "listening": listening(),
-}))
+def escape(mount):
+    """A mount point as systemd names it in a unit (systemd-escape --path): /srv/data -> srv-data."""
+    path = mount.strip("/")
+    if not path:
+        return "-"
+    out = "".join(c if c.isalnum() or c in ":_." else "-" if c == "/" else f"\\x{ord(c):02x}" for c in path)
+    return "\\x2e" + out[1:] if out.startswith(".") else out
+
+
+def btrfs_mounts(mounts):
+    """{device: [mount points]} of the mounted btrfs filesystems, from /proc/mounts' text."""
+    found = {}
+    for line in mounts.splitlines():
+        f = line.split()
+        if len(f) >= 3 and f[2] == "btrfs":
+            found.setdefault(f[0], []).append(f[1].replace("\\040", " "))
+    return found
+
+
+def scrubs(timers):
+    """([{mount, result, age_days}], hints): each btrfs filesystem's last scrub, from the state
+    systemd keeps of its scrub unit, which any user may read."""
+    found, hints = [], []
+    for points in btrfs_mounts(read("/proc/mounts") or "").values():
+        units = [f"btrfs-scrub@{escape(m)}" for m in points] + (["btrfs-scrub"] if "/" in points else [])
+        mount = min(points, key=len)
+        if not any(u + ".timer" in timers for u in units):
+            hints.append(f"no scrub timer for {mount}")
+        last = None
+        for u in units:
+            out = run("systemctl", "show", "--timestamp=unix", "-p", "LoadState,ActiveState,Result,ExecMainExitTimestamp",
+                      u + ".service") or ""
+            p = dict(l.split("=", 1) for l in out.splitlines() if "=" in l)
+            if p.get("LoadState") != "loaded":
+                continue
+            stamp = p.get("ExecMainExitTimestamp", "").lstrip("@")
+            when = int(stamp) if stamp.isdigit() else 0
+            result = ("running" if p.get("ActiveState") == "activating" else "never" if not when
+                      else "ok" if p.get("Result") == "success" else "failed")
+            if not when:
+                # systemd forgets a unit's result at a reboot; its timer keeps when it last ran.
+                out = run("systemctl", "show", "--timestamp=unix", "-p", "LastTriggerUSec", u + ".timer") or ""
+                stamp = out.strip().partition("=@")[2]
+                if stamp.isdigit():
+                    result, when = "ran", int(stamp)
+            if last is None or when > last[1]:
+                last = (result, when)
+        if last:
+            found.append({"mount": mount, "result": last[0],
+                          "age_days": int((time.time() - last[1]) // 86400) if last[1] else None})
+    return found, hints
+
+
+def gentoo():
+    """What a Gentoo host adds; None elsewhere, so other hosts' reports stay as they were."""
+    if not os.path.exists("/etc/gentoo-release"):
+        return None
+    out = {}
+    try:
+        world = json.loads(read("/var/lib/deck-health/portage.json") or "").get("world_updated")
+        out["world_age_days"] = None
+        if world:
+            out["world_age_days"] = (datetime.datetime.now().astimezone()
+                                     - datetime.datetime.fromisoformat(world).astimezone()).days
+    except (ValueError, TypeError, AttributeError):
+        pass
+    affected = read("/var/lib/gentoo-security/affected")
+    if affected is not None:
+        out["advisories"] = sum(l[:6].isdigit() for l in affected.splitlines())
+    listed = run("systemctl", "list-timers", "--all", "--no-legend", "--plain")
+    if listed is not None:
+        timers = {w for l in listed.splitlines() for w in l.split() if w.endswith(".timer")}
+        out["scrubs"], out["hints"] = scrubs(timers)
+        if not any("sync" in t for t in timers):
+            out["hints"].insert(0, "no sync timer")
+    return out
+
+
+def main():
+    reboot_pkgs = read("/run/reboot-required.pkgs")
+    report = {
+        "host": os.uname().nodename,
+        "uptime": int(float((read("/proc/uptime") or "0").split()[0])),
+        "load": float((read("/proc/loadavg") or "0").split()[0]),
+        "cpus": os.cpu_count(),
+        "reboot": os.path.exists("/run/reboot-required"),
+        "reboot_pkgs": sorted(set(reboot_pkgs.split())) if reboot_pkgs else [],
+        "failed": [l.split()[0] for l in (run("systemctl", "--failed", "--no-legend", "--plain") or "").splitlines() if l.strip()],
+        "disks": disks(),
+        "containers": containers(),
+        "listening": listening(),
+    }
+    extra = gentoo()
+    if extra is not None:
+        report["gentoo"] = extra
+    print(json.dumps(report))
+
+
+if __name__ == "__main__":
+    main()

@@ -12,7 +12,8 @@ Network:  offline (no default route), no-internet or portal (NetworkManager's co
           check), home (the home probe answers), away. Every minute and on each change.
 Hosts:    each server in ~/.config/deck/hosts.toml, every 5 minutes while online: its hoststatus
           over ssh with a key that can only run that (usr-local/share/deck-status/hoststatus,
-          installed there by hand), and its sites over HTTPS. A host marked home_only is checked
+          installed there by hand), and its sites over HTTPS. A Gentoo host also reports its
+          last world update and open advisories: over 14 days, or any, counts as a problem. A host marked home_only is checked
           only at home; away, `via` tells from another host's listening ports whether its tunnel
           is up; `unlock` tells a host that booted and waits for its disk's passphrase (its
           initramfs answers on that port) from one that is down. Offline, nothing is checked:
@@ -61,6 +62,7 @@ CONFIG = pathlib.Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "
 GLSA = pathlib.Path("/var/lib/gentoo-security/affected")
 RECOVERY = pathlib.Path("/var/lib/deck-recovery/updated")
 RECOVERY_DAYS = 42
+WORLD_DAYS = 14
 FULL = 85
 NET_EVERY, SLOW_EVERY, FIRMWARE_EVERY = 60, 300, 3600
 
@@ -136,6 +138,33 @@ def site(url, cert=None):
     return code, 0 < code < 500
 
 
+def gentoo(g):
+    """(problems, detail lines) from a Gentoo host's "gentoo" part of its report: as for the
+    laptop itself, a world update more than WORLD_DAYS old and open advisories are problems.
+    Nothing for a host that sends none of it."""
+    problems, detail = [], []
+    if not isinstance(g, dict):
+        return problems, detail
+    if "world_age_days" in g:
+        age = g["world_age_days"]
+        if not isinstance(age, int):
+            problems.append("no world update on record")
+        elif age > WORLD_DAYS:
+            problems.append(f"world update {age} days old")
+        if isinstance(age, int):
+            detail.append(f"world updated {age} days ago")
+    n = g.get("advisories")
+    if isinstance(n, int):
+        if n:
+            problems.append(f"{n} advisor{'y' if n == 1 else 'ies'}")
+        detail.append(f"advisories: {n}")
+    for s in g.get("scrubs") or []:
+        ago = f", {s['age_days']} days ago" if isinstance(s.get("age_days"), int) else ""
+        detail.append(f"scrub {s.get('mount', '?')}: {s.get('result', '?')}{ago}")
+    detail += [f"hint: {h}" for h in g.get("hints") or []]
+    return problems, detail
+
+
 def judge(h, report, sites):
     """(state, line, items, detail lines) for one host."""
     name, problems, detail = h["name"], [], []
@@ -161,6 +190,9 @@ def judge(h, report, sites):
             detail.append(f"containers: {len(cs) - len(down)} of {len(cs)} running")
             problems += [f"{c} stopped" for c in down] + [f"{c} unhealthy" for c in unhealthy]
         detail.append("disks: " + ", ".join(f"{m} {u}%" for m, u in report.get("disks", {}).items()))
+        more, lines = gentoo(report.get("gentoo"))
+        problems += more
+        detail += lines
     for url, (code, ok) in sites.items():
         detail.append(f"{'ok  ' if ok else 'DOWN'} {code or '---'} {url}")
         if not ok:
@@ -304,6 +336,12 @@ def daemon():
     wake = {"now": True}
     signal.signal(signal.SIGUSR1, lambda *_: wake.update(now=True))
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    # A signal doesn't interrupt select (Python retries it): each one also writes a byte to this
+    # pipe, which the select below waits on, so a popup's SIGUSR1 is acted on at once.
+    woken, wakeup = os.pipe()
+    os.set_blocking(woken, False)
+    os.set_blocking(wakeup, False)
+    signal.set_wakeup_fd(wakeup, warn_on_full_buffer=False)
     # Network changes: ip monitor prints a line for each route or address change.
     def monitor():
         return subprocess.Popen(["ip", "monitor", "route", "address"], stdout=subprocess.PIPE,
@@ -330,11 +368,10 @@ def daemon():
             for k in what:
                 last[k] = t
             write(status)
-        try:
-            ready, _, _ = select.select([mon.stdout], [], [], 5)
-        except InterruptedError:
-            continue
-        if ready:
+        ready, _, _ = select.select([mon.stdout, woken], [], [], 5)
+        if woken in ready:
+            os.read(woken, 512)
+        if mon.stdout in ready:
             if not mon.stdout.readline():  # it ended: start another, and look now
                 mon.wait()
                 mon = monitor()

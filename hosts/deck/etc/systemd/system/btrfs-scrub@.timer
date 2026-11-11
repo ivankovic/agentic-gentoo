@@ -1,0 +1,11 @@
+# Monthly scrub of the btrfs filesystem mounted at the instance's path (btrfs-scrub@.service).
+[Unit]
+Description=Monthly btrfs scrub of %f
+
+[Timer]
+OnCalendar=monthly
+RandomizedDelaySec=1d
+Persistent=true
+
+[Install]
+WantedBy=timers.target

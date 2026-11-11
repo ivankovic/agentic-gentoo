@@ -7,32 +7,91 @@
 #
 # The snapshot, @snapshots/@.pre-emerge.<time>, is the exact state before the change; the last
 # 5 are kept (btrbk's hourly ones are separate and ignore these). Skipped for commands that change
-# nothing (--pretend, --search, --info, --sync, ...). Roll back from the recovery system with
+# nothing (--pretend, --search, --info, --sync, ...) or only download (--fetchonly). A run that
+# merged nothing (--ask declined, nothing to do) deletes its own snapshot again, so only snapshots
+# before a real change count towards the 5. Roll back from the recovery system with
 # deck-rollback. A failed snapshot is reported and the emerge goes ahead.
 #
 # Before that, the scan gate: what this emerge would install is scanned for malicious code, as the
 # user (`deck patches scan gate`, tools/deck/src/scan.rs: in the jail, with review.toml's agent),
 # and the emerge is refused when anything is flagged or could not be scanned. A security fix
-# (GLSA) is held up only by a flag. --allow-unscanned skips the gate for this one emerge.
+# (GLSA) is held up only by a flag. --allow-unscanned skips the gate for this one emerge. The user
+# is who ran sudo; from a root shell, DECK_USER, else the machine's only login account.
+#
+# /usr/bin/emerge starts in /var/tmp, where what a fetch leaves behind (wget-log) is cleaned up,
+# unless an argument is a relative path to a file (an ebuild): then it stays where it was started.
+#
+# The optional /etc/deck/host.conf (lines KEY=value) says what differs on another host:
+#   BTRFS_POOL=/mnt/btr_pool   where the btrfs top level is mounted, holding @ and @snapshots
+#   DECK_USER=<name>           whose scan gate runs for an emerge started without sudo
+#
+# `emerge --classify <arguments>` only prints how the wrapper reads them (for tests/system).
+
+# Sets changes (0: the command changes nothing), installs (0: it changes, but installs nothing),
+# fetch (1: it only downloads), config (1: --config, which changes things Portage doesn't record),
+# gate (0: --allow-unscanned), keep_cwd (1: an argument is a relative path to a file) and args
+# (the arguments for /usr/bin/emerge).
+classify() {
+  changes=1 installs=1 fetch=0 config=0 gate=1 keep_cwd=0 args=()
+  local arg
+  for arg in "$@"; do
+    case $arg in
+      --allow-unscanned) gate=0; continue ;;
+      --pretend | --search | --searchdesc | --info | --help | --version | --sync | --check-news | \
+        --list-sets | --metadata | --regen | --resume-list) changes=0 ;;
+      # Changes that install nothing: removing, selecting, fetching.
+      --fetchonly | --fetch-all-uri) installs=0 fetch=1 ;;
+      --config) installs=0 config=1 ;;
+      --unmerge | --depclean | --prune | --deselect) installs=0 ;;
+      --*) ;;
+      -*[psShV]*) changes=0 ;; # short options, also bundled: -p -pv -s -S -h -V
+      -*[CcPfF]*)
+        installs=0
+        [[ $arg == -*[fF]* ]] && fetch=1
+        ;;
+      -*) ;;
+      /*) ;;
+      *) [[ -f $arg ]] && keep_cwd=1 ;;
+    esac
+    args+=("$arg")
+  done
+}
+
+if [[ ${1-} == --classify ]]; then
+  shift
+  classify "$@"
+  snapshot=$((changes && !fetch))
+  echo "changes=$changes installs=$installs fetch=$fetch gate=$((changes && installs && gate))" \
+    "snapshot=$snapshot cwd=$( ((keep_cwd)) && echo keep || echo neutral)"
+  exit 0
+fi
+
 if [[ $EUID != 0 ]] || grep -q '/build\.slice/' /proc/self/cgroup || ! [[ -d /run/systemd/system ]]; then
   exec /usr/bin/emerge "$@"
 fi
 
-changes=1 installs=1 gate=1 args=()
-for arg in "$@"; do
-  case $arg in
-    --allow-unscanned) gate=0; continue ;;
-    --pretend | --search | --searchdesc | --info | --help | --version | --sync | --check-news | \
-      --list-sets | --metadata | --regen | --resume-list) changes=0 ;;
-    # Changes that install nothing: removing, selecting, fetching.
-    --unmerge | --depclean | --prune | --deselect | --config | --fetchonly | --fetch-all-uri) installs=0 ;;
-    --*) ;;
-    -*[psShV]*) changes=0 ;; # short options, also bundled: -p -pv -s -S -h -V
-    -*[CcPfF]*) installs=0 ;;
-  esac
-  args+=("$arg")
-done
+classify "$@"
 set -- "${args[@]}"
+
+# A value from the optional /etc/deck/host.conf (the value may be quoted), or $2.
+conf() {
+  local v
+  v=$(sed -n "s/^[[:space:]]*$1=//p" /etc/deck/host.conf 2>/dev/null | tail -n 1)
+  v=${v%\"}; v=${v#\"}; v=${v%\'}; v=${v#\'}
+  printf '%s\n' "${v:-$2}"
+}
+
+# The user the scan gate runs as: who ran sudo; else DECK_USER; else the only account that can log
+# in (uid 1000 and up with a shell). Prints nothing when that leaves no one, or more than one.
+gate_user() {
+  local u=
+  [[ -n ${SUDO_UID-} && $SUDO_UID != 0 ]] && u=$(id -nu "$SUDO_UID" 2>/dev/null)
+  [[ -z $u && -n ${SUDO_USER-} && $SUDO_USER != root ]] && u=$SUDO_USER
+  [[ -z $u ]] && u=$(conf DECK_USER "")
+  [[ -z $u ]] && u=$(getent passwd | awk -F: '$3 >= 1000 && $3 < 60000 && $7 !~ /(nologin|false)$/ { n++; u = $1 }
+    END { if (n == 1) print u }')
+  [[ -n $u ]] && id -u "$u" >/dev/null 2>&1 && printf '%s\n' "$u"
+}
 
 # A package with user patches (/etc/portage/patches/<category>/<name>[-version][:slot], from the
 # host's portage/patches) is built from source: a binary package never runs eapply_user, so its
@@ -49,7 +108,13 @@ done
 
 if ((changes && installs)); then
   if ((gate)); then
-    user=${SUDO_USER:-$(id -nu 1000)}
+    user=$(gate_user)
+    if [[ -z $user ]]; then
+      echo "emerge: can't tell whose scan gate to run: not started through sudo, and no (or more" >&2
+      echo "  than one) login account. Run it with sudo, set DECK_USER in /etc/deck/host.conf," >&2
+      echo "  or, for this emerge only: emerge --allow-unscanned ..." >&2
+      exit 1
+    fi
     uid=$(id -u "$user")
     echo "emerge: scanning what this would install (deck patches scan gate, as $user)" >&2
     # In a scope of its own in build.slice: the gate's diff and triage read every unpacked file, and
@@ -72,21 +137,40 @@ if ((changes && installs)); then
   fi
 fi
 
-if ((changes)); then
-  pool=/mnt/btr_pool # btrfs top level, automounted (etc/fstab)
+# What a merge, an unmerge or a change to the world file touches: Portage updates the modification
+# time of /var/db/pkg at each package it installs or removes. The same before and after: this
+# emerge changed nothing.
+merged() { stat -c '%n %y' /var/db/pkg /var/lib/portage/world /var/lib/portage/world_sets 2>/dev/null; }
+
+pool=$(conf BTRFS_POOL /mnt/btr_pool) # btrfs top level, automounted (etc/fstab)
+snap=
+if ((changes && !fetch)); then
   snap=$pool/@snapshots/@.pre-emerge.$(date +%Y%m%dT%H%M%S)
+  before=$(merged)
   if btrfs subvolume snapshot -r "$pool/@" "$snap" >/dev/null; then
     echo "emerge: snapshot ${snap#"$pool"/}" >&2
-    ls -d "$pool"/@snapshots/@.pre-emerge.* | sort | head -n -5 |
-      while read -r old; do btrfs subvolume delete "$old" >/dev/null; done
   else
     echo "emerge: WARNING: no pre-emerge snapshot; going ahead" >&2
+    snap=
   fi
 fi
+
+# Not in the directory it was called from: a binary package fetch writes wget-log files there.
+((keep_cwd)) || cd /var/tmp || cd /
 
 systemd-run --scope --quiet --collect --slice=build.slice --unit="emerge-$$.scope" \
   --description="emerge $*" -- /usr/bin/emerge "$@"
 status=$?
+
+if [[ -n $snap ]]; then
+  if ((!config)) && [[ -n $before && $(merged) == "$before" ]]; then
+    # Nothing was merged: this snapshot is no rollback point, and must not push a real one out.
+    btrfs subvolume delete "$snap" >/dev/null && echo "emerge: nothing changed; snapshot ${snap#"$pool"/} dropped" >&2
+  else
+    ls -d "$pool"/@snapshots/@.pre-emerge.* | sort | head -n -5 |
+      while read -r old; do btrfs subvolume delete "$old" >/dev/null; done
+  fi
+fi
 # The panel's world-update, preserved-libs and depclean lines (etc/systemd/system/deck-portage.service).
 ((changes)) && systemctl start --no-block deck-portage.service
 exit "$status"

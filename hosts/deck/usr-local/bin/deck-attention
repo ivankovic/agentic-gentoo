@@ -7,8 +7,12 @@ it wants a look, "now", "soon" or "backlog" (in the bar's popup only), its line 
 
   repos     work that exists only on deck: a repository in ~/src with changes not committed, or
             commits on no remote, for more than a day; a week or more: soon, else backlog
-  drift     config files that differ between deck and the agentic-gentoo repo (`./deploy.sh`):
-            edited on deck and not in the repo, or changed in the repo and not deployed
+  drift     config files that differ between deck and the agentic-gentoo repo (`./deploy.sh`),
+            in content or in being executable: edited on deck and not in the repo, or changed in
+            the repo and not deployed. The files are those of `./deploy.sh <host> list`, for the
+            host directory ~/.config/deck/host-dir names (as for tools/deck), else
+            hosts/<hostname>; the repo is ~/src/agentic-gentoo unless ~/.config/deck/repo names
+            another (both: one line, a path relative to the home or absolute)
   crashes   programs that crashed (dumped core) in the last 3 days, from coredumpctl; not
             programs in Portage's build directory (package tests during an emerge)
   unclean   the previous boot ended in a crash, reset or power loss, in the last 7 days
@@ -27,7 +31,8 @@ it wants a look, "now", "soon" or "backlog" (in the bar's popup only), its line 
             a full ESP fails the next kernel install)
 
 Runs as the desktop user and takes well under a second. The only thing it writes is when the
-events were last seen, in ~/.local/state/deck-attention/seen.
+events were last seen, in ~/.local/state/deck-attention/seen. A check that fails (a state file
+it can't make sense of) becomes one line, "check failed: <name>", and the others still show.
 """
 import collections
 import datetime
@@ -41,7 +46,19 @@ import time
 
 HOME = pathlib.Path.home()
 SRC = HOME / "src"
-REPO = SRC / "agentic-gentoo"
+
+
+def named(name):
+    """The path in the one-line file ~/.config/deck/<name>, relative to the home or absolute;
+    None without the file."""
+    try:
+        return HOME / (HOME / ".config/deck" / name).read_text().strip()
+    except OSError:
+        return None
+
+
+REPO = named("repo") or SRC / "agentic-gentoo"
+HOST = os.uname().nodename
 PORTAGE = pathlib.Path("/var/lib/deck-health/portage.json")
 UNCLEAN = pathlib.Path("/var/lib/deck-health/unclean")
 SEEN = pathlib.Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "deck-attention/seen"
@@ -118,31 +135,49 @@ def repo_state(repo):
     return repo.name, ", ".join(parts), detail, age
 
 
-# Where deploy.sh installs each part of hosts/deck (its targets(); keep the two in step).
-DEPLOY_MAP = {"home": HOME, "etc": pathlib.Path("/etc"), "portage": pathlib.Path("/etc/portage"),
-              "usr-local": pathlib.Path("/usr/local")}
+def deployed():
+    """[(repo file, system path)] for this host, from `./deploy.sh <host> list`, which knows the
+    mapping, what the host inherits and a host directory outside the repo; with how to run it,
+    for the details. None when the repo or the host's directory isn't there."""
+    env, host_dir = None, named("host-dir")
+    if "DECK_HOST_DIR" in os.environ:
+        host_dir = pathlib.Path(os.environ["DECK_HOST_DIR"])
+    elif host_dir:
+        env = dict(os.environ, DECK_HOST_DIR=str(host_dir))
+    if not (REPO / "deploy.sh").exists() or not (host_dir or REPO / "hosts" / HOST).is_dir():
+        return None
+    r = subprocess.run([str(REPO / "deploy.sh"), HOST, "list"], capture_output=True, text=True, env=env)
+    if r.returncode != 0:
+        raise RuntimeError(" ".join(l.strip() for l in r.stderr.splitlines()[:2]) or "deploy.sh list failed")
+    pairs = [l.split("\t") for l in r.stdout.splitlines() if "\t" in l]
+    how = (f"DECK_HOST_DIR={host_dir} " if host_dir else "") + f"./deploy.sh {HOST}"
+    return [(REPO / src, pathlib.Path(dst)) for src, dst in pairs], how
 
 
 def drift():
-    """[(status, path)] where deck and the repo disagree, as `./deploy.sh deck` would list them
-    (files it can't read are left out); None when the repo isn't there. Compared here instead of
-    running deploy.sh, which starts a cmp per file: ~20 ms instead of ~230."""
-    if not (REPO / "deploy.sh").exists():
+    """([(status, path)], how to run deploy.sh) where deck and the repo disagree, as
+    `./deploy.sh <host>` would list them (files it can't read are left out); None when the repo
+    isn't there. Compared here instead of by deploy.sh, which starts a cmp per file."""
+    listed = deployed()
+    if listed is None:
         return None
-    out = run("git", "ls-files", "-z", "--", *[f"hosts/deck/{d}" for d in DEPLOY_MAP], cwd=REPO).stdout
     found = []
-    for src in filter(None, out.split("\0")):
-        top, _, rest = src.removeprefix("hosts/deck/").partition("/")
-        dst = DEPLOY_MAP[top] / rest
+    for src, dst in listed[0]:
         try:
-            if dst.read_bytes() != (REPO / src).read_bytes():
+            wanted = src.read_bytes()
+        except OSError:
+            continue  # tracked but deleted in the working tree: deploy.sh skips it too
+        try:
+            if dst.read_bytes() != wanted:
                 found.append(("changed:", str(dst)))
+            elif os.access(src, os.X_OK) != os.access(dst, os.X_OK):
+                found.append(("mode:", str(dst)))
         except FileNotFoundError:
             if not dst.exists():
                 found.append(("new:", str(dst)))
         except OSError:
             pass  # unreadable without root
-    return found
+    return found, listed[1]
 
 
 def crashes():
@@ -316,60 +351,102 @@ def disks():
     return found
 
 
+def guarded(name, check):
+    """The check, as a call that gives its items, or, when it raises, one item saying which
+    check failed: a state file it can't make sense of doesn't take the other lines with it."""
+    def call():
+        try:
+            return check()
+        except Exception as e:
+            return [("soon", f"check failed: {name}",
+                     [f"check failed: {name} ({type(e).__name__}: {e}); deck-attention is {__file__}"])]
+    return call
+
+
+def repo_items():
+    return [("soon" if age > REPO_SOON else "backlog", f"Only on deck: {name} ({summary})",
+             [f"~/src/{name}: {summary}"] + detail) for name, summary, detail, age in repos()]
+
+
+def drift_items():
+    d, how = drift() or ([], "")
+    if not d:
+        return []
+    where = "~/" + str(REPO.relative_to(HOME)) if REPO.is_relative_to(HOME) else str(REPO)
+    return [("soon", f"Config differs from repo: {plural(len(d), 'file')}",
+             [f"Config differs from the agentic-gentoo repo (cd {where}; {how}):"]
+             + [f"  {s:9} {p}" for s, p in d])]
+
+
+def crash_items(last_seen):
+    c = crashes()
+    if not c:
+        return []
+    new = {p: [t for t in times if t > last_seen] for p, times in c.items()}
+    new = {p: times for p, times in new.items() if times}
+    detail = [f"Crashes in the last {CRASH_DAYS} days (coredumpctl info <program> for the stack):"]
+    for p, times in c.items():
+        when = ", ".join(time.strftime("%a %d %b %H:%M", time.localtime(t))
+                         + (" (new)" if t > last_seen else "") for t in times[-5:])
+        detail.append(f"  {p}: {when}")
+    line = "Crashed: " + ", ".join(f"{p} {len(t)}×" if len(t) > 1 else p for p, t in new.items())
+    return [("soon" if new else "seen", line if new else "", detail)]
+
+
+def unclean_items(last_seen):
+    u = unclean()
+    if not u:
+        return []
+    stamp = time.strftime("%a %d %b, %H:%M", time.localtime(u))
+    return [("now" if u > last_seen else "seen", f"Unclean shutdown before {stamp}" if u > last_seen else "",
+             [f"Unclean shutdown before {stamp} (see Disk health below)"])]
+
+
+def snapshot_items():
+    snap = snapshotted()
+    if not snap:
+        return []
+    names = [str(d.relative_to(SRC)) if d.is_relative_to(SRC) else "~/" + str(d.relative_to(HOME)) for d in snap]
+    return [("soon", "Build output in snapshots: " + ", ".join(names),
+             ["Build output in the hourly snapshots of @home (stop builds, then):",
+              "  deck-nosnap " + " ".join(str(d).replace(str(HOME), "~", 1) for d in snap)])]
+
+
+def lines_of(level, check):
+    """A check that gives [(tile line, detail)], as one that gives items."""
+    return lambda: [(level, line, [line + ":", detail]) for line, detail in check()]
+
+
+def gather():
+    """(items, events): every check's (level, line, detail lines), each check on its own; events
+    are the crashes' and the unclean shutdown's, which --details marks as seen."""
+    last_seen = seen()
+    # The slow checks (git in every repo, the drift compare, coredumpctl) run side by side.
+    repo, d, c = parallel(guarded("repos", repo_items), guarded("drift", drift_items),
+                          guarded("crashes", lambda: crash_items(last_seen)))
+    u = guarded("unclean", lambda: unclean_items(last_seen))()
+    items = repo + d + c + u
+    for name, check in (("snapshots", snapshot_items), ("portage", lines_of("soon", portage)),
+                        ("scans", lines_of("soon", scans)), ("reviews", lines_of("backlog", reviews)),
+                        ("disk", lines_of("now", disks))):
+        items += guarded(name, check)()
+    return items, c + u
+
+
 def main():
     args = sys.argv[1:]
     if args == ["--seen"]:
         mark_seen()
         return 0
     details, as_json = "--details" in args, "--json" in args
-    items = []  # (level, line, detail lines)
-
-    # The slow checks (git in every repo, the drift compare, coredumpctl) run side by side.
-    repo_states, d, c = parallel(repos, drift, crashes)
-    for name, summary, detail, age in repo_states:
-        items.append(("soon" if age > REPO_SOON else "backlog", f"Only on deck: {name} ({summary})",
-                      [f"~/src/{name}: {summary}"] + detail))
-
-    if d:
-        items.append(("soon", f"Config differs from repo: {plural(len(d), 'file')}",
-                      ["Config differs from the agentic-gentoo repo (cd ~/src/agentic-gentoo; ./deploy.sh deck):"]
-                      + [f"  {s:9} {p}" for s, p in d]))
-
-    last_seen = seen()
-    new = {p: [t for t in times if t > last_seen] for p, times in c.items()}
-    new = {p: times for p, times in new.items() if times}
-    if c:
-        detail = [f"Crashes in the last {CRASH_DAYS} days (coredumpctl info <program> for the stack):"]
-        for p, times in c.items():
-            when = ", ".join(time.strftime("%a %d %b %H:%M", time.localtime(t))
-                             + (" (new)" if t > last_seen else "") for t in times[-5:])
-            detail.append(f"  {p}: {when}")
-        line = "Crashed: " + ", ".join(f"{p} {len(t)}×" if len(t) > 1 else p for p, t in new.items())
-        items.append(("soon" if new else "seen", line if new else "", detail))
-
-    u = unclean()
-    if u:
-        stamp = time.strftime("%a %d %b, %H:%M", time.localtime(u))
-        items.append(("now" if u > last_seen else "seen", f"Unclean shutdown before {stamp}" if u > last_seen else "",
-                      [f"Unclean shutdown before {stamp} (see Disk health below)"]))
-
-    snap = snapshotted()
-    if snap:
-        names = [str(d.relative_to(SRC)) if d.is_relative_to(SRC) else "~/" + str(d.relative_to(HOME)) for d in snap]
-        items.append(("soon", "Build output in snapshots: " + ", ".join(names),
-                      ["Build output in the hourly snapshots of @home (stop builds, then):",
-                       "  deck-nosnap " + " ".join(str(d).replace(str(HOME), "~", 1) for d in snap)]))
-
-    for level, found in (("soon", portage()), ("soon", scans()), ("backlog", reviews()), ("now", disks())):
-        for line, detail in found:
-            items.append((level, line, [line + ":", detail]))
+    items, events = gather()
 
     if as_json:
         print(json.dumps([{"level": l, "line": line, "detail": "\n".join(d)} for l, line, d in items]))
         return 0
     text = [t for _, _, d in items for t in d]
     if details:
-        if c or u:
+        if events:
             text.append("(Crashes and the unclean shutdown above are now marked as seen.)")
         mark_seen()
     lines = [line for _, line, _ in items if line]

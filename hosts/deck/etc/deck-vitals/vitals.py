@@ -258,20 +258,51 @@ class Delta:
         return d
 
 
+def supply(kind, base="/sys/class/power_supply"):
+    """The first power supply of that type ("Mains", "Battery"), whatever it is called; not the
+    battery of a mouse or keyboard (scope Device). None on a machine without one."""
+    for d in sorted(glob.glob(base + "/*")):
+        if read(d + "/type") == kind and read(d + "/scope") != "Device":
+            return d
+    return None
+
+
+MAINS, BATTERY = supply("Mains"), supply("Battery")
+
+
+def on_mains():
+    """On mains power: always, on a machine without a battery."""
+    if not BATTERY:
+        return True
+    if MAINS:
+        return read(MAINS + "/online") == "1"
+    return read(BATTERY + "/status") != "Discharging"
+
+
+def short_of_memory(total=None):
+    """GiB of available memory below which every line names the biggest process: 12 GiB on a
+    machine with 31 GiB (32 installed), the same share of any other's."""
+    if total is None:
+        total = next((float(l.split()[1]) / 1048576 for l in (read("/proc/meminfo") or "").splitlines()
+                      if l.startswith("MemTotal:")), 31.0)
+    return total * 12 / 31
+
+
 def power_supply(slow):
     """slow: also the battery, read through ACPI (about 3 ms)."""
     out = {}
-    ac = read("/sys/class/power_supply/AC/online")
+    ac = read(MAINS + "/online") if MAINS else None
     if ac is not None:
         out["ac"] = int(ac)
     if not slow:
         return out
-    cap = read("/sys/class/power_supply/BAT0/capacity")
-    if cap is not None:
-        out["bat"] = int(cap)
-    p = num("/sys/class/power_supply/BAT0/power_now", 1e6)
-    if p is not None and read("/sys/class/power_supply/BAT0/status") == "Discharging":
-        out["bat_w"] = p
+    if BATTERY:
+        cap = read(BATTERY + "/capacity")
+        if cap is not None:
+            out["bat"] = int(cap)
+        p = num(BATTERY + "/power_now", 1e6)
+        if p is not None and read(BATTERY + "/status") == "Discharging":
+            out["bat_w"] = p
     prof = read("/sys/firmware/acpi/platform_profile")
     if prof:
         out["profile"] = prof
@@ -299,10 +330,10 @@ def idle_off():
 
 def main():
     energy, delta = Energy(), Delta()
-    n, last = 0, None
+    n, last, short = 0, None, short_of_memory()
     while True:
         now = time.monotonic()
-        on_ac = read("/sys/class/power_supply/AC/online") == "1"
+        on_ac = on_mains()
         slow = not on_ac or n % 10 == 0  # EC and battery: every 10 s on AC, every sample on battery
         f = {}
         f.update(temps(slow))
@@ -317,7 +348,7 @@ def main():
         f["load"] = float((read("/proc/loadavg") or "0").split()[0])
         f.update(memory())
         f.update(pressure())
-        if n % 10 == 0 or f.get("mem_avail", 99) < 12 or f.get("psi_mem", 0) > 1:
+        if n % 10 == 0 or f.get("mem_avail", short) < short or f.get("psi_mem", 0) > 1:
             f.update(top_memory())
         f["throttle"] = delta("throttle", counter_sum("/sys/devices/system/cpu/cpu*/thermal_throttle/package_throttle_count"))
         if n % 60 == 0:

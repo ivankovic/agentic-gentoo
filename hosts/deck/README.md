@@ -406,20 +406,27 @@ Hardening (2026-10-09):
 trusted, not tied to any one tool: `jail` (a shell) or `jail <command>`, e.g. `jail claude`.
 [usr-local/bin/jail](usr-local/bin/jail) runs it with bubblewrap: `~/src` read-write, except each
 repository's `.git/config`, `.git/hooks` and `core.hooksPath` directory, which git on the host
-runs; its own home in `~/.local/share/jail/home` (logins, settings, history; caches as their own
+runs, and its `.claude/settings.json` and `.claude/settings.local.json` where they exist (Claude
+Code on the host runs the hooks they name); its own home in `~/.local/share/jail/home` (logins, settings, history; caches as their own
 subvolumes, out of the snapshots); toolchains and editor and shell settings from the real home
 read-only; `/usr`, `/etc`, `/opt` read-only; the internet through its own network namespace
 (pasta: no host loopback services, no abstract unix sockets such as Xwayland's). Not there: the rest of the home (SSH and
 GPG keys, `gh`, `~/.cargo/credentials.toml`, browser, mail), the SSH and GPG agents, D-Bus,
 Wayland, sudo. So nothing jailed can push, publish or sign: commit inside, review and push outside.
 For untrusted code, `jail --no-src` leaves `~/src` out, and `--ro DIR`, `--rw DIR` and `--chdir DIR`
-mount just what a program needs (deck's reviews: the code under review, read-only). All jailed
+mount just what a program needs (deck's reviews: the code under review, read-only); repositories
+in a `--rw DIR` get the same read-only parts, but host git is only guarded in `~/src` and the work
+roots. No user namespaces inside (bwrap `--disable-userns`): nothing that sandboxes itself with
+them runs in the jail. All jailed
 programs share [jail.slice](home/.config/systemd/user/jail.slice): CPU weight 20 (the desktop gets
 the CPU first) and at most 90% of it, 22 GiB memory high, 24 GiB max, 4 GiB of
 swap, 2000 tasks, and systemd-oomd kills inside it after 20 s stalled on memory over half the time. The prompt says `jail`; deck-terminals reopens jailed
-programs in the jail. A jailed tool logs in once on its own (its login lives in the jail home).
+programs in the jail (the `jail` command as typed, never what runs inside it). A jailed tool logs in once on its own (its login lives in the jail home).
 What a jailed program writes in `~/src` and you later run on the host (build scripts, tests)
-runs with your rights: read the diff first.
+runs with your rights, and so does what host tools load from a directory on their own, which no
+mount keeps: a `.claude/settings.json` that didn't exist yet, `CLAUDE.md`, `.cargo/config.toml`,
+`.envrc`, nvim's exrc files, Python packages installed editable from `~/src`. Read the diff first,
+untracked files too.
 
 **Host git is guarded** ([usr-local/bin/git](usr-local/bin/git), first on the PATH). Read-only
 mounts can't keep a repository's git config and hooks from a jailed program: it can make a new
@@ -429,7 +436,14 @@ checks first that the repository's own config (includes followed), the hooks it 
 git directory's layout are as host git last left them, and refuses, showing the difference, when
 they aren't; `git trust` accepts them after a look (`git trust --all`: every repository). Host git
 commands that change config themselves (config, remote, branch, push, clone, init, ...) record the
-new state. It costs about 7 ms a call; inside the jail it's plain git. Found by deck's first
+new state, except when the hooks differ afterwards (a checkout brought other tracked hook files,
+`core.hooksPath` was set): those wait for `git trust`. Where the hooks are files a jailed program
+can change through git (a `core.hooksPath` in the worktree, as `.githooks` here), they run for
+commit and push only; checkout, merge, pull, rebase, reset and the rest run with hooks off, since
+they can write a hook and run it in one go. Bare repositories in the work roots are only used when
+named (`safe.bareRepository=explicit`, passed by the wrapper). The work roots come from one file
+both scripts read ([usr-local/share/jail/roots.sh](usr-local/share/jail/roots.sh)); the tests are
+in [tests/jail-git](../../tests/jail-git). It costs about 7 ms a call; inside the jail it's plain git. Found by deck's first
 security review of the jail (2026-10-18), with the jail's other fixes: `core.hooksPath` no longer
 becomes a mount unless it is a real directory in the repository, and the jail home's symlinks are
 never followed by the host.
@@ -451,7 +465,9 @@ The bar never waits: [deck-status](usr-local/bin/deck-status), a user service, g
 `~/.local/state/deck/status.json`, every 5 minutes, when the network changes, and when a popup
 opens. Home is when a probe address on the home network answers; servers are checked over ssh with
 a key that can only run [hoststatus](usr-local/share/deck-status/hoststatus) there (read-only:
-uptime, a pending reboot, failed units, disks, containers, listening ports), and their sites over
+uptime, a pending reboot, failed units, disks, containers, listening ports; on a Gentoo server
+also the age of its last world update, its open advisories, each btrfs filesystem's last scrub
+and timers it lacks: over 14 days or any advisory counts, as on deck), and their sites over
 HTTPS. Offline, servers show as unchecked, not down. Which servers, and how to reach them, is in
 `~/.config/deck/hosts.toml`, outside this repository (deck-status's header shows the format).
 
@@ -466,7 +482,10 @@ HTTPS. Offline, servers show as unchecked, not down. Which servers, and how to r
   the tile lists any that aren't).
 - **Updates and rollback.** `sudo emerge` ([usr-local/sbin/emerge](usr-local/sbin/emerge)) first
   takes a read-only snapshot of `@`, `/.snapshots/@.pre-emerge.<time>` (the last 5 kept; btrbk
-  ignores them), unless the command changes nothing (`-p`, `--search`, `--sync`, ...). Before
+  ignores them), unless the command changes nothing (`-p`, `--search`, `--sync`, ...) or only
+  downloads (`--fetchonly`). An emerge that merged nothing (`--ask` declined, nothing to do)
+  deletes its snapshot again, so the 5 are all from before a real change. `/usr/bin/emerge` starts
+  in `/var/tmp`, not where you are, unless an argument is a relative path to an ebuild. Before
   that, the **scan gate**: what it would install is scanned for malicious code (`deck patches scan
   gate`, as the user, an AI agent reading what an automatic triage flags; tools/deck/README.md,
   "Scan for malicious code"), and the emerge is refused when anything is flagged or could not be
@@ -501,7 +520,9 @@ HTTPS. Offline, servers show as unchecked, not down. Which servers, and how to r
   `fwupd-refresh.timer` stays disabled: its DynamicUser sandbox gets "Failed to connect to daemon:
   The connection is closed" from the system bus.
 - **Scrub.** [btrfs-scrub.timer](etc/systemd/system/btrfs-scrub.timer) verifies every checksum on
-  `/` monthly; uncorrectable errors leave the unit failed.
+  `/` monthly; uncorrectable errors leave the unit failed. For another filesystem there is
+  [btrfs-scrub@.timer](etc/systemd/system/btrfs-scrub@.timer), one instance per mount point:
+  `systemctl enable --now "btrfs-scrub@$(systemd-escape --path /srv/data).timer"`.
 - **Disk health** ([deck-health.timer](etc/systemd/system/deck-health.timer), 2 min after boot and
   every 6 h; [check.py](etc/deck-health/check.py)): btrfs's on-disk error counters, disk errors in
   the kernel log, and the SSD's health log (`sys-apps/nvme-cli`): critical warning, spare, wear,
@@ -509,7 +530,15 @@ HTTPS. Offline, servers show as unchecked, not down. Which servers, and how to r
   boot ended in a crash, reset or power loss: the panel says so for a week (until seen) and a
   scrub starts. btrfs needs no repair pass after a crash (it mounts at its last commit); the offline
   `btrfs check --readonly` is `deck mount check` in the recovery system. Report:
-  `/var/lib/deck-health/report`.
+  `/var/lib/deck-health/report`. The SSD is found, not named: every NVMe controller, the root
+  filesystem's first; a machine without one skips those checks.
+- **Another machine.** What these scripts assume about deck is in the optional
+  `/etc/deck/host.conf` (lines `KEY=value`; deck has none, the defaults are deck's):
+  `BTRFS_POOL=/mnt/btr_pool` and `DECK_USER=<name>` (the emerge wrapper: where the btrfs top
+  level is mounted, and whose scan gate runs for an emerge started without sudo),
+  `NVME="/dev/nvme0"` and `ESP=/efi` (the health check; empty for none),
+  `DEPLOY_UNTRACKED_IGNORE="<glob> ..."` (`./deploy.sh <host> untracked`). The vitals log finds
+  the mains supply and the battery by their type and leaves out what a machine doesn't have.
 - **ESP copy.** The EFI system partition is FAT (no checksums) and holds every kernel and the
   recovery's UKI. The health check mirrors its files to `/var/lib/deck-health/esp` (root only),
   inside `@`, so the hourly snapshots keep its history, with its identity in `esp.blkid`. To
@@ -518,12 +547,15 @@ HTTPS. Offline, servers show as unchecked, not down. Which servers, and how to r
   when it opens; `deck-attention --details` explains):
   - work only on deck: a repository in `~/src` with uncommitted changes or commits on no remote,
     for more than a day;
-  - config drift: files that differ between deck and this repo (`./deploy.sh deck`);
+  - config drift: files that differ between deck and this repo, in content or in being
+    executable (the files of `./deploy.sh deck list`, so with what a host inherits and the
+    recovery's files; `./deploy.sh deck` shows the differences);
   - programs that dumped core in the last 3 days (`coredumpctl`; dumps capped at 2 GiB by
     [coredump.conf.d/deck.conf](etc/systemd/coredump.conf.d/deck.conf)), and an unclean shutdown
     in the last week. These are events: opening the details marks them as seen and the tile drops
     them until a newer one (`~/.local/state/deck-attention/seen`);
   - the Portage lines above;
+  - a check that fails shows as "check failed: <name>", and the others still show;
   - `/` or `/efi` over 85% full.
 - **Recovery system.** [deck-recovery-update.timer](etc/systemd/system/deck-recovery-update.timer)
   updates the recovery on p3 about monthly, on AC; see

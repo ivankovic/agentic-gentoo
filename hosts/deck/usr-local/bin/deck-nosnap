@@ -15,7 +15,18 @@ set -euo pipefail
 
 is_subvolume() { [[ $(stat -c %i "$1") == 256 ]]; }
 
-(($#)) || { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; }
+
+# Options end at "--" or the first folder; a folder whose name starts with "-" goes after "--".
+while (($#)); do
+  case $1 in
+    -h | --help) usage; exit 0 ;;
+    --) shift; break ;;
+    -*) echo "deck-nosnap: unknown option $1 (deck-nosnap [--] DIR...)" >&2; exit 2 ;;
+    *) break ;;
+  esac
+done
+(($#)) || { usage; exit 2; }
 for dir in "$@"; do
   dir=${dir%/}
   # A symlink is never followed: it could lead anywhere (the jail's home is the jail's to change).
@@ -23,6 +34,8 @@ for dir in "$@"; do
     echo "deck-nosnap: $dir is a symlink; left alone" >&2
     continue
   fi
+  # After "--" a name may start with "-": as a path, btrfs, cp and mv don't read it as an option.
+  [[ $dir == -* ]] && dir=./$dir
   if [[ ! -d $dir ]]; then
     btrfs subvolume create "$dir" >/dev/null
     echo "deck-nosnap: $dir created as a subvolume"

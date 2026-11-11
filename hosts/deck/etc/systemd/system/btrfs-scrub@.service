@@ -1,0 +1,14 @@
+# btrfs-scrub.service for any mounted btrfs filesystem: the instance is its mount point, escaped
+# (systemd-escape --path /srv/data gives srv-data; / is "-"). Monthly through btrfs-scrub@.timer:
+#   systemctl enable --now "btrfs-scrub@$(systemd-escape --path /srv/data).timer"
+# Reads every block and verifies its checksum. Exits 3 on uncorrectable errors, which leaves the
+# unit failed. One instance per filesystem, not per subvolume mounted from it.
+[Unit]
+Description=Verify btrfs checksums on %f
+ConditionPathIsMountPoint=%f
+
+[Service]
+Type=oneshot
+Nice=19
+IOSchedulingClass=idle
+ExecStart=/usr/bin/btrfs scrub start -B %f
