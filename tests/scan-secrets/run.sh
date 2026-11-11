@@ -300,7 +300,7 @@ d = sys.argv[1]
 Image.new("RGB", (4, 4)).save(d + "/plain.png")
 info = PngImagePlugin.PngInfo(); info.add_text("Author", "someone")
 Image.new("RGB", (4, 4)).save(d + "/text.png", pnginfo=info)
-im = Image.new("RGB", (4, 4)); exif = im.getexif(); exif.get_ifd(0x8825)[1] = "N"; exif.get_ifd(0x8825)[2] = (47.0, 22.0, 0.0)
+im = Image.new("RGB", (4, 4)); exif = im.getexif(); exif[0x8825] = {1: "N", 2: (47.0, 22.0, 0.0)}
 im.save(d + "/gps.jpg", exif=exif)
 PY
   stage plain.png <"$work/plain.png"
