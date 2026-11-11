@@ -25,6 +25,7 @@ dev-texlive/texlive-pictures
 dev-texlive/texlive-publishers
 dev-util/cargo-audit
 dev-util/cargo-nextest
+dev-util/ghr
 dev-util/github-cli
 dev-util/gitleaks
 dev-util/omnidiff
