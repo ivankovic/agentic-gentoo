@@ -18,6 +18,7 @@ import argparse
 import json
 import math
 import random
+import sys
 import time
 from pathlib import Path
 
@@ -28,8 +29,6 @@ from torch.utils.checkpoint import checkpoint
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 CHUNK = 256  # tokens per slice of the output layer: the full-vocabulary scores never exist at once
-ASSISTANT = "<|im_start|>assistant\n"
-END = "<|im_end|>"
 EMPTY_THINK = "<think>\n\n</think>\n\n"
 
 
@@ -45,23 +44,55 @@ def as_template(messages):
     return out
 
 
-def encode(tok, rec, max_tokens):
-    """Token ids and the mask of the tokens to learn: each assistant turn's text up to and with its
-    end marker. The empty thinking block is left out, since the prompt supplies it at inference."""
+def markers(tok):
+    """What the tokenizer's chat template puts before an assistant turn's text and after it
+    ("<|im_start|>assistant\\n" and "<|im_end|>" in ChatML), read off a two-turn conversation
+    rendered with it, so another template's turns are found as well."""
+    user, answer = "DRILL-PROBE-QUESTION", "DRILL-PROBE-ANSWER"
+    text = tok.apply_chat_template([{"role": "user", "content": user}, {"role": "assistant", "content": answer}],
+                                   tokenize=False, enable_thinking=False)
+    u, a = text.find(user), text.find(answer)
+    if u < 0 or a < u:
+        raise ValueError("the chat template does not render a user turn and then an assistant turn as they are")
+    end = text[a + len(answer):].strip()
+    start = text[u + len(user):a]
+    if end and start.startswith(end):   # the user turn's own end marker
+        start = start[len(end):]
+    start = start.lstrip().removesuffix(EMPTY_THINK)   # learned() steps over the block itself
+    if not start or not end:
+        raise ValueError("the chat template marks no start or no end of an assistant turn: "
+                         f"{start!r} before its text, {end!r} after")
+    return start, end
+
+
+def learned(tok, rec, max_tokens, start, end):
+    """Token ids and, for each, whether it is learned: each assistant turn's text up to and with its
+    end marker. The empty thinking block is left out, since the prompt supplies it at inference.
+    start and end are markers(tok). A conversation in which not every assistant turn is found is an
+    error: its tokens would silently not be learned."""
     text = tok.apply_chat_template(as_template(rec["messages"]), tools=rec["tools"], tokenize=False,
                                    enable_thinking=False)
     spans, i = [], 0
-    while (s := text.find(ASSISTANT, i)) >= 0:
-        s += len(ASSISTANT)
+    while (s := text.find(start, i)) >= 0:
+        s += len(start)
         if text.startswith(EMPTY_THINK, s):
             s += len(EMPTY_THINK)
-        e = text.find(END, s)
-        e = len(text) if e < 0 else e + len(END)
+        e = text.find(end, s)
+        e = len(text) if e < 0 else e + len(end)
         spans.append((s, e))
         i = e
+    turns = sum(1 for m in rec["messages"] if m["role"] == "assistant")
+    if len(spans) != turns:
+        raise ValueError(f"{rec.get('drill')} seed {rec.get('seed')}: {turns} assistant turns, but the chat "
+                         f"template's marker {start!r} is found {len(spans)} times in the rendered text")
     enc = tok(text, return_offsets_mapping=True, add_special_tokens=False)
     ids, offsets = enc["input_ids"][:max_tokens], enc["offset_mapping"][:max_tokens]
-    learn = [any(s <= a and b <= e for s, e in spans) and b > a for a, b in offsets]
+    return ids, [any(s <= a and b <= e for s, e in spans) and b > a for a, b in offsets]
+
+
+def encode(tok, rec, max_tokens, start, end):
+    """learned() as tensors."""
+    ids, learn = learned(tok, rec, max_tokens, start, end)
     return torch.tensor(ids), torch.tensor(learn)
 
 
@@ -122,11 +153,19 @@ def main():
 
     tok = AutoTokenizer.from_pretrained(args.model)
     recs = [json.loads(l) for l in open(args.train)]
-    train = [encode(tok, r, args.max_tokens) for r in recs if r["drill"] not in args.hold_out]
-    val = [encode(tok, r, args.max_tokens) for r in recs if r["drill"] in args.hold_out]
+    try:
+        start, end = markers(tok)
+        train = [encode(tok, r, args.max_tokens, start, end) for r in recs if r["drill"] not in args.hold_out]
+        val = [encode(tok, r, args.max_tokens, start, end) for r in recs if r["drill"] in args.hold_out]
+    except ValueError as e:
+        sys.exit(f"train: {e}")
     note(event="data", train=len(train), val=len(val), hold_out=args.hold_out,
          train_tokens=sum(len(i) for i, _ in train), learned_tokens=sum(int(m.sum()) for _, m in train),
          **{k: v for k, v in vars(args).items() if k not in ("train", "out", "hold_out")})
+
+    if not any(int(m[1:].sum()) for _, m in train):
+        sys.exit("train: no tokens to learn: no assistant turn in the training examples (all held out, "
+                 "or cut off by --max-tokens)")
 
     model = load(args.model, args.qlora, args.rank)
     params = [p for p in model.parameters() if p.requires_grad]
@@ -156,6 +195,9 @@ def main():
         for b in range(0, len(order), args.accumulate):
             batch = [train[i] for i in order[b:b + args.accumulate]]
             n = sum(int(m[1:].sum()) for _, m in batch)
+            if n == 0:   # nothing to learn in these examples: no loss to divide, no step to take
+                note(event="skip", epoch=epoch, examples=len(batch))
+                continue
             t, total = time.time(), 0.0
             for ids, learn in batch:
                 loss = loss_sum(model, ids, learn) / n  # every learned token weighs the same

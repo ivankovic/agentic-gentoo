@@ -16,7 +16,6 @@ Results go to DIR/results/<label>-<time>.jsonl, one line per drill with the tran
 """
 import argparse
 import json
-import os
 import random
 import shlex
 import socket
@@ -30,10 +29,16 @@ import urllib.request
 from pathlib import Path
 from string import Template
 
+import modelchat
+
 HERE = Path(__file__).resolve().parent
 OUTPUT_LIMIT = 3000   # characters of a command's output the model sees: the head and the tail
 COMMAND_TIMEOUT = 300
+KILL_AFTER = 10       # seconds the machine's own timeout waits between TERM and KILL
 MAX_STEPS = 30
+# Printed after a drill's script with its exit status: the status of the ssh command is then the
+# harness's alone (ssh's 255, the time limit's 124), and the script's own may be any number.
+STATUS_MARK = "[drill script status] "
 
 SYSTEM_PROMPT = """\
 You are the system administrator of a Gentoo Linux machine (systemd, Portage). You have a root \
@@ -103,19 +108,50 @@ class Machine:
         raise TimeoutError("no SSH")
 
     def ssh(self, command, timeout=COMMAND_TIMEOUT, stdin=None):
+        # The time limit is the machine's own (timeout ends the command and what it started there,
+        # with status 124), so a command that ran out of time is not still running during the next
+        # one. The limit on ssh itself is only for a machine that no longer answers.
         args = ["ssh", "-q", "-i", str(self.image / "key"), "-p", str(self.port),
                 "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
                 "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", "root@127.0.0.1",
-                "TERM=dumb PAGER=cat SYSTEMD_PAGER=cat SYSTEMD_COLORS=0 bash -lc " + shlex.quote(command)]
+                "TERM=dumb PAGER=cat SYSTEMD_PAGER=cat SYSTEMD_COLORS=0 "
+                f"timeout -k {KILL_AFTER} {timeout} bash -lc " + shlex.quote(command)]
         try:
             return subprocess.run(args, input=stdin, capture_output=True, text=True, errors="replace",
-                                  timeout=timeout)
+                                  timeout=timeout + KILL_AFTER + 15)
         except subprocess.TimeoutExpired as e:
             out = (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
             return subprocess.CompletedProcess(args, 124, out, f"timed out after {timeout} s")
 
     def put(self, path: str, content: str, mode="700"):
-        self.ssh(f"install -D -m {mode} /dev/stdin {shlex.quote(path)}", stdin=content)
+        r = self.ssh(f"install -D -m {mode} /dev/stdin {shlex.quote(path)}", stdin=content)
+        if r.returncode != 0:
+            raise HarnessError(f"cannot write {path}: exit status {r.returncode}: {r.stderr.strip()[-200:]}")
+
+    def script(self, path, exports="", shell=""):
+        """Runs one of a drill's scripts, put at path, and removes it. The result carries the
+        script's own exit status, the caller's to judge; a script that is not there or did not
+        run to its end (ssh failed, the time limit) is the harness's failure."""
+        q = shlex.quote(path)
+        r = self.ssh(f"if [ ! -x {q} ]; then echo {shlex.quote(STATUS_MARK + 'missing')}; exit 0; fi; "
+                     f"{exports}{shell}{q}; s=$?; rm -f {q}; echo; echo {shlex.quote(STATUS_MARK)}$s")
+        status, out = script_status(path, r.returncode, r.stdout, r.stderr)
+        return subprocess.CompletedProcess(r.args, status, out, r.stderr)
+
+    # What break.sh keeps for check.sh (lib.sh's remember, and the drills' own /var/lib/.drill-*
+    # files) does not stay in the machine, where the repair could read or change it: the runner
+    # takes it out after break.sh and puts its own copy back for a check.
+    def take_state(self):
+        r = self.ssh("set -o pipefail; cd /var/lib && find . -maxdepth 1 -name '.drill-*' -print0 | "
+                     "tar --null -T - -czpf - | base64 -w0 && rm -rf /var/lib/.drill-*")
+        if r.returncode != 0:
+            raise HarnessError(f"cannot fetch the drill's state: exit status {r.returncode}: {r.stderr.strip()[-200:]}")
+        return r.stdout
+
+    def give_state(self, state):
+        r = self.ssh("set -o pipefail; rm -rf /var/lib/.drill-*; base64 -d | tar -C /var/lib -xzpf -", stdin=state)
+        if r.returncode != 0:
+            raise HarnessError(f"cannot restore the drill's state: exit status {r.returncode}: {r.stderr.strip()[-200:]}")
 
     def reboot(self):
         self.ssh("systemctl reboot", timeout=10)
@@ -129,10 +165,24 @@ class Machine:
 
 
 def clip(text):
-    if len(text) <= OUTPUT_LIMIT:
-        return text
-    half = OUTPUT_LIMIT // 2
-    return f"{text[:half]}\n[... {len(text) - OUTPUT_LIMIT} characters left out ...]\n{text[-half:]}"
+    return modelchat.clip(text, OUTPUT_LIMIT)
+
+
+class HarnessError(Exception):
+    """The runner could not do its own part (copy a file in, run a script to its end): an error,
+    not a verdict on the drill or on the model."""
+
+
+def script_status(name, returncode, stdout, stderr=""):
+    """A drill script's own exit status and its output, from what ssh returned for it. Raises
+    HarnessError when that says nothing about the script: ssh or the time limit ended it (ssh's
+    status is not 0, or the status line is missing) or the script was not there."""
+    out, mark, status = stdout.rpartition(STATUS_MARK)
+    status = status.strip()
+    if returncode != 0 or not mark or not status.isdigit():
+        why = "not there" if mark and status == "missing" else f"did not finish (ssh exit status {returncode})"
+        raise HarnessError(f"{name} {why}: {clip(stdout + stderr)[-300:]}")
+    return int(status), out.removesuffix("\n")
 
 
 class ContextFull(Exception):
@@ -146,11 +196,8 @@ class BadToolCall(Exception):
 def chat(url, messages, think):
     body = {"messages": messages, "tools": TOOLS, "temperature": 0.2, "max_tokens": 4096,
             "chat_template_kwargs": {"enable_thinking": think}}
-    req = urllib.request.Request(url.rstrip("/") + "/v1/chat/completions", json.dumps(body).encode(),
-                                 {"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=1800) as r:
-            return json.load(r)
+        return modelchat.post(url, body, timeout=1800)
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")
         if "exceeds the available context" in body or "exceed_context_size" in body:
@@ -158,6 +205,18 @@ def chat(url, messages, think):
         if "Failed to parse tool call" in body:
             raise BadToolCall() from None
         raise RuntimeError(f"HTTP {e.code}: {body[:300]}") from None
+
+
+def tool_command(call):
+    """The command of a `run` tool call. ValueError says what is wrong with a malformed one: no
+    arguments, arguments that are not JSON, or not an object with a string "command"."""
+    try:
+        arguments = json.loads(call["function"]["arguments"])
+    except (KeyError, TypeError, json.JSONDecodeError) as e:
+        raise ValueError(f"{type(e).__name__}: {e}") from None
+    if not isinstance(arguments, dict) or not isinstance(arguments.get("command"), str):
+        raise ValueError('the arguments must be a JSON object with a string "command"')
+    return arguments["command"]
 
 
 def agent(machine, task, url, think, memory=None):
@@ -194,13 +253,16 @@ def agent(machine, task, url, think, memory=None):
             return msg.get("content") or "", transcript, tokens, False
         for call in calls:
             command = ""
+            # A malformed call is the model's mistake: it gets the error back as the tool's result.
             try:
-                command = json.loads(call["function"]["arguments"])["command"]
+                command = tool_command(call)
+            except ValueError as e:
+                result = f"bad tool call: {e}"
+            else:
                 r = machine.ssh(command)
                 result = clip(r.stdout + r.stderr) + f"\n[exit code {r.returncode}]"
-            except (KeyError, json.JSONDecodeError) as e:
-                result = f"bad tool call: {e}"
-            messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": result})
+            call_id = call.get("id", "") if isinstance(call, dict) else ""
+            messages.append({"role": "tool", "tool_call_id": call_id, "content": result})
             transcript.append(messages[-1])
             history.append((command, result))
     return "", transcript, tokens, "steps"
@@ -237,11 +299,23 @@ def script(drill, name):
     return f"{first}\n{(HERE / 'lib.sh').read_text()}\n{rest}"
 
 
+def image_info(image: Path):
+    """What build.sh recorded about the image (the base images' digests, the build date), or None
+    for an image built before it did."""
+    try:
+        return json.loads((image / "image.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def run_drill(drill: Path, args, seed):
-    meta = tomllib.loads((drill / "drill.toml").read_text())
-    task, env = variant(meta, drill.name, seed)
-    rec = {"drill": drill.name, "category": meta["category"], "label": args.label, "seed": seed,
-           "vars": env, "task": task}
+    rec = {"drill": drill.name, "label": args.label, "seed": seed, "image": args.image_info}
+    try:
+        meta = tomllib.loads((drill / "drill.toml").read_text())
+        task, env = variant(meta, drill.name, seed)
+        rec.update(category=meta["category"], vars=env, task=task)
+    except Exception as e:  # a drill that cannot be read is reported, and the run goes on
+        return {**rec, "result": "error", "why": f"drill.toml: {type(e).__name__}: {e}"}
     # The scripts run with the variant's variables in their environment.
     exports = "export " + " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items()) + "; " if env else ""
     t0 = time.time()
@@ -250,37 +324,42 @@ def run_drill(drill: Path, args, seed):
         try:
             m.boot()
             m.put("/run/drill/break.sh", script(drill, "break.sh"))
-            r = m.ssh(exports + "/run/drill/break.sh && rm -f /run/drill/break.sh")
+            # bash -e: a break that fails half way stops there, and the drill is invalid.
+            r = m.script("/run/drill/break.sh", exports, "bash -e ")
             if r.returncode != 0:
                 return {**rec, "result": "invalid", "why": "break.sh failed: " + clip(r.stdout + r.stderr)}
+            state = m.take_state()
             if meta.get("reboot_after_break"):
                 m.reboot()
             m.put("/run/drill/check.sh", script(drill, "check.sh"))
-            if m.ssh(exports + "/run/drill/check.sh").returncode == 0:
+            m.give_state(state)
+            if m.script("/run/drill/check.sh", exports).returncode == 0:
                 return {**rec, "result": "invalid", "why": "check passes before any fix"}
-            m.ssh("rm -f /run/drill/check.sh")
 
             if args.reference:
+                # fix.sh may read the state (the address a hosts entry had); a model's repair may not.
                 m.put("/run/drill/fix.sh", script(drill, "fix.sh"))
-                r = m.ssh(exports + "/run/drill/fix.sh; s=$?; rm -f /run/drill/fix.sh; exit $s")
+                r = m.script("/run/drill/fix.sh", exports)
                 answer, transcript, tokens, gave_up = (r.stdout + r.stderr)[-2000:], None, None, False
             else:
+                m.ssh("rm -rf /var/lib/.drill-*")
                 answer, transcript, tokens, gave_up = agent(m, task, args.model, args.think, args.memory)
             rec["fix_seconds"] = round(time.time() - t0)
+            rec.update(answer=answer, gave_up=gave_up, tokens=tokens, transcript=transcript,
+                       steps=sum(1 for x in transcript or [] if x["role"] == "tool"))
 
             if meta.get("reboot_before_check"):
                 try:
                     m.reboot()
                 except (TimeoutError, RuntimeError) as e:
-                    return {**rec, "result": "fail", "why": f"no SSH after reboot: {e}", "answer": answer,
-                            "transcript": transcript, "tokens": tokens}
-            # check.sh sees the final answer, for drills that ask a question.
+                    return {**rec, "result": "fail", "why": f"no SSH after reboot: {e}"}
+            # check.sh sees the final answer, for drills that ask a question, and the runner's copy
+            # of the state, whatever became of those files in the machine.
             m.put("/run/drill/answer", answer, mode="600")
             m.put("/run/drill/check.sh", script(drill, "check.sh"))
-            c = m.ssh(exports + "/run/drill/check.sh")
-            rec.update(result="pass" if c.returncode == 0 else "fail", check=clip(c.stdout + c.stderr),
-                       answer=answer, gave_up=gave_up, tokens=tokens, transcript=transcript,
-                       steps=sum(1 for x in transcript or [] if x["role"] == "tool"))
+            m.give_state(state)
+            c = m.script("/run/drill/check.sh", exports)
+            rec.update(result="pass" if c.returncode == 0 else "fail", check=clip(c.stdout + c.stderr))
             return rec
         except Exception as e:  # a drill that cannot run is reported, not fatal to the run
             return {**rec, "result": "error", "why": f"{type(e).__name__}: {e}"}
@@ -303,6 +382,7 @@ def main():
     p.add_argument("drills", nargs="*", help="drill names (default: all)")
     args = p.parse_args()
     args.image = args.image.resolve()
+    args.image_info = image_info(args.image)
     args.label = args.label or ("reference" if args.reference else "model")
     if args.memory:
         if not args.memory_url:

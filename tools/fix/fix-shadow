@@ -18,12 +18,15 @@ This only measures. The main agent's sessions are not training data: its provide
 allow that, and the measure is only honest while the model has not seen them.
 
 Results: $XDG_STATE_HOME/fix/shadow.jsonl (default ~/.local/state/fix/shadow.jsonl), one line per
-command; commands already there are skipped.
+command; commands already there are skipped. A command the server failed on (an HTTP error, a
+prompt too long for its context) is not a comparison: it goes to shadow-errors.jsonl next to the
+results and is asked again on later runs, three times at most.
 """
 import argparse
 import json
 import os
 import re
+import shlex
 import socket
 import subprocess
 import sys
@@ -32,17 +35,78 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+# clip and post are the drills' (tools/drills/modelchat.py): installed beside this script's Python
+# modules, or next door in a checkout.
+if (_drills := Path(__file__).resolve().parent.parent / "drills" / "modelchat.py").is_file():
+    sys.path.insert(0, str(_drills.parent))
+from modelchat import clip, post  # noqa: E402
+
 STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "fix"
 RESULTS = STATE / "shadow.jsonl"
+ERRORS = STATE / "shadow-errors.jsonl"
+MAX_ATTEMPTS = 3     # times a command is asked before the server's errors on it are final
 
 # Commands that administer a system, as opposed to editing code or reading files.
-SYSADMIN = re.compile(r"""(^|[\s;&|(`'"])(sudo|doas|systemctl|journalctl|emerge|eselect|equery|eix|qlist|
-    qdepends|portageq|emaint|dispatch-conf|etc-update|dmesg|mount|umount|findmnt|lsblk|blkid|fdisk|
-    sfdisk|parted|mkfs\S*|fsck\S*|btrfs|cryptsetup|zramctl|swapon|ip|ss|ping|nmcli|networkctl|
-    resolvectl|iw|useradd|usermod|userdel|groupadd|gpasswd|passwd|chage|chown|chmod|chgrp|df|du|ps|
-    pgrep|pkill|kill|killall|lsof|fuser|dracut|bootctl|ukify|efibootmgr|kernel-install|modprobe|
-    lsmod|sysctl|udevadm|smartctl|nvme|sensors|loginctl|timedatectl|hostnamectl|localectl|
-    coredumpctl|fwupdmgr|crontab|visudo|getent|ssh|rsync|docker|podman)(\s|$)""", re.X)
+SYSADMIN = frozenset("""sudo doas systemctl journalctl emerge eselect equery eix qlist
+    qdepends portageq emaint dispatch-conf etc-update dmesg mount umount findmnt lsblk blkid fdisk
+    sfdisk parted mkfs fsck btrfs cryptsetup zramctl swapon ip ss ping nmcli networkctl
+    resolvectl iw useradd usermod userdel groupadd gpasswd passwd chage chown chmod chgrp df du ps
+    pgrep pkill kill killall lsof fuser dracut bootctl ukify efibootmgr kernel-install modprobe
+    lsmod sysctl udevadm smartctl nvme sensors loginctl timedatectl hostnamectl localectl
+    coredumpctl fwupdmgr crontab visudo getent ssh rsync docker podman""".split())
+# Words before the program that are not it: `env A=b nice -n 5 emerge`, `if ! systemctl ...; then`.
+PREFIXES = frozenset("env time nice ionice nohup setsid exec command builtin timeout if then else elif do while "
+                     "until ! {".split())
+SHELLS = frozenset("sh bash dash zsh".split())
+OPERATORS = "();<>|&\n"
+# A here-document's text, up to the line that ends it: input, not commands.
+HEREDOC = re.compile(r"(?<!<)<<-?\s*(['\"]?)([A-Za-z_]\w*)\1([^\n]*)\n.*?^\s*\2\s*$", re.S | re.M)
+
+
+def programs(command):
+    """The program of each simple command in a command line: the first word after `;`, `&&`,
+    `||`, `|`, a newline or a parenthesis, past variable assignments and prefixes such as env or
+    nice, without its directory. Words inside quotes and the text of here-documents are
+    arguments, never programs, except the command line given to a shell (`bash -c '...'`), which
+    is read the same way. A line the lexer cannot read to its end (an unclosed quote) gives the
+    programs up to there."""
+    lex = shlex.shlex(HEREDOC.sub(r"\3", command), posix=True, punctuation_chars=OPERATORS)
+    lex.whitespace_split = True
+    lex.whitespace = " \t\r"
+    lex.commenters = ""
+    found, first, prefixed, skip, last = [], True, False, False, ""
+    try:
+        for word in lex:
+            if all(c in OPERATORS for c in word):
+                if "<" in word or ">" in word:
+                    skip = True              # a redirection: the next word is its file
+                else:
+                    first, prefixed, last = True, False, ""
+                continue
+            before, last = last, word
+            if skip:
+                skip = False
+            elif before == "-c ":
+                found += programs(word)      # the command line of sh -c
+            elif word == "-c" and before.rsplit("/", 1)[-1] in SHELLS:
+                last = "-c "
+            elif first:
+                if re.fullmatch(r"[A-Za-z_]\w*=.*", word) or word in PREFIXES:
+                    prefixed = prefixed or word in PREFIXES
+                elif prefixed and re.fullmatch(r"-.*|\d+[smhd]?", word):
+                    pass                     # a prefix's own option or number: nice -n 5, timeout 30
+                else:
+                    found.append(word.rsplit("/", 1)[-1])
+                    first = False
+    except ValueError:
+        pass
+    return found
+
+
+def sysadmin(command):
+    """Whether a command line runs a sysadmin program. The program is what counts, not the text:
+    `git commit -m "fix ip parsing"` is not one."""
+    return any(p in SYSADMIN or p.startswith(("mkfs.", "fsck.")) for p in programs(command))
 
 SYSTEM_PROMPT = """\
 You are the system administrator's assistant on a Gentoo Linux machine (systemd, Portage). You see \
@@ -68,11 +132,6 @@ OUTPUT_LIMIT = 1500  # characters of each earlier output: the head and the tail
 TEXT_LIMIT = 2000    # characters of the user's messages
 
 
-def clip(text, limit):
-    if len(text) <= limit:
-        return text
-    half = limit // 2
-    return f"{text[:half]}\n[... {len(text) - limit} characters left out ...]\n{text[-half:]}"
 
 
 # Sources: each yields sessions as (session id, [event]), an event being
@@ -121,7 +180,7 @@ def questions(events):
     """Each sysadmin command with what came before it: the user's last messages, and the commands
     run since the last of them (the work on this request)."""
     for i, ev in enumerate(events):
-        if ev["kind"] != "command" or not SYSADMIN.search(ev["command"]):
+        if ev["kind"] != "command" or not sysadmin(ev["command"]):
             continue
         before = events[:i]
         users = [n for n, e in enumerate(before) if e["kind"] == "user"]
@@ -142,21 +201,37 @@ def messages(users, commands):
     return msgs
 
 
+class ServerError(Exception):
+    """The server gave no answer to this question (an HTTP error, a timeout, a reply that is not
+    a chat completion): nothing is known about what the model would have run."""
+
+
+
+
 def ask(url, msgs):
+    """(command, None), or (None, why) when the model named none; ServerError when the server
+    failed. A server that cannot be reached at all raises URLError: that is not about this
+    question, and ends the run."""
     body = {"messages": msgs, "tools": TOOLS, "temperature": 0.2, "max_tokens": 1024,
             "chat_template_kwargs": {"enable_thinking": False}}
-    req = urllib.request.Request(url.rstrip("/") + "/v1/chat/completions", json.dumps(body).encode(),
-                                 {"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=600) as r:
-            msg = json.load(r)["choices"][0]["message"]
+        msg = post(url, body)["choices"][0]["message"]
     except urllib.error.HTTPError as e:
-        return None, f"HTTP {e.code}: {e.read().decode(errors='replace')[:200]}"
+        raise ServerError(f"HTTP {e.code}: {e.read().decode(errors='replace')[:200]}") from None
+    except TimeoutError:
+        raise ServerError("no answer in time") from None
+    except urllib.error.URLError as e:
+        if isinstance(e.reason, TimeoutError):
+            raise ServerError("no answer in time") from None
+        raise
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as e:
+        raise ServerError(f"not a chat completion: {type(e).__name__}: {e}") from None
     for call in msg.get("tool_calls") or []:
         try:
-            return json.loads(call["function"]["arguments"])["command"], None
-        except (KeyError, json.JSONDecodeError):
+            command = json.loads(call["function"]["arguments"])["command"]
+        except (KeyError, TypeError, json.JSONDecodeError):
             return None, "bad tool call"
+        return (command, None) if isinstance(command, str) else (None, "bad tool call")
     return None, "no command: " + (msg.get("content") or "")[:200]
 
 
@@ -202,41 +277,111 @@ def serve(gguf):
     sys.exit("fix-shadow: llama-server did not come up")
 
 
+def read_lines(path):
+    """The records of a results file. A line that is not a record (a write cut short) is skipped
+    with a warning, not fatal: one bad line must not stop every later run."""
+    if not path.exists():
+        return
+    with path.open(errors="replace") as f:
+        for n, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                rec = None
+            if isinstance(rec, dict) and "id" in rec:
+                yield rec
+            else:
+                print(f"fix-shadow: {path}:{n}: not a record, skipped", file=sys.stderr)
+
+
+def server_error(rec):
+    """A record of the server failing, not of the model: one from shadow-errors.jsonl, or one that
+    earlier versions wrote into the results as match "none" with the HTTP error."""
+    return rec.get("match") in (None, "error") or (
+        rec.get("predicted") is None and str(rec.get("error") or "").startswith("HTTP "))
+
+
+def state(records):
+    """(compared, attempts) from all records read: the ids that have a comparison, and for the
+    others how many times the server failed on them."""
+    compared, attempts = set(), {}
+    for rec in records:
+        if server_error(rec):
+            attempts[rec["id"]] = attempts.get(rec["id"], 0) + 1
+        else:
+            compared.add(rec["id"])
+    return compared, {i: n for i, n in attempts.items() if i not in compared}
+
+
+def append(path, rec):
+    """Adds a record as one whole line, on disk before the next question is asked. After a line
+    that was cut short the record starts on a line of its own."""
+    with path.open("ab+") as f:
+        if f.tell():
+            f.seek(-1, os.SEEK_END)
+            if f.read(1) != b"\n":
+                f.write(b"\n")
+        f.write((json.dumps(rec) + "\n").encode())
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def compare_all(sessions, url, source, limit, compared, attempts, results=None, errors=None):
+    """Asks the model at each sysadmin command not yet compared, and records the comparison, or
+    the server's failure: that command is then asked again on a later run, until MAX_ATTEMPTS
+    failures. Returns (compared, failed) counts."""
+    results, errors = results or RESULTS, errors or ERRORS
+    done = failed = 0
+    for session, events in sessions:
+        for ev, users, commands in questions(events):
+            if ev["id"] in compared or attempts.get(ev["id"], 0) >= MAX_ATTEMPTS or done + failed >= limit:
+                continue
+            rec = {"id": ev["id"], "source": source, "session": session, "time": ev["time"],
+                   "request": clip(users[-1], 300), "actual": ev["command"]}
+            try:
+                predicted, error = ask(url, messages(users, commands))
+            except ServerError as e:
+                append(errors, {**rec, "error": str(e), "match": "error"})
+                attempts[ev["id"]] = attempts.get(ev["id"], 0) + 1
+                failed += 1
+                continue
+            append(results, {**rec, "predicted": predicted, "error": error,
+                             "match": compare(ev["command"], predicted)})
+            compared.add(ev["id"])
+            done += 1
+    return done, failed
+
+
 def run(args):
     proc = None
     url = args.model
     if args.serve:
         proc, url = serve(args.serve)
-    seen = set()
-    if RESULTS.exists():
-        seen = {json.loads(l)["id"] for l in RESULTS.open()}
     STATE.mkdir(parents=True, exist_ok=True)
-    done = 0
+    compared, attempts = state([*read_lines(RESULTS), *read_lines(ERRORS)])
     try:
-        with RESULTS.open("a") as out:
-            for session, events in SOURCES[args.source](args.days):
-                for ev, users, commands in questions(events):
-                    if ev["id"] in seen or done >= args.limit:
-                        continue
-                    predicted, error = ask(url, messages(users, commands))
-                    rec = {"id": ev["id"], "source": args.source, "session": session, "time": ev["time"],
-                           "request": clip(users[-1], 300), "actual": ev["command"],
-                           "predicted": predicted, "error": error, "match": compare(ev["command"], predicted)}
-                    out.write(json.dumps(rec) + "\n")
-                    out.flush()
-                    done += 1
+        done, failed = compare_all(SOURCES[args.source](args.days), url, args.source, args.limit,
+                                   compared, attempts)
+    except urllib.error.URLError as e:
+        sys.exit(f"fix-shadow: the model server cannot be reached: {e.reason}")
     finally:
         if proc:
             proc.terminate()
             proc.wait()
     print(f"fix-shadow: {done} commands compared -> {RESULTS}")
+    if failed:
+        print(f"fix-shadow: {failed} not compared, the server failed -> {ERRORS}", file=sys.stderr)
 
 
 def report(args):
     if not RESULTS.exists():
         sys.exit("fix-shadow: no results yet; run `fix-shadow run` first")
     since = time.strftime("%Y-%m-%d", time.gmtime(time.time() - args.days * 86400))
-    recs = [r for r in map(json.loads, RESULTS.open()) if r["time"][:10] >= since]
+    # A server's failure is not a disagreement: the records earlier versions wrote for one are
+    # left out, as are those in shadow-errors.jsonl.
+    recs = [r for r in read_lines(RESULTS) if not server_error(r) and r.get("time", "")[:10] >= since]
     if not recs:
         sys.exit(f"fix-shadow: nothing in the last {args.days} days")
     counts = {}
@@ -246,6 +391,11 @@ def report(args):
     for k in ("same", "similar", "same-program", "different", "none"):
         n = counts.get(k, 0)
         print(f"  {k:13} {n:5}  {100 * n / len(recs):5.1f} %")
+    _, attempts = state([*read_lines(RESULTS), *read_lines(ERRORS)])
+    if attempts:
+        final = sum(1 for n in attempts.values() if n >= MAX_ATTEMPTS)
+        print(f"  not compared, the server failed: {len(attempts)} commands ({final} given up after "
+              f"{MAX_ATTEMPTS} attempts), see {ERRORS}")
     differ = [r for r in recs if r["match"] in ("different", "none")][-args.show:]
     if differ:
         print("\nWhere they differ (latest):")

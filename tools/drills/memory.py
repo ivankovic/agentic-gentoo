@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Action memory: every command of past repairs as a record, found again by its situation.
 
-    memory.py build RESULTS.jsonl... --out DIR [--min-seed 100] [--hold-out DRILL ...]
+    memory.py build RESULTS.jsonl... --out DIR [--min-seed 100] [--exclude-seeds 0-2,200-202]
+                    [--hold-out DRILL ...]
     memory.py embed DIR --url URL
     memory.py eval DIR TEST.jsonl... --url URL [--k 20]
 
@@ -12,15 +13,19 @@ what it printed and its exit code, whether it changes the system, the next comma
 the repair passed its check. Failed repairs are kept: what did not work is worth knowing.
 
 `build` writes DIR/records.jsonl; `embed` the situations' vectors to DIR/vectors.f32 (an
-OpenAI-compatible /v1/embeddings server, e.g. llama-server --embedding); `eval` replays other
-repairs step by step and asks whether the command actually run next is among the templates that
-the nearest records suggest, against the same suggestion made from template frequency alone.
+OpenAI-compatible /v1/embeddings server, e.g. llama-server --embedding) and, in DIR/vectors.json,
+which records they are of, so vectors of an earlier build are refused and not paired with the
+wrong records; `eval` replays other repairs step by step and asks whether the command actually
+run next is among the templates that the nearest records suggest, against the same suggestion made
+from template frequency alone.
 
-Only runs from seeds >= --min-seed go in, so the evaluation seeds (0-2, 200-202) never do, and
---hold-out drills not at all: those measure whether neighbouring problems carry over.
+Only runs from seeds >= --min-seed go in, and none of the --exclude-seeds: by default the
+evaluation seeds (seeds.py: 0-2, 200-202), which --min-seed alone would not keep out. --hold-out
+drills do not go in at all: those measure whether neighbouring problems carry over.
 """
 import argparse
 import array
+import hashlib
 import json
 import math
 import re
@@ -28,6 +33,8 @@ import sys
 import urllib.request
 from collections import Counter, defaultdict
 from pathlib import Path
+
+from seeds import add_exclude_seeds
 
 HISTORY = 3        # earlier commands in a situation
 OUTPUT_DIGEST = 600  # characters of an output kept: the head and the tail
@@ -123,13 +130,20 @@ def runs(paths):
                 yield r
 
 
+def kept(run, min_seed, exclude_seeds, hold_out):
+    """Whether a run may go into the memory: not an early or an excluded (evaluation) seed, not a
+    held-out drill."""
+    seed = run.get("seed", 0)
+    return seed >= min_seed and seed not in exclude_seeds and run["drill"] not in hold_out
+
+
 def build(args):
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     n = Counter()
     with (out / "records.jsonl").open("w") as f:
         for r in runs(args.results):
-            if r.get("seed", 0) < args.min_seed or r["drill"] in args.hold_out:
+            if not kept(r, args.min_seed, args.exclude_seeds, args.hold_out):
                 continue
             for rec in records(r):
                 f.write(json.dumps(rec) + "\n")
@@ -156,11 +170,41 @@ def embed_texts(url, texts, batch=16):
     return vecs
 
 
+def stamp(recs):
+    """What vectors.json says of the records the vectors were made from: how many, their ids (as a
+    hash, in order) and the dimensions kept."""
+    ids = hashlib.sha256("\n".join(r["id"] for r in recs).encode()).hexdigest()
+    return {"count": len(recs), "ids": ids, "dims": DIMS}
+
+
+def verify(dir_, recs, floats):
+    """Exits unless vectors.f32 (floats numbers long) is of exactly these records: vectors left
+    from before a rebuild would pair each record with another one's situation."""
+    dir_ = Path(dir_)
+    want, why = stamp(recs), None
+    if floats != len(recs) * DIMS:
+        why = f"vectors.f32 holds {floats / DIMS:g} vectors, records.jsonl {len(recs)} records"
+    elif not (dir_ / "vectors.json").exists():
+        # A store embedded before vectors.json existed: only the count can be checked.
+        print(f"memory: {dir_}/vectors.json is missing, so only the number of vectors was checked; "
+              f"`memory.py embed {dir_} --url URL` writes it", file=sys.stderr)
+    else:
+        try:
+            have = json.loads((dir_ / "vectors.json").read_text())
+        except json.JSONDecodeError:
+            have = None
+        if have != want:
+            why = "vectors.json does not match records.jsonl: the records were rebuilt after the vectors"
+    if why:
+        sys.exit(f"memory: {why}. Embed again: memory.py embed {dir_} --url URL")
+
+
 def load(dir_):
     recs = [json.loads(l) for l in open(Path(dir_) / "records.jsonl")]
     flat = array.array("f")
     with open(Path(dir_) / "vectors.f32", "rb") as f:
         flat.frombytes(f.read())
+    verify(dir_, recs, len(flat))
     vecs = [flat[i * DIMS:(i + 1) * DIMS] for i in range(len(recs))]
     return recs, vecs
 
@@ -170,8 +214,11 @@ def embed(args):
     flat = array.array("f")
     for v in embed_texts(args.url, [r["situation"] for r in recs]):
         flat.extend(v)
+    # The stamp goes first and comes back last: an embed cut short leaves vectors without one.
+    (Path(args.dir) / "vectors.json").unlink(missing_ok=True)
     with open(Path(args.dir) / "vectors.f32", "wb") as f:
         flat.tofile(f)
+    (Path(args.dir) / "vectors.json").write_text(json.dumps(stamp(recs)) + "\n")
 
 
 def nearest(vecs, q, k):
@@ -249,6 +296,7 @@ def main():
     b.add_argument("results", nargs="+")
     b.add_argument("--out", required=True)
     b.add_argument("--min-seed", type=int, default=100)
+    add_exclude_seeds(b)
     b.add_argument("--hold-out", nargs="*", default=[], metavar="DRILL")
     e = sub.add_parser("embed")
     e.add_argument("dir")

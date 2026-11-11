@@ -1,7 +1,7 @@
 #!/bin/bash
 useradd -r -s /sbin/nologin "$D_NAME"
 dir=/var/lib/$D_NAME/$SUB
-mkdir -p "$dir" && chown root:root "$dir" && chmod 700 "$dir"
+mkdir -p "$dir"; chown root:root "$dir"; chmod 700 "$dir"
 cat > "/usr/local/bin/$D_NAME" <<X
 #!/bin/bash
 echo "$D_NAME: starting, $SUB directory $dir"

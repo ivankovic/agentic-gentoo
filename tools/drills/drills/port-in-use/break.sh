@@ -6,5 +6,5 @@ mkdir -p /root/test && echo test > /root/test/index.html
 (cd /root/test && exec setsid python3 -m http.server "$SVC_PORT") >/dev/null 2>&1 </dev/null &
 sleep 2
 systemctl daemon-reload; systemctl enable "$SVC_NAME.service" 2>/dev/null
-systemctl start "$SVC_NAME.service" 2>/dev/null; sleep 1
+systemctl start "$SVC_NAME.service" 2>/dev/null || true; sleep 1
 ! systemctl is-active -q "$SVC_NAME.service"

@@ -27,6 +27,8 @@ RDEPEND="
 
 src_install() {
 	python_doscript fix-shadow
+	# What it shares with the drills' runner (tools/drills): clip and the chat request.
+	python_domodule ../drills/modelchat.py
 	systemd_douserunit systemd/fix-shadow.service systemd/fix-shadow.timer
 	dodoc README.md
 }

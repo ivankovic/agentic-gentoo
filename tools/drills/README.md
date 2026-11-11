@@ -18,8 +18,13 @@ reaches it). Each drill boots from a copy-on-write overlay of the same base imag
 away after.
 
 ```sh
-image/build.sh <dir>          # Docker, no root: <dir>/base.raw, vmlinuz, initramfs, key
+image/build.sh <dir>          # Docker, no root: <dir>/base.raw, vmlinuz, initramfs, key, image.json
 ```
+
+`image.json` records the digests of the two base images and the build date, and every result
+carries it, so runs on different builds are not compared unknowingly. `STAGE3_IMAGE` and
+`PORTAGE_IMAGE` (default `gentoo/stage3:systemd`, `gentoo/portage:latest`) take a digest
+(`gentoo/stage3@sha256:...`) to build the same machine again.
 
 Needs Docker, QEMU and `/dev/kvm`. The packages cached for the drills are listed in
 [image/packages.txt](image/packages.txt).
@@ -36,7 +41,12 @@ Needs Docker, QEMU and `/dev/kvm`. The packages cached for the drills are listed
 
 Results go to `<dir>/results/<label>-<time>.jsonl`, one line per drill and variant: pass, fail,
 invalid (the drill itself is wrong) or error, with the variant's seed and variables, the task, the
-model's transcript, its final answer and token counts.
+model's transcript, its final answer and token counts. An error is the harness's: the machine did
+not answer, a script could not be copied in or did not finish in time, the drill could not be
+read. It says nothing about the model or the drill, and the run goes on with the next one.
+
+Seeds 0-2 and 200-202 are the evaluation seeds ([seeds.py](seeds.py)): `memory.py build` and
+`export.py` leave their runs out unless `--exclude-seeds` says otherwise.
 
 The model gets one tool, `run` (a bash command as root, at most 5 minutes, 3,000 characters of
 output: head and tail), the system prompt in [run.py](run.py), and the drill's task, worded the way a
@@ -52,7 +62,7 @@ One directory per drill under [drills/](drills/):
 | File | |
 |---|---|
 | `drill.toml` | `category`, `task` (what the user says; a list of phrasings to pick from), `[vars]`, optionally `reboot_after_break`, `reboot_before_check` |
-| `break.sh` | breaks the machine; run as root, then deleted |
+| `break.sh` | breaks the machine; run as root under `bash -e` (a command that may fail says `\|\| true`), then deleted |
 | `check.sh` | exit 0 when fixed; copied in only to check. The model's final answer is in `/run/drill/answer` |
 | `fix.sh` | the reference repair, which proves the drill can be passed |
 
@@ -66,7 +76,9 @@ them, so `install-package` with `PKG = "@packages"` asks for a different package
 phrasings, in each variant. A variant is reproducible from the drill's name and seed.
 
 [lib.sh](lib.sh) is put into every script after its `#!` line: helpers for web units, package
-state, files that must not change, and checking the final answer.
+state, files that must not change, and checking the final answer. What `break.sh` keeps for the
+check (`remember`, or its own files named `/var/lib/.drill-*`) is taken out of the machine before
+the model starts and put back, from the runner's copy, for `check.sh`.
 
 A check tests the outcome, not the commands: any repair that works passes. Checks also test that
 nothing else was damaged (other packages, the user's files, unrelated configuration), and for

@@ -25,7 +25,8 @@ fix-shadow report                                        # agreement over the la
 It reads the main agent's sessions through a **source** that turns its log into a neutral trace:
 what the user asked, and each command with its output. `claude-code` reads Claude Code's
 `~/.claude/projects`; another agent needs only another source. For every sysadmin command (systemd,
-Portage, disks, users, processes, networking, ssh), the local model gets the user's last messages
+Portage, disks, users, processes, networking, ssh; by the programs the command line runs, not by
+words in its arguments), the local model gets the user's last messages
 and the commands run for the current request with their output, and names its next command.
 
 Each comparison is one of: **same** (after dropping `sudo` and a leading `cd`), **similar** (same
@@ -33,7 +34,9 @@ program and subcommand: `systemctl restart`), **same-program**, **different**, o
 command). A different command is not necessarily a wrong one; `report` lists the latest
 differences to read.
 
-Results: `~/.local/state/fix/shadow.jsonl`. Commands already compared are skipped.
+Results: `~/.local/state/fix/shadow.jsonl`. Commands already compared are skipped. A command the
+model server failed on (an HTTP error, a prompt longer than its context) is not a comparison: it is
+noted in `shadow-errors.jsonl` and asked again on later runs, three times at most.
 
 **Only a measure.** The main agent's sessions are not used as training data: its provider's terms
 may not allow that, and the measure stays honest only while the model has not seen them.

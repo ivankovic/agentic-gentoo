@@ -1,4 +1,5 @@
 # Shared by the drills' scripts: the runner puts it into each one after its #! line.
+# break.sh runs under bash -e: a command there that may fail says so with `|| true`.
 
 # web_unit FILE DESC DIR PORT [PYTHON [EXTRA]]: a unit serving DIR with python3's http.server.
 web_unit() {
@@ -27,6 +28,8 @@ serves() {
 installed() { qlist -I "$1" | grep -q .; }
 in_world() { grep -qx "$1" /var/lib/portage/world; }
 # remember NAME FILE...: record the files' contents; unchanged NAME: they still match.
+# The runner takes /var/lib/.drill-* out of the machine after break.sh and puts its own copy back
+# for check.sh, so a repair neither sees which files are compared nor can change the record.
 remember() { local n=$1; shift; sha256sum "$@" > "/var/lib/.drill-$n"; }
 unchanged() { sha256sum -c --quiet "/var/lib/.drill-$1" >/dev/null 2>&1; }
 # answer_has REGEX...: the final answer matches each (case-insensitive extended regex).
