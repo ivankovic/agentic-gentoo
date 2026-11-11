@@ -1,6 +1,6 @@
 # Wakeup latency of an ordinary task: sleep 2 ms, measure how late it wakes. Stops on SIGTERM and
 # prints p50/p99/p99.9/max in microseconds as JSON.
-import json, signal, sys, time
+import json, signal, time
 lat, run = [], True
 def stop(*_):
     global run

@@ -1,0 +1,33 @@
+# Weekly, and when the overlay changes: the local overlay checked in a Gentoo container (pkgcheck:
+# ebuild errors, Manifests that don't match). Building the live ebuilds is left out: a Rust
+# toolchain a run.
+name: gentoo
+on:
+  push:
+    branches: [main]
+    paths: ["hosts/deck/overlay/**", ".github/workflows/gentoo.yml"]
+  pull_request:
+    paths: ["hosts/deck/overlay/**"]
+  schedule:
+    - cron: "43 5 * * 1"
+permissions:
+  contents: read
+
+jobs:
+  overlay:
+    runs-on: ubuntu-24.04
+    container: gentoo/stage3:latest
+    steps:
+      - name: The Gentoo repository and pkgcheck
+        run: |
+          emerge-webrsync --quiet
+          getuto
+          emerge --quiet --getbinpkg --usepkg dev-util/pkgcheck dev-vcs/git
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: pkgcheck
+        run: |
+          mkdir -p /etc/portage/repos.conf
+          printf '[local]\nlocation = %s/hosts/deck/overlay\n' "$PWD" > /etc/portage/repos.conf/local.conf
+          cd hosts/deck/overlay && pkgcheck scan --exit error

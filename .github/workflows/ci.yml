@@ -1,0 +1,110 @@
+# Every push and pull request: the tests the repository has (tests/, the two Rust crates), the
+# secret and private-detail scan over the whole history, and lint. Nothing here has a secret, and
+# pull requests from forks run with a read-only token. Actions are pinned by commit.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 5 * * 1" # Mondays: new advisories and scanner rules, without a push
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [tools/deck, tools/mmm]
+    defaults:
+      run:
+        working-directory: ${{ matrix.crate }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsqlite3-dev
+      - run: rustup toolchain install stable --profile minimal --component clippy,rustfmt && rustup default stable
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ matrix.crate }}/target
+          key: cargo-${{ matrix.crate }}-${{ hashFiles(format('{0}/Cargo.lock', matrix.crate)) }}
+      # tools/deck has never been through rustfmt as a whole; mmm has.
+      - if: matrix.crate == 'tools/mmm'
+        run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+
+  scripts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends python3-pil
+      - name: Shell syntax
+        run: |
+          git ls-files -z | xargs -0 grep -lIE '^#!.*\b(ba)?sh\b' -- | while read -r f; do
+            head -n1 "$f" | grep -qE '^#!.*\b(ba)?sh\b' && { bash -n "$f" || exit 1; }
+          done
+      - name: Python syntax and names
+        run: |
+          pipx install ruff
+          { git ls-files '*.py'; git ls-files -z | xargs -0 grep -lIE '^#!.*python' --; } | sort -u |
+            xargs ruff check --isolated --select F,E9
+      - name: Script tests
+        run: |
+          for d in tests/*/; do
+            if [ -f "$d/run.sh" ]; then bash "$d/run.sh"; else python3 -m unittest discover -q -s "$d"; fi
+          done
+
+  leaks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends python3-pil
+      - name: gitleaks
+        run: |
+          curl -fsSLo gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks.tar.gz" | sha256sum -c
+          mkdir -p "$HOME/bin" && tar -xzf gitleaks.tar.gz -C "$HOME/bin" gitleaks && rm gitleaks.tar.gz
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+      # The repository's own scanner (with gitleaks, now on the PATH), over every commit: what a
+      # push with --no-verify, or from a clone without the hooks, would have skipped.
+      - run: .githooks/scan-secrets --range HEAD
+
+  lint:
+    # Advisory until what is there is cleared: shellcheck has never been run over these scripts.
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: |
+          git ls-files -z | xargs -0 grep -lIE '^#!.*\b(ba)?sh\b' -- | while read -r f; do
+            head -n1 "$f" | grep -qE '^#!.*\b(ba)?sh\b' && echo "$f"
+          done | xargs shellcheck --severity=warning
+
+  advisories:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-audit
+      - run: cargo audit --file tools/deck/Cargo.lock
+      - run: cargo audit --file tools/mmm/Cargo.lock
