@@ -29,5 +29,7 @@ jobs:
       - name: pkgcheck
         run: |
           mkdir -p /etc/portage/repos.conf
+          # pkgcheck reads only /etc/portage/repos.conf once it is there: the Gentoo repository too.
+          printf '[DEFAULT]\nmain-repo = gentoo\n\n[gentoo]\nlocation = /var/db/repos/gentoo\n' > /etc/portage/repos.conf/gentoo.conf
           printf '[local]\nlocation = %s/hosts/deck/overlay\n' "$PWD" > /etc/portage/repos.conf/local.conf
           cd hosts/deck/overlay && pkgcheck scan --exit error
