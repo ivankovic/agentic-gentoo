@@ -34,6 +34,20 @@ url = "https://github.com/hughsie/libxmlb/commit/0fa4ca1e6c845e4f5ae5476d55d5691
 note = "Fixed by upstream before I reported it"
 
 [[patch]]
+id = "dev-util/ghr/0001-terminal-theme.patch"
+upstream = "https://github.com/chenyukang/ghr"
+
+[[patch.event]]
+at = "2026-11-08T20:07:46+01:00"
+state = "unsent"
+note = """theme_name = "terminal": the terminal's default colors and its 16 ANSI colors, so ghr matches foot's palette. 806 tests pass (in the jail)."""
+
+[[patch.event]]
+at = "2026-11-09T15:02:14+01:00"
+state = "sent"
+url = "https://github.com/chenyukang/ghr/pull/122"
+
+[[patch]]
 id = "games-board/chess-tui/0001-resume-local-and-bot-games.patch"
 upstream = "https://github.com/thomas-mauran/chess-tui"
 
@@ -56,12 +70,3 @@ url = "https://github.com/thomas-mauran/chess-tui/pull/358"
 at = "2026-10-17T22:35:25+02:00"
 state = "accepted"
 url = "https://github.com/thomas-mauran/chess-tui/commit/58b3f5e7e8754de009df76b5a68b67d6eaaa6607"
-
-[[patch]]
-id = "dev-util/ghr/0001-terminal-theme.patch"
-upstream = "https://github.com/chenyukang/ghr"
-
-[[patch.event]]
-at = "2026-11-08T20:07:46+01:00"
-state = "unsent"
-note = "theme_name = \"terminal\": the terminal's default colors and its 16 ANSI colors, so ghr matches foot's palette. 806 tests pass (in the jail)."
