@@ -181,9 +181,44 @@ pub fn show_thread(thread: &str) -> Result<Vec<Message>> {
     parse_show(&out)
 }
 
+/// How deep `notmuch show`'s JSON may nest: a chain of 500 replies, each to the one before, or
+/// as many MIME parts inside one another.
+const MAX_DEPTH: usize = 1024;
+
+/// How deep the arrays and objects of a JSON text nest, brackets inside strings not counted.
+fn depth(json: &[u8]) -> usize {
+    let (mut now, mut max) = (0usize, 0);
+    let (mut string, mut escaped) = (false, false);
+    for &b in json {
+        if string {
+            match b {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match b {
+            b'"' => string = true,
+            b'[' | b'{' => {
+                now += 1;
+                max = max.max(now);
+            }
+            b']' | b'}' => now = now.saturating_sub(1),
+            _ => {}
+        }
+    }
+    max
+}
+
 fn parse_show(out: &[u8]) -> Result<Vec<Message>> {
     // Each reply nests two levels deeper: a long back-and-forth (70 messages) goes past
-    // serde_json's limit of 128.
+    // serde_json's limit of 128. Reading still takes stack for every level, so there is a
+    // limit, a far one: past it the thread isn't shown, with a message saying so.
+    if depth(out) > MAX_DEPTH {
+        bail!("this conversation nests deeper than mmm reads ({MAX_DEPTH} levels)");
+    }
     let mut de = serde_json::Deserializer::from_slice(out);
     de.disable_recursion_limit();
     let v = Value::deserialize(&mut de).context("reading notmuch show")?;
@@ -251,5 +286,24 @@ mod tests {
         let msgs = parse_show(format!("[[{node}]]").as_bytes()).unwrap();
         assert_eq!(msgs.len(), 100);
         assert_eq!(msgs[99].id, "m99");
+    }
+
+    #[test]
+    fn nesting_has_a_limit() {
+        assert_eq!(depth(br#"[{"a": "[[[\"[", "b": [1, {}]}]"#), 4);
+        // Parts inside parts, as deep as is read: on a test's small stack, with room to spare.
+        let body = |n: usize| format!("{}{}", r#"{"content":["#.repeat(n), "]}".repeat(n));
+        let show = |n: usize| {
+            format!(
+                r#"[[[{{"id":"m","timestamp":1,"tags":[],"headers":{{}},"body":[{}]}}, []]]]"#,
+                body(n)
+            )
+        };
+        let at = (MAX_DEPTH - 5) / 2;
+        assert_eq!(depth(show(at).as_bytes()), MAX_DEPTH - 1);
+        assert_eq!(parse_show(show(at).as_bytes()).unwrap().len(), 1);
+        // Deeper, it is refused and not read.
+        let err = parse_show(show(200_000).as_bytes()).unwrap_err();
+        assert!(err.to_string().contains("nests deeper"), "{err}");
     }
 }

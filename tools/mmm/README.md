@@ -20,9 +20,9 @@ mmm from:hep date:1y..  # one notmuch query
   quotes and signatures dimmed. Reading starts at the first unread message.
 - **Links and attachments** are what `Tab` / `Shift+Tab` move between. The footer shows where a
   link goes; behind a tracking or safe-links redirect, where it leads on to. A link whose
-  text names one site and whose target is another is marked ⚠. `Enter` opens (links in the
-  browser through `xdg-open`, attachments with their program from `$XDG_RUNTIME_DIR/mmm`), `y`
-  copies, `w` saves an attachment to `~/Downloads`.
+  text names one site and whose target is another is marked ⚠. `Enter` opens (http, https and
+  mailto links through `xdg-open`, no other kind; attachments with their program from
+  `$XDG_RUNTIME_DIR/mmm`), `y` copies, `w` saves an attachment to `~/Downloads`.
 - **Tags**: `a` archive (`-inbox`), `d` delete (`+deleted`; again, back out), `s` star, `m`
   read/unread, `!` spam (Gmail's Spam at the next sync, which teaches Gmail; in the Spam tab, `!`
   takes it out). `u` undoes the last, on exactly the messages it changed. Opening a thread marks
@@ -69,9 +69,14 @@ mmm from:hep date:1y..  # one notmuch query
   "On … wrote:" line follows the language.
 - **Sending**: `y`, and the mail goes a minute later, from a systemd user timer that runs
   `deck-mail send` (msmtpq: queued when offline, sent by the next sync). The footer counts down;
-  `u` takes it back to the review screen until then, even after leaving mmm (the outbox file is
-  the lock: whichever of `u` and the timer moves it first has it). Then the mail answered is
-  tagged `replied`, or `passed` for a forward, and the draft is gone.
+  `u` takes it back to the review screen until then, even after leaving mmm and starting it
+  again (the outbox file, in `~/.local/state/mmm/outbox`, is the lock: whichever of `u` and the
+  timer moves it first has it). Then the mail answered is tagged `replied`, or `passed` for a
+  forward, and the draft is gone. "Sent" is said when the script has handed the mail over, not
+  when the minute is up. The timer doesn't outlast a logout or a reboot: a mail it left in the
+  outbox, or one `deck-mail send` failed on, is shown when mmm starts and in the footer, and `u`
+  takes it back to the review screen, where `y` sends it again. `y` on a draft already in its
+  minute replaces that send; `D` on it calls the send off, and so does `e`, which resumes it.
 - New mail and tag changes from elsewhere show up within two seconds (notmuch's revision is
   checked between keys).
 

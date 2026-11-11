@@ -58,7 +58,8 @@ fn main() -> Result<()> {
             terminal.draw(|f| ui::draw(f, &mut app))?;
             // New mail or tags from the sync timer show up within a couple of seconds; a mail
             // in its minute counts down by the second.
-            let wait = if app.pending.is_empty() { 2 } else { 1 };
+            let counting = app.pending.iter().any(|p| p.fate == compose::Fate::Waiting);
+            let wait = if counting { 1 } else { 2 };
             if event::poll(Duration::from_secs(wait))? {
                 if let Event::Key(k) = event::read()?
                     && k.kind == KeyEventKind::Press

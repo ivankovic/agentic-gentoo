@@ -124,10 +124,22 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         _ if !app.status.is_empty() => Line::from(app.status.clone()).yellow(),
         _ if !app.pending.is_empty() => {
             let p = app.pending.last().expect("not empty");
-            Line::from(vec![
-                Span::raw(format!("✉ to {} in {}:{:02}", p.to, p.left() / 60, p.left() % 60)).green(),
-                Span::raw(" · u takes it back").dark_gray(),
-            ])
+            let (what, u) = match p.fate {
+                compose::Fate::Lost => (
+                    Span::raw(format!("✉ to {}: not sent, its timer is gone", p.to)).red(),
+                    " · u takes it back to send again",
+                ),
+                compose::Fate::Failed => (
+                    Span::raw(format!("✉ to {}: it didn't go", p.to)).red(),
+                    " · u takes it back to send again",
+                ),
+                _ if p.left() == 0 => (Span::raw(format!("✉ to {}: going", p.to)).green(), ""),
+                _ => (
+                    Span::raw(format!("✉ to {} in {}:{:02}", p.to, p.left() / 60, p.left() % 60)).green(),
+                    " · u takes it back",
+                ),
+            };
+            Line::from(vec![what, Span::raw(u).dark_gray()])
         }
         _ => match app.view.as_ref().and_then(|v| v.focus.map(|i| &v.doc.focus[i])) {
             Some(fp) => match &fp.target {
@@ -455,8 +467,8 @@ fn draw_file(f: &mut Frame, form: &FileForm) {
     f.render_widget(block, area);
     let on = |row: usize, s: Span<'static>| if form.row == row { s.reversed() } else { s };
     let category = match form.category {
-        Some(c) => format!(" ‹ {} › ", form.categories[c]),
-        None => " ‹ choose one › ".into(),
+        Some(c) if c < form.categories.len() => format!(" ‹ {} › ", form.categories[c]),
+        _ => " ‹ choose one › ".into(),
     };
     // The ones a digit picks, in two rows of five; the rest only ← → reach.
     let picks: Vec<String> = form

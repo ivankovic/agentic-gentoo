@@ -1,7 +1,7 @@
 //! What mmm holds while it runs, and what each key does to it.
 
 use crate::archive::{self, Choice, State};
-use crate::compose::{self, Draft, Pending};
+use crate::compose::{self, Draft, Fate, Pending};
 use crate::config::{self, Search};
 use crate::notmuch::{self, Message, Thread};
 use crate::render::{self, Doc, Pdfs, Target};
@@ -112,7 +112,8 @@ pub struct App {
     stamp: Option<(u64, std::time::SystemTime)>,
     /// A draft for the editor: main suspends the screen and runs it.
     pub edit: Option<Draft>,
-    /// Mail sent with `y`, in its minute before it goes.
+    /// Mail sent with `y` that is still in the outbox: in its minute before it goes, or left
+    /// there because its timer was lost or the send failed.
     pub pending: Vec<Pending>,
     /// After a first `U`: the message and how it unsubscribes, until the second `U` does it.
     unsub: Option<(String, screen::Unsubscribe)>,
@@ -123,6 +124,32 @@ fn invert(change: &str) -> String {
         ("+", t) => format!("-{t}"),
         (_, t) => format!("+{t}"),
     }
+}
+
+const NOT_OPENED: &str = "not opened: only http, https and mailto links open from mail";
+
+/// Whether a link from a mail is one for the browser or the mail program. `xdg-open` takes
+/// anything, a file's path or another program's scheme too, and those a mail doesn't get to open.
+fn opens(url: &str) -> bool {
+    url.split_once(':').is_some_and(|(scheme, rest)| {
+        !rest.is_empty()
+            && ["http", "https", "mailto"]
+                .iter()
+                .any(|s| scheme.eq_ignore_ascii_case(s))
+    })
+}
+
+/// The category after this one in a list of `n`, or before it; none when there are none.
+fn step_category(now: Option<usize>, n: usize, back: bool) -> Option<usize> {
+    if n == 0 {
+        return None;
+    }
+    Some(match (now, back) {
+        (None, true) => n - 1,
+        (None, false) => 0,
+        (Some(c), true) => (c.min(n - 1) + n - 1) % n,
+        (Some(c), false) => (c + 1) % n,
+    })
 }
 
 /// Starts a program apart from mmm, so it outlives it and owns no part of the terminal.
@@ -242,6 +269,17 @@ impl App {
             unsub: None,
         };
         app.lastmod = notmuch::lastmod().unwrap_or_default();
+        // What an earlier mmm left in the outbox: still to go, or not gone.
+        let (pending, alone) = compose::outbox();
+        let stuck = pending.iter().filter(|p| p.fate != Fate::Waiting).count();
+        if stuck > 0 {
+            app.status = format!(
+                "{stuck} mail in the outbox didn't go: u takes one back to the review screen, y there sends it"
+            );
+        } else if let Some(f) = alone.first() {
+            app.status = format!("a mail in the outbox has no draft: {}", compose::tilde(f));
+        }
+        app.pending = pending;
         app.load()?;
         app.count_unread();
         Ok(app)
@@ -284,11 +322,31 @@ impl App {
 
     /// Called between keys: reloads when mail or tags changed, as the sync timer does.
     pub fn tick(&mut self) {
-        // Past its minute, a mail is the timer's: no longer anything to take back.
-        if let Some(p) = self.pending.iter().find(|p| p.left() == 0) {
-            self.status = format!("✉ sent to {}", p.to);
+        // What became of each mail is read from the outbox, not from the clock: sent when the
+        // script says so, and still here, to take back, when it didn't go.
+        let mut said = None;
+        self.pending.retain_mut(|p| {
+            let before = p.fate;
+            p.refresh();
+            match p.fate {
+                Fate::Sent => said = Some(format!("✉ sent to {}", p.to)),
+                Fate::Gone => said = Some(format!("the mail to {} was taken back elsewhere", p.to)),
+                Fate::Failed if before != Fate::Failed => {
+                    said = Some(format!("✉ the mail to {} didn't go: u takes it back", p.to));
+                }
+                Fate::Lost if before != Fate::Lost => {
+                    said = Some(format!(
+                        "✉ the mail to {} wasn't sent, its timer is gone: u takes it back",
+                        p.to
+                    ));
+                }
+                _ => {}
+            }
+            !matches!(p.fate, Fate::Sent | Fate::Gone)
+        });
+        if let Some(s) = said {
+            self.status = s;
         }
-        self.pending.retain(|p| p.left() > 0);
         // Ticks come every two seconds; most find the database as it was, without running notmuch.
         let stamp = notmuch::db_stamp();
         if stamp.is_some() && stamp == self.stamp && !self.lastmod.is_empty() {
@@ -361,8 +419,8 @@ impl App {
     }
 
     fn undo(&mut self) {
-        // A mail in its minute comes first: that's what u is for, right after y.
-        if let Some(p) = self.pending.pop() {
+        // A mail in the outbox comes first: that's what u is for, right after y.
+        if let Some(mut p) = self.pending.pop() {
             match p.take_back() {
                 Ok(true) => {
                     self.status = format!("taken back: the mail to {} didn't go", p.to);
@@ -372,7 +430,16 @@ impl App {
                         discard: false,
                     };
                 }
-                Ok(false) => self.status = format!("too late: the mail to {} has gone", p.to),
+                Ok(false) => {
+                    p.refresh();
+                    if matches!(p.fate, Fate::Sent | Fate::Gone) {
+                        self.status = format!("too late: the mail to {} has gone", p.to);
+                    } else {
+                        // The script has it; the next tick says how that went.
+                        self.status = format!("too late: the mail to {} is being sent", p.to);
+                        self.pending.push(p);
+                    }
+                }
                 Err(e) => self.status = format!("{e:#}"),
             }
             return;
@@ -761,6 +828,7 @@ impl App {
             return;
         };
         self.status = match t {
+            Target::Link(url) if !save && !opens(&url) => NOT_OPENED.into(),
             Target::Link(url) if !save => match spawn("xdg-open", &[&url]) {
                 Ok(()) => format!("opened {url}"),
                 Err(e) => format!("not opened: {e:#}"),
@@ -831,7 +899,16 @@ impl App {
             return;
         };
         match Draft::load(draft) {
-            Ok(d) => self.write(d),
+            Ok(d) => {
+                // Sent and still in its minute: writing on takes it back, or the mail would go
+                // as it was when sent, and take the draft being written with it.
+                if !compose::cancel(&d.id) {
+                    self.status = "not resumed: this mail is being sent right now".into();
+                    return;
+                }
+                self.pending.retain(|p| p.draft.id != d.id);
+                self.write(d)
+            }
             Err(e) => self.status = format!("{e:#}"),
         }
     }
@@ -869,6 +946,12 @@ impl App {
         if discard {
             match k.code {
                 KeyCode::Char('y') => {
+                    // A draft sent and still in its minute: the send is called off with it.
+                    if !compose::cancel(&d.id) {
+                        self.status = "not discarded: this mail is being sent right now".into();
+                        return;
+                    }
+                    self.pending.retain(|p| p.draft.id != d.id);
                     self.status = match d.forget() {
                         Ok(()) => "discarded".into(),
                         Err(e) => format!("{e:#}"),
@@ -887,7 +970,9 @@ impl App {
         match k.code {
             KeyCode::Char('y') => match compose::queue(&d) {
                 Ok(p) => {
-                    // The footer counts down to it.
+                    // The footer counts down to it. An earlier send of this draft was called
+                    // off by this one.
+                    self.pending.retain(|q| q.draft.id != p.draft.id);
                     self.pending.push(p);
                     return;
                 }
@@ -1005,6 +1090,10 @@ impl App {
                 categories.len() - 1
             })
         });
+        if categories.is_empty() {
+            self.status = "deck-mail lists no categories to file it under".into();
+            return;
+        }
         self.mode = Mode::File(FileForm {
             sha: p.sha256.clone(),
             file: file.clone(),
@@ -1034,16 +1123,19 @@ impl App {
                     self.mode = Mode::File(f);
                     return;
                 }
-                let choice = Choice::To(f.categories[c].clone(), name.to_string());
+                let Some(category) = f.categories.get(c) else {
+                    f.category = None;
+                    self.mode = Mode::File(f);
+                    return;
+                };
+                let choice = Choice::To(category.clone(), name.to_string());
                 return self.choose(f.sha, f.file, f.before, choice);
             }
             KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down => f.row = 1 - f.row,
             _ if f.row == 0 => match k.code {
-                KeyCode::Left | KeyCode::Char('h') => {
-                    f.category = Some(f.category.map_or(n - 1, |c| (c + n - 1) % n));
-                }
+                KeyCode::Left | KeyCode::Char('h') => f.category = step_category(f.category, n, true),
                 KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(' ') => {
-                    f.category = Some(f.category.map_or(0, |c| (c + 1) % n));
+                    f.category = step_category(f.category, n, false);
                 }
                 KeyCode::Char(d @ '0'..='9') => {
                     let i = if d == '0' { 9 } else { d as usize - '1' as usize };
@@ -1179,6 +1271,7 @@ impl App {
                     Ok(()) => format!("unsubscribed at {}: a archives this one", u.host),
                     Err(e) => format!("{e:#}"),
                 },
+                "link" if !opens(&u.target) => NOT_OPENED.into(),
                 "link" => match spawn("xdg-open", &[&u.target]) {
                     Ok(()) => format!("{}'s unsubscribe page is open in the browser", u.host),
                     Err(e) => format!("{e:#}"),
@@ -1369,6 +1462,43 @@ impl ThreadView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_web_and_mail_links_open() {
+        for ok in [
+            "https://example.org/a",
+            "HTTP://example.org",
+            "mailto:ana@example.org",
+        ] {
+            assert!(opens(ok), "{ok}");
+        }
+        for no in [
+            "file:///home/ana/x.desktop",
+            "/home/ana/x.desktop",
+            "~/x",
+            "example.org/a",
+            "//example.org/a",
+            "javascript:x",
+            "smb://example.org/share",
+            " https://example.org",
+            "-x",
+            "https:",
+            "",
+        ] {
+            assert!(!opens(no), "{no}");
+        }
+    }
+
+    #[test]
+    fn stepping_through_categories() {
+        assert_eq!(step_category(None, 0, false), None);
+        assert_eq!(step_category(None, 0, true), None);
+        assert_eq!(step_category(Some(3), 0, true), None);
+        assert_eq!(step_category(None, 3, true), Some(2));
+        assert_eq!(step_category(None, 3, false), Some(0));
+        assert_eq!(step_category(Some(2), 3, false), Some(0));
+        assert_eq!(step_category(Some(0), 3, true), Some(2));
+    }
 
     #[test]
     fn hosts_and_mismatches() {

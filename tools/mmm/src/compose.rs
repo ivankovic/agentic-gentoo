@@ -4,7 +4,8 @@
 //! write, and below it the mail you reply to or forward. The signature isn't in it: it's chosen
 //! by the language of what you wrote, shown on the review screen, and goes between your text and
 //! the quote. Sending is `deck-mail send` (msmtpq), a minute later, from a systemd user timer:
-//! until then the mail can be taken back, and quitting mmm doesn't stop it.
+//! until then the mail can be taken back, and quitting mmm doesn't stop it. The outbox's files
+//! say what became of it, and a mail still there when mmm starts is shown again.
 
 use crate::notmuch::{self, Message};
 use crate::render;
@@ -402,9 +403,9 @@ impl Draft {
         std::fs::create_dir_all(drafts_dir())?;
         let mut kept = self.clone();
         kept.lang_code = self.lang.map(str::to_string);
-        std::fs::write(
-            self.file.with_extension("json"),
-            serde_json::to_vec_pretty(&kept)?,
+        write_whole(
+            &self.file.with_extension("json"),
+            &serde_json::to_vec_pretty(&kept)?,
         )?;
         let raw = self.message(true)?;
         let q = format!("id:{}", notmuch::quote(&draft_message_id(&self.id)));
@@ -873,6 +874,24 @@ fn untilde(s: &str) -> PathBuf {
     }
 }
 
+/// Writes a file so that it is there whole or not at all: to a file beside it, flushed to the
+/// disk, then renamed over it. A crash or a full disk leaves what was there before.
+fn write_whole(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let name = path.file_name().context("a file to write")?.to_string_lossy();
+    let tmp = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+    let written = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written.with_context(|| format!("writing {}", path.display()))
+}
+
 fn langs_file() -> PathBuf {
     state_dir().join("languages")
 }
@@ -900,129 +919,353 @@ fn remember_lang(recipients: &[String], lang: &'static str) {
     let _ = std::fs::write(langs_file(), lines.join("\n") + "\n");
 }
 
-/// A mail on its way: it goes when `unit`'s timer fires, unless taken back before.
+/// What became of a mail after `y`, as the outbox shows it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Fate {
+    /// In its minute, or being sent right now.
+    Waiting,
+    /// Handed to `deck-mail send`: out of the outbox, and in the log of what was sent.
+    Sent,
+    /// Still in the outbox with no timer to send it: a logout or a reboot inside its minute
+    /// took the timer along.
+    Lost,
+    /// `deck-mail send` failed: the script left it in the outbox, as `.eml.sending`.
+    Failed,
+    /// Out of the outbox and not sent: taken back from somewhere else.
+    Gone,
+}
+
+/// A mail in the outbox: it goes when `unit`'s timer fires, unless taken back before. Made by
+/// `queue`, or found in the outbox when mmm starts; what it says is read from the outbox's
+/// files, so it holds for a mail queued by an mmm that has since quit.
 pub struct Pending {
     pub draft: Draft,
     pub unit: String,
     pub eml: PathBuf,
-    pub at: std::time::Instant,
+    /// When `y` was pressed: the outbox file's time.
+    pub at: std::time::SystemTime,
     pub to: String,
+    pub fate: Fate,
+    /// The log the script writes a line to for each mail sent.
+    log: PathBuf,
+}
+
+/// The user manager's part: the timer that sends, whether it or its script is at work, and
+/// stopping it. Tests stand in for it.
+trait Timers {
+    /// Starts the timer that runs the send script with `args` in a minute.
+    fn start(&self, unit: &str, description: &str, args: &[std::ffi::OsString]) -> bool;
+    /// The timer waits, or its script runs.
+    fn running(&self, unit: &str) -> bool;
+    fn stop(&self, unit: &str);
+}
+
+struct Systemd;
+
+impl Timers for Systemd {
+    fn start(&self, unit: &str, description: &str, args: &[std::ffi::OsString]) -> bool {
+        // The unit runs in the user manager, not here: it gets mmm's PATH, and its notmuch
+        // database when that's not the default one.
+        let mut env = vec!["--setenv=PATH".to_string()];
+        if std::env::var_os("NOTMUCH_CONFIG").is_some() {
+            env.push("--setenv=NOTMUCH_CONFIG".into());
+        }
+        Command::new("systemd-run")
+            .args([
+                "--user",
+                "--quiet",
+                "--collect",
+                // The arguments go to the script as they are: a Message-ID or an address is
+                // the sender's to choose, and systemd would put its environment in for `${…}`.
+                "--expand-environment=no",
+                &format!("--unit={unit}"),
+                &format!("--on-active={UNDO_SECS}"),
+                "--timer-property=AccuracySec=1s",
+                &format!("--description={description}"),
+            ])
+            .args(&env)
+            .args(["--", "/bin/sh", "-c", SEND, "mmm-send"])
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
+    fn running(&self, unit: &str) -> bool {
+        Command::new("systemctl")
+            .args(["--user", "is-active", "--quiet"])
+            .args([format!("{unit}.timer"), format!("{unit}.service")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
+    fn stop(&self, unit: &str) {
+        let _ = Command::new("systemctl")
+            .args(["--user", "stop", &format!("{unit}.timer")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
 }
 
 /// The script the timer runs: takes the mail out of the outbox (so a take-back that got there
 /// first wins), hands it to `deck-mail send`, tags the mail it answers, and clears the draft
 /// away: its files (the editor's, its JSON, the forwarded mail's attachments) and its message
-/// in notmuch, as `Draft::forget` does. (No `${…}` in it: systemd expands those in a unit's
-/// command line.)
+/// in notmuch, as `Draft::forget` does. The log gets its line before the mail leaves the
+/// outbox: a mail gone from there is in the log, or it wasn't sent. A mail that didn't go
+/// stays, as `.eml.sending`, for mmm to show.
 const SEND: &str = r#"set -u
 f="$1"; base="$2"; query="$3"; tag="$4"; send="$5"; log="$6"; draft="$7"; shift 7
 mv -- "$f" "$f.sending" 2>/dev/null || exit 0
 if $send "$@" < "$f.sending"; then
+    printf '%s\tsent\t%s\n' "$(date -Is)" "$(basename "$f")" >> "$log"
     rm -rf -- "$f.sending" "$base.txt" "$base.json" "$base"
     notmuch tag +deleted -- "$draft"
     notmuch search --output=files --exclude=false "$draft" | while IFS= read -r m; do rm -f -- "$m"; done
     notmuch new --quiet --no-hooks || true
     if [ -n "$query" ]; then notmuch tag "+$tag" -- "$query"; fi
-    printf '%s\tsent\t%s\n' "$(date -Is)" "$(basename "$f")" >> "$log"
 else
-    notify-send -u critical "mmm: a mail didn't go" "It is in $f.sending"
+    printf '%s\tfailed\t%s\n' "$(date -Is)" "$(basename "$f")" >> "$log"
+    notify-send -u critical "mmm: a mail didn't go" "It is in $f.sending; mmm shows it, and u there takes it back"
 fi
 "#;
 
-/// `y`: the mail goes in a minute, from a systemd user timer.
-pub fn queue(d: &Draft) -> Result<Pending> {
-    let (errors, _) = d.check();
-    if let Some(e) = errors.first() {
-        bail!("{e}");
-    }
-    let raw = d.build()?;
-    let recipients = d.recipients()?;
-    let outbox = state_dir().join("outbox");
-    std::fs::create_dir_all(&outbox)?;
-    let eml = outbox.join(format!("{}.eml", d.id));
-    std::fs::write(&eml, raw)?;
-    // The draft stays until it's sent, so a mail taken back or lost is still there.
-    d.save()?;
-    let unit = format!("mmm-send-{}", d.id);
-    let (query, tag) = match (&d.original, d.kind) {
-        (Some(o), Kind::Forward) => (format!("id:{}", notmuch::quote(&o.id)), "passed"),
-        (Some(o), _) => (format!("id:{}", notmuch::quote(&o.id)), "replied"),
-        (None, _) => (String::new(), "replied"),
-    };
-    // The unit runs in the user manager, not here: it gets mmm's PATH, and its notmuch database
-    // when that's not the default one. MMM_SEND replaces `deck-mail send`, for tests.
-    let send = std::env::var("MMM_SEND").unwrap_or_else(|_| "deck-mail send".into());
-    let mut env = vec!["--setenv=PATH".to_string()];
-    if std::env::var_os("NOTMUCH_CONFIG").is_some() {
-        env.push("--setenv=NOTMUCH_CONFIG".into());
-    }
-    let st = Command::new("systemd-run")
-        .args([
-            "--user",
-            "--quiet",
-            "--collect",
-            &format!("--unit={unit}"),
-            &format!("--on-active={UNDO_SECS}"),
-            "--timer-property=AccuracySec=1s",
-            &format!("--description=mmm: a mail to {}", recipients.join(", ")),
-        ])
-        .args(&env)
-        .args(["--", "/bin/sh", "-c", SEND, "mmm-send"])
-        .arg(&eml)
-        .arg(d.file.with_extension(""))
-        .args([&query, tag, &send])
-        .arg(state_dir().join("sent.log"))
-        .arg(format!("id:{}", notmuch::quote(&draft_message_id(&d.id))))
-        .args(&recipients)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .status()
-        .context("running systemd-run")?;
-    if !st.success() {
-        let _ = std::fs::remove_file(&eml);
-        bail!("systemd-run couldn't start the send timer");
-    }
-    if let Some(l) = d.lang {
-        remember_lang(&recipients, l);
-    }
+fn unit_of(id: &str) -> String {
+    format!("mmm-send-{id}")
+}
+
+fn sending(eml: &Path) -> PathBuf {
+    eml.with_extension("eml.sending")
+}
+
+/// Who a mail goes to, for the footer: the first of To, and how many more.
+fn to_label(d: &Draft) -> String {
     let to = addresses(&d.to)
         .ok()
         .and_then(|a| a.into_iter().next())
         .map(|(n, a)| n.unwrap_or(a))
         .unwrap_or_default();
-    let more = recipients.len().saturating_sub(1);
+    match d.recipients().map_or(0, |r| r.len().saturating_sub(1)) {
+        0 => to,
+        more => format!("{to} and {more} more"),
+    }
+}
+
+#[derive(PartialEq, Debug)]
+enum Withdrawn {
+    /// It was in the outbox; it is out, and its timer stopped.
+    Taken,
+    /// Nothing of it was there.
+    Nothing,
+    /// The script is sending it right now.
+    Busy,
+}
+
+/// Takes a mail out of the outbox, whatever state it is in there. The outbox file is the lock:
+/// whoever moves it first, this or the timer's script, has it. A mail the script has moved is
+/// the script's while it runs; left behind by a send that failed, it can be taken.
+fn withdraw(eml: &Path, unit: &str, timers: &dyn Timers) -> Withdrawn {
+    let back = eml.with_extension("eml.taken-back");
+    if std::fs::rename(eml, &back).is_ok() {
+        timers.stop(unit);
+        let _ = std::fs::remove_file(back);
+        return Withdrawn::Taken;
+    }
+    let left = sending(eml);
+    if !left.exists() {
+        return Withdrawn::Nothing;
+    }
+    if timers.running(unit) {
+        return Withdrawn::Busy;
+    }
+    match std::fs::rename(&left, &back) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(back);
+            Withdrawn::Taken
+        }
+        Err(_) => Withdrawn::Nothing,
+    }
+}
+
+/// `y`: the mail goes in a minute, from a systemd user timer. The timer lives in the user
+/// manager: it outlives mmm, but not a logout or a reboot, after which the mail is still in the
+/// outbox and `outbox` finds it.
+pub fn queue(d: &Draft) -> Result<Pending> {
+    let (errors, _) = d.check();
+    if let Some(e) = errors.first() {
+        bail!("{e}");
+    }
+    // The draft stays until it's sent, so a mail taken back or lost is still there.
+    d.save()?;
+    // MMM_SEND replaces `deck-mail send`, for tests.
+    let send = std::env::var("MMM_SEND").unwrap_or_else(|_| "deck-mail send".into());
+    let p = queue_in(&state_dir(), d, &send, &Systemd)?;
+    if let Some(l) = d.lang {
+        remember_lang(&d.recipients()?, l);
+    }
+    Ok(p)
+}
+
+fn queue_in(state: &Path, d: &Draft, send: &str, timers: &dyn Timers) -> Result<Pending> {
+    let raw = d.build()?;
+    let recipients = d.recipients()?;
+    let outbox = state.join("outbox");
+    std::fs::create_dir_all(&outbox)?;
+    let eml = outbox.join(format!("{}.eml", d.id));
+    let unit = unit_of(&d.id);
+    // Sent once already and still in its minute (the draft resumed and sent again): that send
+    // is called off first, its timer stopped, and this one takes its place. One the script is
+    // sending right now is left alone.
+    if withdraw(&eml, &unit, timers) == Withdrawn::Busy {
+        bail!("it is being sent right now");
+    }
+    write_whole(&eml, &raw)?;
+    let (query, tag) = match (&d.original, d.kind) {
+        (Some(o), Kind::Forward) => (format!("id:{}", notmuch::quote(&o.id)), "passed"),
+        (Some(o), _) => (format!("id:{}", notmuch::quote(&o.id)), "replied"),
+        (None, _) => (String::new(), "replied"),
+    };
+    let log = state.join("sent.log");
+    let mut args: Vec<std::ffi::OsString> = vec![eml.clone().into(), d.file.with_extension("").into()];
+    args.extend([query.as_str(), tag, send].map(Into::into));
+    args.push(log.clone().into());
+    args.push(format!("id:{}", notmuch::quote(&draft_message_id(&d.id))).into());
+    args.extend(recipients.iter().map(Into::into));
+    let description = format!("mmm: a mail to {}", recipients.join(", "));
+    if !timers.start(&unit, &description, &args) {
+        // No timer has this file: an earlier one was stopped above, this one didn't start.
+        let _ = std::fs::remove_file(&eml);
+        bail!("systemd-run couldn't start the send timer");
+    }
     Ok(Pending {
+        to: to_label(d),
         draft: d.clone(),
         unit,
         eml,
-        at: std::time::Instant::now(),
-        to: if more > 0 {
-            format!("{to} and {more} more")
-        } else {
-            to
-        },
+        at: std::time::SystemTime::now(),
+        fate: Fate::Waiting,
+        log,
     })
 }
 
+/// What is in the outbox when mmm starts, oldest first: mail still in its minute (queued by an
+/// mmm that quit), mail whose timer a logout or a reboot took, and mail that failed to send.
+/// Each is a `Pending` again, to take back with `u`. Beside them, the outbox files whose draft
+/// is no longer there to go back to.
+pub fn outbox() -> (Vec<Pending>, Vec<PathBuf>) {
+    scan(&state_dir(), &Systemd, Draft::load)
+}
+
+fn scan(
+    state: &Path,
+    timers: &dyn Timers,
+    load: impl Fn(&str) -> Result<Draft>,
+) -> (Vec<Pending>, Vec<PathBuf>) {
+    let (mut found, mut alone) = (vec![], vec![]);
+    for e in std::fs::read_dir(state.join("outbox"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let (id, taken) = match (name.strip_suffix(".eml"), name.strip_suffix(".eml.sending")) {
+            (Some(id), _) => (id, false),
+            (_, Some(id)) => (id, true),
+            _ => continue,
+        };
+        if !is_draft_id(id) {
+            continue;
+        }
+        let Ok(draft) = load(id) else {
+            alone.push(e.path());
+            continue;
+        };
+        let unit = unit_of(id);
+        let fate = match (timers.running(&unit), taken) {
+            (true, _) => Fate::Waiting,
+            (false, false) => Fate::Lost,
+            (false, true) => Fate::Failed,
+        };
+        found.push(Pending {
+            to: to_label(&draft),
+            draft,
+            unit,
+            eml: e.path().with_file_name(format!("{id}.eml")),
+            at: e
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+            fate,
+            log: state.join("sent.log"),
+        });
+    }
+    found.sort_by_key(|p| p.at);
+    alone.sort();
+    (found, alone)
+}
+
+/// Calls off the queued send of a draft, if there is one: before the draft is thrown away, or
+/// the mail would go all the same. False when the mail is being sent right now.
+pub fn cancel(id: &str) -> bool {
+    let eml = state_dir().join("outbox").join(format!("{id}.eml"));
+    withdraw(&eml, &unit_of(id), &Systemd) != Withdrawn::Busy
+}
+
 impl Pending {
+    /// Seconds of its minute left; none for a mail whose time is past (or not yet come).
     pub fn left(&self) -> u64 {
-        UNDO_SECS.saturating_sub(self.at.elapsed().as_secs())
+        UNDO_SECS.saturating_sub(self.at.elapsed().map_or(UNDO_SECS, |e| e.as_secs()))
     }
 
-    /// `u`: takes the mail back, if it hasn't gone. The outbox file is the lock: whoever moves it
-    /// first, this or the timer's script, has it.
-    pub fn take_back(&self) -> Result<bool> {
-        let back = self.eml.with_extension("eml.taken-back");
-        if std::fs::rename(&self.eml, &back).is_err() {
-            return Ok(false);
+    /// Looks at the outbox again: `fate` is what the files say now.
+    pub fn refresh(&mut self) {
+        self.fate = self.fate_now(&Systemd);
+    }
+
+    fn fate_now(&self, timers: &dyn Timers) -> Fate {
+        let files = || (self.eml.exists(), sending(&self.eml).exists());
+        let gone = || {
+            let line = format!(
+                "\tsent\t{}",
+                self.eml.file_name().unwrap_or_default().to_string_lossy()
+            );
+            let sent =
+                std::fs::read_to_string(&self.log).is_ok_and(|l| l.lines().any(|l| l.ends_with(&line)));
+            if sent { Fate::Sent } else { Fate::Gone }
+        };
+        // What the files alone tell; the user manager is only asked when they don't.
+        match (files(), self.fate) {
+            ((false, false), _) => return gone(),
+            ((true, _), Fate::Lost) => return Fate::Lost,
+            ((true, _), _) if self.left() > 0 => return Fate::Waiting,
+            ((false, true), Fate::Failed) => return Fate::Failed,
+            _ => {}
         }
-        let _ = Command::new("systemctl")
-            .args(["--user", "stop", &format!("{}.timer", self.unit)])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        let _ = std::fs::remove_file(back);
-        Ok(true)
+        if timers.running(&self.unit) {
+            return Fate::Waiting;
+        }
+        // Looked at again: the script may have finished in between.
+        match files() {
+            (true, _) => Fate::Lost,
+            (false, true) => Fate::Failed,
+            (false, false) => gone(),
+        }
+    }
+
+    /// `u`: takes the mail back, if it hasn't gone: one in its minute, one whose timer is lost,
+    /// or one that failed to send. From the outbox's files alone, so it works on a mail found
+    /// there at the start as on one just queued.
+    pub fn take_back(&self) -> Result<bool> {
+        Ok(self.take_back_from(&Systemd))
+    }
+
+    fn take_back_from(&self, timers: &dyn Timers) -> bool {
+        withdraw(&self.eml, &self.unit, timers) == Withdrawn::Taken
     }
 }
 
@@ -1212,5 +1455,286 @@ mod tests {
         d.body = "x".into();
         let (errors, _) = d.check();
         assert!(!errors.is_empty());
+    }
+
+    /// A directory of its own for a test, gone when the test is.
+    struct Tmp(PathBuf);
+
+    impl Tmp {
+        fn new(name: &str) -> Tmp {
+            let dir = std::env::temp_dir().join(format!("mmm-test-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join("bin")).unwrap();
+            std::fs::create_dir_all(dir.join("drafts")).unwrap();
+            let tmp = Tmp(dir);
+            // What the send script runs, standing in: notmuch and notify-send write down what
+            // they were asked; `send` is what MMM_SEND names, and keeps the mail; `fail` fails.
+            tmp.script("notmuch", r#"echo "$*" >> "$(dirname "$0")/../notmuch.log""#);
+            tmp.script("notify-send", r#"echo "$*" >> "$(dirname "$0")/../notify.log""#);
+            tmp.script(
+                "send",
+                r#"d="$(dirname "$0")/.."; cat > "$d/went.eml"; printf '%s\n' "$@" > "$d/went.to""#,
+            );
+            tmp.script("fail", "exit 1");
+            tmp
+        }
+
+        fn script(&self, name: &str, body: &str) {
+            use std::os::unix::fs::PermissionsExt;
+            let path = self.0.join("bin").join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        fn hook(&self, name: &str) -> String {
+            self.0.join("bin").join(name).display().to_string()
+        }
+
+        fn read(&self, name: &str) -> String {
+            std::fs::read_to_string(self.0.join(name)).unwrap_or_default()
+        }
+
+        /// A draft to send, its files in this directory.
+        fn draft(&self) -> Draft {
+            let mut d = draft(Kind::Reply);
+            d.file = self.0.join("drafts").join(format!("{}.txt", d.id));
+            d.to = "Ana <ana@example.org>, ivo@example.org".into();
+            d.subject = "Re: Ručak".into();
+            d.body = "Može.".into();
+            d.original = Some(Original {
+                id: "abc${HOME}%n@example.org".into(),
+                from: "Ana <ana@example.org>".into(),
+                timestamp: 0,
+                lang: None,
+            });
+            std::fs::write(&d.file, "the editor's file").unwrap();
+            std::fs::write(d.file.with_extension("json"), "{}").unwrap();
+            d
+        }
+
+        /// What the timer does when it fires: the send script, with the arguments it was
+        /// started with, and only this directory's stand-ins and the system's tools to run.
+        fn fire(&self, timers: &Fake) {
+            let (_, args) = timers
+                .started
+                .borrow()
+                .last()
+                .cloned()
+                .expect("a timer was started");
+            let st = Command::new("/bin/sh")
+                .args(["-c", SEND, "mmm-send"])
+                .args(args)
+                .env("PATH", format!("{}:/usr/bin:/bin", self.0.join("bin").display()))
+                .status()
+                .unwrap();
+            assert!(st.success());
+            timers.running.set(false);
+        }
+    }
+
+    impl Drop for Tmp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The user manager, standing in: it notes the timers started and stopped, and fires none.
+    #[derive(Default)]
+    struct Fake {
+        running: std::cell::Cell<bool>,
+        refuses: std::cell::Cell<bool>,
+        started: std::cell::RefCell<Vec<(String, Vec<std::ffi::OsString>)>>,
+        stopped: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl Timers for Fake {
+        fn start(&self, unit: &str, _: &str, args: &[std::ffi::OsString]) -> bool {
+            if self.refuses.get() {
+                return false;
+            }
+            self.started.borrow_mut().push((unit.to_string(), args.to_vec()));
+            self.running.set(true);
+            true
+        }
+
+        fn running(&self, _: &str) -> bool {
+            self.running.get()
+        }
+
+        fn stop(&self, unit: &str) {
+            self.stopped.borrow_mut().push(unit.to_string());
+            self.running.set(false);
+        }
+    }
+
+    #[test]
+    fn a_queued_mail_goes_when_its_timer_fires() {
+        let (tmp, timers) = (Tmp::new("goes"), Fake::default());
+        let d = tmp.draft();
+        let p = queue_in(&tmp.0, &d, &tmp.hook("send"), &timers).unwrap();
+        assert_eq!(p.eml, tmp.0.join("outbox").join(format!("{}.eml", d.id)));
+        assert!(p.eml.exists());
+        assert_eq!(p.to, "Ana and 1 more");
+        assert_eq!((p.fate, p.fate_now(&timers)), (Fate::Waiting, Fate::Waiting));
+        assert_eq!(timers.started.borrow()[0].0, format!("mmm-send-{}", d.id));
+
+        tmp.fire(&timers);
+        assert!(
+            tmp.read("went.eml").contains("<ana@example.org>"),
+            "{}",
+            tmp.read("went.eml")
+        );
+        assert_eq!(tmp.read("went.to"), "ana@example.org\nivo@example.org\n");
+        // Out of the outbox, the draft's files with it, and in the log.
+        assert!(!p.eml.exists() && !sending(&p.eml).exists());
+        assert!(!d.file.exists() && !d.file.with_extension("json").exists());
+        assert!(
+            tmp.read("sent.log")
+                .trim_end()
+                .ends_with(&format!("\tsent\t{}.eml", d.id))
+        );
+        assert_eq!(p.fate_now(&timers), Fate::Sent);
+        // The mail answered is tagged, its id as it is, whatever it holds.
+        let asked = tmp.read("notmuch.log");
+        assert!(
+            asked.contains("tag +replied -- id:abc${HOME}%n@example.org"),
+            "{asked}"
+        );
+        assert!(
+            asked.contains(&format!("tag +deleted -- id:{}", draft_message_id(&d.id))),
+            "{asked}"
+        );
+        assert_eq!(tmp.read("notify.log"), "");
+    }
+
+    #[test]
+    fn a_mail_that_didnt_go_stays_to_take_back() {
+        let (tmp, timers) = (Tmp::new("fails"), Fake::default());
+        let d = tmp.draft();
+        let mut p = queue_in(&tmp.0, &d, &tmp.hook("fail"), &timers).unwrap();
+        tmp.fire(&timers);
+        // The mail and the draft are still there, and it isn't said to be sent.
+        assert!(!p.eml.exists() && sending(&p.eml).exists());
+        assert!(d.file.exists() && d.file.with_extension("json").exists());
+        assert!(tmp.read("sent.log").contains("\tfailed\t") && !tmp.read("sent.log").contains("\tsent\t"));
+        assert!(tmp.read("notify.log").contains("didn't go"));
+        p.fate = p.fate_now(&timers);
+        assert_eq!(p.fate, Fate::Failed);
+        // Found again by an mmm started later, and taken back from there.
+        let (found, alone) = scan(&tmp.0, &timers, |_| Ok(d.clone()));
+        assert!(alone.is_empty());
+        assert_eq!(
+            (found.len(), found[0].fate, &found[0].eml),
+            (1, Fate::Failed, &p.eml)
+        );
+        assert!(found[0].take_back_from(&timers));
+        assert!(!sending(&p.eml).exists());
+        assert_eq!(p.fate_now(&timers), Fate::Gone);
+    }
+
+    #[test]
+    fn a_mail_being_sent_is_left_alone() {
+        let (tmp, timers) = (Tmp::new("busy"), Fake::default());
+        let d = tmp.draft();
+        let p = queue_in(&tmp.0, &d, &tmp.hook("send"), &timers).unwrap();
+        // The script has taken it and runs.
+        std::fs::rename(&p.eml, sending(&p.eml)).unwrap();
+        assert_eq!(p.fate_now(&timers), Fate::Waiting);
+        assert!(!p.take_back_from(&timers));
+        assert!(queue_in(&tmp.0, &d, &tmp.hook("send"), &timers).is_err());
+        assert!(sending(&p.eml).exists() && !p.eml.exists());
+        assert!(timers.stopped.borrow().is_empty());
+    }
+
+    #[test]
+    fn taken_back_it_doesnt_go() {
+        let (tmp, timers) = (Tmp::new("back"), Fake::default());
+        let d = tmp.draft();
+        let p = queue_in(&tmp.0, &d, &tmp.hook("send"), &timers).unwrap();
+        assert!(p.take_back_from(&timers));
+        assert_eq!(timers.stopped.borrow().as_slice(), std::slice::from_ref(&p.unit));
+        assert_eq!(std::fs::read_dir(tmp.0.join("outbox")).unwrap().count(), 0);
+        // A timer that fires all the same finds nothing to send, and the draft is kept.
+        tmp.fire(&timers);
+        assert_eq!(tmp.read("went.eml"), "");
+        assert!(d.file.exists());
+        assert_eq!(p.fate_now(&timers), Fate::Gone);
+        assert!(!p.take_back_from(&timers));
+    }
+
+    #[test]
+    fn sent_again_in_its_minute_it_goes_once() {
+        let (tmp, timers) = (Tmp::new("twice"), Fake::default());
+        let mut d = tmp.draft();
+        let first = queue_in(&tmp.0, &d, &tmp.hook("send"), &timers).unwrap();
+        d.body = "Ipak ne mogu.".into();
+        let second = queue_in(&tmp.0, &d, &tmp.hook("send"), &timers).unwrap();
+        // The first timer was stopped before the second was started, on the same file.
+        assert_eq!(first.eml, second.eml);
+        assert_eq!(
+            timers.stopped.borrow().as_slice(),
+            std::slice::from_ref(&first.unit)
+        );
+        assert_eq!(timers.started.borrow().len(), 2);
+        assert!(
+            std::fs::read_to_string(&second.eml)
+                .unwrap()
+                .contains("Ipak ne mogu.")
+        );
+        // A timer that can't be started leaves nothing in the outbox, and nothing goes.
+        timers.refuses.set(true);
+        assert!(queue_in(&tmp.0, &d, &tmp.hook("send"), &timers).is_err());
+        assert!(!second.eml.exists());
+        assert_eq!(timers.stopped.borrow().len(), 2);
+        tmp.fire(&timers);
+        assert_eq!(tmp.read("went.eml"), "");
+    }
+
+    #[test]
+    fn the_outbox_is_read_again_at_the_start() {
+        let (tmp, timers) = (Tmp::new("start"), Fake::default());
+        let d = tmp.draft();
+        let mut p = queue_in(&tmp.0, &d, &tmp.hook("send"), &timers).unwrap();
+        let outbox = tmp.0.join("outbox");
+        std::fs::write(outbox.join("notes.txt"), "").unwrap();
+        std::fs::write(outbox.join("x.eml"), "").unwrap();
+        std::fs::write(outbox.join("20261018-113015-4242-0.eml"), "").unwrap();
+        let load = |id: &str| {
+            if id == d.id {
+                Ok(d.clone())
+            } else {
+                bail!("no such draft")
+            }
+        };
+        // Its timer still waits: in its minute, as when it was queued.
+        let (found, alone) = scan(&tmp.0, &timers, load);
+        assert_eq!(alone, [outbox.join("20261018-113015-4242-0.eml")]);
+        assert_eq!(
+            (found.len(), found[0].fate, &found[0].to),
+            (1, Fate::Waiting, &p.to)
+        );
+        assert!(found[0].left() > UNDO_SECS - 10);
+        // The timer gone (a logout, a reboot), the mail still there: not sent, and it says so,
+        // also once its minute is over.
+        timers.running.set(false);
+        let (mut found, _) = scan(&tmp.0, &timers, load);
+        assert_eq!(found[0].fate, Fate::Lost);
+        assert_eq!(found[0].fate_now(&timers), Fate::Lost);
+        p.at -= std::time::Duration::from_secs(2 * UNDO_SECS);
+        assert_eq!((p.left(), p.fate_now(&timers)), (0, Fate::Lost));
+        // Taken back, it is out of the outbox, to send again from the review screen.
+        assert!(found.remove(0).take_back_from(&timers));
+        assert!(!p.eml.exists());
+    }
+
+    #[test]
+    fn a_file_is_written_whole() {
+        let tmp = Tmp::new("whole");
+        let file = tmp.0.join("drafts/a.json");
+        write_whole(&file, b"one").unwrap();
+        write_whole(&file, b"two").unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"two");
+        assert_eq!(std::fs::read_dir(tmp.0.join("drafts")).unwrap().count(), 1);
+        assert!(write_whole(&tmp.0.join("none/a.json"), b"x").is_err());
     }
 }
