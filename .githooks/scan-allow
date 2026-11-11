@@ -1,0 +1,22 @@
+# What scan-secrets' privacy rules let through: `rule regex` a line, the regex (bash, extended)
+# matching the whole find in lower case. Only what is public on purpose belongs here; a private address goes
+# nowhere near this file.
+
+# Addresses reserved for examples, and services' own.
+mail-address [^@]+@([a-z0-9-]+\.)*example\.(org|com|net|hr)
+mail-address [^@]+@([a-z0-9-]+\.)*(invalid|test|example|localhost)
+mail-address git@(github|gitlab)\.com
+mail-address (noreply|notifications)@(github|anthropic)\.com
+mail-address [0-9]+\+[^@]+@users\.noreply\.github\.com
+mail-address (you|user|name)@(gmail\.com|your\.domain|host)
+mail-address a@b\.hr
+# systemd instances, not addresses: journald@vitals.conf, user@1000.service.
+mail-address [^@]+@[^@]*\.(conf|service|socket|timer|mount|slice|target|scope|path)
+# A utility's public senders, in a filter example (hosts/deck/email.md).
+mail-address (racuni|no-reply)@hep\.hr
+# An upstream author, in a patch taken from upstream.
+mail-address kenvandereerden@hotmail\.com
+
+# Made-up addresses in tests and drills.
+private-network-address 192\.168\.1\.1
+private-network-address 192\.168\.7\.2[0-9]
