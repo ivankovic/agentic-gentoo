@@ -13,5 +13,20 @@ Restart=on-failure
 RestartSec=10
 Nice=10
 
+# What a user unit gets without a namespace of its own: it still reads the compositor's sockets
+# and its user's processes in /proc, and writes ~/.local/state/deck. Options that mount (ProtectSystem,
+# ProtectHome, PrivateTmp) would put it in a user namespace, so they are left out.
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+# focus.db says what was used when: the user's alone.
+UMask=0077
+
 [Install]
 WantedBy=graphical-session.target

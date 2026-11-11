@@ -254,7 +254,18 @@ impl FsCreds {
         }
         // setfsuid reports the previous value, and fails silently: -1 only asks.
         let now = unsafe { (libc::setfsuid(u32::MAX), libc::setfsgid(u32::MAX)) };
-        (now == (uid as i32, gid as i32)).then_some(creds)
+        if now != (uid as i32, gid as i32) {
+            // Said once: without it every script another user runs counts as its interpreter.
+            static SAID: std::sync::Once = std::sync::Once::new();
+            SAID.call_once(|| {
+                eprintln!(
+                    "deck: file access as uid {uid}, gid {gid} was refused (CAP_SETUID and CAP_SETGID are \
+                     needed): scripts other users run are not named, their interpreters are"
+                );
+            });
+            return None;
+        }
+        Some(creds)
     }
 }
 

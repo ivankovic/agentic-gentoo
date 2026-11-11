@@ -29,6 +29,8 @@ const TICK: Duration = Duration::from_secs(1);
 const PEAK_EVERY: u64 = 10;
 const PSS_EVERY: u64 = 300;
 const FLUSH_EVERY: u64 = 60;
+/// Rows older than the store keeps are dropped at the start and once a day.
+const PRUNE_EVERY: u64 = 86400;
 /// A burst starts at half a core, lasts while above a tenth of one, ends after 3 quiet seconds,
 /// and is kept as a spike if it used at least one CPU-second.
 const BURST_START: f64 = 0.5;
@@ -889,6 +891,14 @@ impl Daemon {
     }
 }
 
+fn prune(store: &mut Store) {
+    match store.prune(unix_now()) {
+        Ok(0) => {}
+        Ok(n) => eprintln!("deck-usaged: dropped {n} rows older than {} days", store::KEEP_DAYS),
+        Err(e) => eprintln!("deck-usaged: dropping old rows failed: {e:#}"),
+    }
+}
+
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let mut db = PathBuf::from(DEFAULT_DB);
@@ -951,6 +961,7 @@ fn main() -> Result<()> {
 
     let mut store = Store::open(&db)?;
     store.meta("started", &unix_now().to_string())?;
+    prune(&mut store);
     store.meta("profile_hz", &prof.as_ref().map_or(0, |p| p.freq).to_string())?;
 
     let mut d = Daemon {
@@ -1063,6 +1074,9 @@ fn main() -> Result<()> {
             }
             if n.is_multiple_of(FLUSH_EVERY) {
                 d.flush(&mut store, prof.as_ref().map(|p| p.lost));
+                if n.is_multiple_of(PRUNE_EVERY) {
+                    prune(&mut store);
+                }
                 d.load_modules();
                 // Rebuilt once the package database stayed the same for two minutes: an emerge
                 // changes it after each package it merges.

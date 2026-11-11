@@ -307,7 +307,7 @@ pub fn state_dir() -> PathBuf {
     xdg("XDG_STATE_HOME", ".local/state").join("deck/reviews")
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Finding {
     #[serde(default)]
     pub severity: String,
@@ -359,6 +359,12 @@ impl Finding {
     pub fn status_label(&self) -> &'static str {
         let s = if self.status.is_empty() { "open" } else { self.status.as_str() };
         DECISIONS.iter().find(|d| d.0 == s).map_or("open", |d| d.1)
+    }
+
+    /// Whether the severity is one a prompt asks for. The scan takes no verdict from one that
+    /// isn't: `rank` would file it under low.
+    pub fn severity_known(&self) -> bool {
+        matches!(self.severity.to_ascii_lowercase().as_str(), "critical" | "high" | "medium" | "low" | "fix")
     }
 
     /// 0 high (critical too), 1 medium, 2 low and anything else.
@@ -942,14 +948,15 @@ pub fn prompt(
     p
 }
 
-/// The findings block at the end of a report.
-pub fn parse_findings(report: &str) -> Vec<Finding> {
+/// The findings block at the end of a report: none when the report has no block. A block that is
+/// not the JSON asked for is an error, not an empty list: what it meant to say is unknown.
+pub fn parse_findings(report: &str) -> Result<Vec<Finding>> {
     let Some(start) = report.rfind("```findings") else {
-        return vec![];
+        return Ok(vec![]);
     };
     let rest = &report[start + "```findings".len()..];
     let body = rest.split("```").next().unwrap_or("");
-    serde_json::from_str(body.trim()).unwrap_or_default()
+    serde_json::from_str(body.trim()).context("the report's findings block is not the JSON asked for")
 }
 
 /// What to review: the subject, the kind, which agent, and whether to review it whole even when an
@@ -1077,7 +1084,7 @@ pub fn run(repo: &Path, req: Request, v: &Versions, log: &mut dyn Write) -> Resu
             decide(run, *index, "fixed", &note, &req.agent.name)?;
             writeln!(log, "deck-patches: {reference} fixed: {evidence}")?;
         }
-        Ok(parse_findings(&text))
+        parse_findings(&text).with_context(|| format!("the report is {}", report.display()))
     })();
     r.finished = Some(chrono::Local::now().timestamp());
     match res {
@@ -1117,14 +1124,32 @@ pub fn run_agent(agent: &Agent, dir: &Path, prompt: &str, out: std::fs::File, er
         .arg(dir)
         .arg("--")
         .args(&agent.command)
-        .stdin(Stdio::piped())
         .stdout(out)
         .stderr(err);
-    let mut child = c.spawn().with_context(|| format!("starting the agent {} in the jail", agent.name))?;
-    child.stdin.take().unwrap().write_all(prompt.as_bytes())?;
+    feed(&mut c, &agent.name, prompt)
+}
+
+/// Starts the agent's command, writes PROMPT to its stdin and waits for it. An agent that ends
+/// before it has read the prompt is an error like any other exit, for the caller to record:
+/// `deck patches` otherwise dies on a closed pipe, as command-line tools do (main).
+fn feed(c: &mut Command, name: &str, prompt: &str) -> Result<()> {
+    let mut child = c.stdin(Stdio::piped()).spawn().with_context(|| format!("starting the agent {name} in the jail"))?;
+    let mut stdin = child.stdin.take().unwrap();
+    // After the spawn: the agent keeps the default.
+    let before = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+    let written = stdin.write_all(prompt.as_bytes());
+    drop(stdin);
+    unsafe { libc::signal(libc::SIGPIPE, before) };
     let st = child.wait()?;
+    match written {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+            bail!("the agent {name} ended before it had read its prompt ({st})")
+        }
+        Err(e) => return Err(e).with_context(|| format!("writing the prompt to the agent {name}")),
+        Ok(()) => {}
+    }
     if !st.success() {
-        bail!("the agent {} exited with {st}", agent.name);
+        bail!("the agent {name} exited with {st}");
     }
     Ok(())
 }
@@ -1400,13 +1425,40 @@ mod tests {
     #[test]
     fn findings_at_the_end() {
         let report = "# Report\n\n```json\n[1]\n```\n\nText.\n\n```findings\n[{\"severity\": \"high\", \"title\": \"overflow\", \"where\": \"a.c:3\"}, {\"severity\": \"low\", \"title\": \"t\"}]\n```\n";
-        let f = parse_findings(report);
+        let f = parse_findings(report).unwrap();
         assert_eq!(f.len(), 2);
         assert_eq!(f[0].place, "a.c:3");
         let mut r = done("x/a", "1", 1);
         r.findings = f;
         assert_eq!(r.counts_label(), "1H 1L");
-        assert!(parse_findings("no block").is_empty());
+        assert!(parse_findings("no block").unwrap().is_empty());
+        assert!(parse_findings("```findings\n[]\n```").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_findings_block_that_does_not_parse_is_an_error() {
+        for block in ["[{\"severity\": \"high\", \"title\": \"cut off", "none", "{\"severity\": \"low\"}", ""] {
+            assert!(parse_findings(&format!("# Report\n\n```findings\n{block}\n```\n")).is_err(), "{block}");
+        }
+    }
+
+    #[test]
+    fn severities_asked_for() {
+        let f = |severity: &str| Finding { severity: severity.into(), ..Default::default() };
+        assert!(f("High").severity_known() && f("medium").severity_known() && f("fix").severity_known());
+        assert!(!f("").severity_known() && !f("informational").severity_known());
+    }
+
+    #[test]
+    fn an_agent_that_does_not_read_its_prompt_is_an_error() {
+        // Larger than a pipe holds, so the write meets the closed pipe.
+        let prompt = "x".repeat(1 << 20);
+        let mut c = Command::new("true");
+        let e = feed(&mut c, "true", &prompt).unwrap_err();
+        assert!(format!("{e:#}").contains("before it had read its prompt"), "{e:#}");
+        let mut c = Command::new("cat");
+        c.stdout(Stdio::null());
+        feed(&mut c, "cat", &prompt).unwrap();
     }
 
     #[test]

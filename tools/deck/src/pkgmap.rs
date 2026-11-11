@@ -37,20 +37,24 @@ pub fn stamp() -> Option<SystemTime> {
     fs::metadata(COUNTER).and_then(|m| m.modified()).ok()
 }
 
-/// `PN-PV[-rN]` → PN: the version starts after the last dash followed by a digit.
-fn pn(pf: &str) -> &str {
-    let base = match pf.rfind("-r") {
-        Some(i) if i + 2 < pf.len() && pf[i + 2..].bytes().all(|b| b.is_ascii_digit()) => &pf[..i],
-        _ => pf,
-    };
-    match base
+/// `1.1.0-r1` → `1.1.0`: a version without its revision.
+pub fn strip_rev(v: &str) -> &str {
+    match v.rfind("-r") {
+        Some(i) if i + 2 < v.len() && v[i + 2..].bytes().all(|b| b.is_ascii_digit()) => &v[..i],
+        _ => v,
+    }
+}
+
+/// Splits `PN-PV[-rN]` into PN and the version with its revision. Package names may hold a dash
+/// followed by a digit (`font-adobe-100dpi`), versions never hold a dash other than the revision's,
+/// so the version starts after the last dash followed by a digit.
+pub fn split_pf(pf: &str) -> Option<(&str, &str)> {
+    let base = strip_rev(pf);
+    let i = base
         .match_indices('-')
         .map(|(i, _)| i)
-        .rfind(|&i| base[i + 1..].starts_with(|c: char| c.is_ascii_digit()))
-    {
-        Some(i) => &pf[..i],
-        None => pf,
-    }
+        .rfind(|&i| base[i + 1..].starts_with(|c: char| c.is_ascii_digit()))?;
+    Some((&pf[..i], &pf[i + 1..]))
 }
 
 impl PkgMap {
@@ -85,10 +89,14 @@ impl PkgMap {
             pkgs.sort();
             for dir in pkgs {
                 let pf = dir.file_name().unwrap().to_string_lossy().into_owned();
+                // Portage leaves `-MERGING-…` directories behind while it works.
+                if pf.starts_with('-') {
+                    continue;
+                }
                 let Ok(contents) = fs::read_to_string(dir.join("CONTENTS")) else {
                     continue;
                 };
-                let cp = format!("{cat}/{}", pn(&pf));
+                let cp = format!("{cat}/{}", split_pf(&pf).map_or(pf.as_str(), |(pn, _)| pn));
                 let ix = match cps.iter().position(|c| *c == cp) {
                     Some(i) => i,
                     None => {
@@ -227,9 +235,27 @@ mod tests {
     }
 
     #[test]
-    fn strips_versions() {
-        assert_eq!(pn("chess-tui-2.7.1"), "chess-tui");
-        assert_eq!(pn("kramdown-parser-gfm-1.1.0-r1"), "kramdown-parser-gfm");
-        assert_eq!(pn("font-adobe-100dpi-1.0.4"), "font-adobe-100dpi");
+    fn splits_pf() {
+        assert_eq!(split_pf("chess-tui-2.7.1"), Some(("chess-tui", "2.7.1")));
+        assert_eq!(
+            split_pf("kramdown-parser-gfm-1.1.0-r1"),
+            Some(("kramdown-parser-gfm", "1.1.0-r1"))
+        );
+        assert_eq!(
+            split_pf("font-adobe-100dpi-1.0.4"),
+            Some(("font-adobe-100dpi", "1.0.4"))
+        );
+        assert_eq!(
+            split_pf("intel-microcode-20260812_p20260813"),
+            Some(("intel-microcode", "20260812_p20260813"))
+        );
+        assert_eq!(split_pf("acct-group"), None);
+    }
+
+    #[test]
+    fn strips_revision_only() {
+        assert_eq!(strip_rev("1.1.0-r1"), "1.1.0");
+        assert_eq!(strip_rev("1.1.0"), "1.1.0");
+        assert_eq!(strip_rev("0-r"), "0-r");
     }
 }

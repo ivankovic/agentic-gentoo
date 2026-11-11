@@ -16,8 +16,10 @@ MemoryMax=256M
 # Reading other users' processes (exe, maps, smaps_rollup) and resetting their peak memory
 # (clear_refs) takes ptrace access and DAC override; the kernel's process events and exit
 # reports take CAP_NET_ADMIN; the profiler's CPU-cycle sampling takes CAP_PERFMON, and the kernel
-# modules' addresses in /proc/modules (to tell i915 from btrfs) take CAP_SYSLOG.
-CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_NET_ADMIN CAP_PERFMON CAP_SYSLOG
+# modules' addresses in /proc/modules (to tell i915 from btrfs) take CAP_SYSLOG. The script an
+# interpreter runs is looked up with its user's file access, not root's (setfsuid, setfsgid):
+# that takes CAP_SETUID and CAP_SETGID, and without them no other user's script is named.
+CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_NET_ADMIN CAP_PERFMON CAP_SYSLOG CAP_SETUID CAP_SETGID
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
@@ -28,6 +30,14 @@ ProtectKernelModules=yes
 ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
+# Nothing is read from /dev: the profiler is a system call, the kernel's events are netlink.
+PrivateDevices=yes
+# No PrivateTmp: a program in another mount namespace (a jail, a Portage build) is compared with
+# the file at its path here, and a build's programs are under /var/tmp.
+# Netlink only, no IP.
+IPAddressDeny=any
+# usage.db is read by `deck patches usage` as the user: 0644.
+UMask=0022
 RestrictAddressFamilies=AF_NETLINK AF_UNIX
 RestrictNamespaces=yes
 RestrictRealtime=yes

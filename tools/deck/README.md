@@ -65,7 +65,9 @@ system's copy.
 Upstream state lives in the host's `upstream.toml`: one `[[patch]]` per patch, one
 `[[patch.event]]` per change of state, each with a timestamp and an optional URL and note. The
 last event is the current state. A patch removed from the repository stays listed, as
-`(file gone)`, so its history is kept.
+`(file gone)`, so its history is kept. Every change is made to the file as it is at that moment,
+in place: what another `deck patches` or a hand edit added while the TUI was open stays, as do
+comments and keys deck doesn't know. A patch new to the file goes at its end.
 
 | State | Meaning |
 |---|---|
@@ -190,7 +192,9 @@ later reviews, full ones too, until fixed or decided. The Review tab's Open colu
 the maintenance tile count what is still undecided.
 
 **Every day**, `deck-review.timer` (a user timer) runs `deck patches review auto`: security reviews of
-the changes in watched code, updates first, at most `budget.auto_per_day` a day. Findings
+the changes in watched code, updates first, at most `budget.auto_per_day` a day. A review that
+fails (the agent's error, or a findings block that can't be read) is recorded as failed and the
+next subject is taken; the command then ends with an error naming them. Findings
 not decided yet and failed automatic runs show on the maintenance tile (`deck-attention`).
 
 **Reports stay private**: `~/.local/state/deck/reviews/reports/<subject>/`, with the agent's
@@ -229,10 +233,15 @@ the agent reads both trees and the diff, read-only in the jail, as a review's ag
 agent is review.toml's `[scan] agent`, or its default `[[agent]]`; `--agent` picks another. Any
 program that reads a prompt on stdin and writes Markdown on stdout will do: nothing in the scan
 is tied to one. It reports what looks deliberate, in the same `findings` block as a review: high
-(very likely malicious) or medium (can't be ruled out) flags the version; low only notes.
+(very likely malicious) or medium (can't be ruled out) flags the version; low only notes. A
+report without the block, with one that is not the JSON asked for, or with a finding of any
+other severity says nothing to rely on: the scan failed.
 
 **Verdicts** are kept per version, `~/.local/state/deck/scan/<cat>/<pf>.json`, with the agent's
-report (`.md`), its errors (`.log`) and what it was given (`.scan.md`). clean, prebuilt and
+report (`.md`), its errors (`.log`) and what it was given (`.scan.md`). A verdict is of the
+ebuild it was made of (a hash of the ebuild, a line of nothing but KEYWORDS aside, and its
+`files/`): a version whose ebuild changes without a new revision is scanned again, an allowed
+one too. clean, prebuilt and
 trusted pass; flagged and failed (could not be scanned) block, except that a failed scan never
 holds up a security fix (a package with a GLSA affecting this machine, from the daily sync's
 `/var/lib/gentoo-security/affected`). `deck patches scan allow <cpv> --note ...` lets a blocked
@@ -242,7 +251,11 @@ only the versions the next scan compares with are kept.
 **The gate.** `sudo emerge` ([hosts/deck/usr-local/sbin/emerge](../../hosts/deck/usr-local/sbin/emerge))
 runs `deck patches scan gate -- <its arguments>` as the user before anything else, for every
 emerge that installs (not `-C`, `--depclean`, `--fetchonly`, ...): it scans what has no verdict
-yet and refuses the emerge when anything is blocked. `emerge --allow-unscanned ...` skips it for
+yet and refuses the emerge when anything is blocked. A version that is installed already passes
+as a rebuild, except a live ebuild, which is new every time, and one whose ebuild was changed
+in place since it was built (comments and keywords aside), which is scanned as that ebuild. What emerge lists but Portage can't
+resolve to a package and version is blocked as failed, and a list that can't be read stops the
+emerge. `emerge --allow-unscanned ...` skips it for
 that one emerge, and says so in the journal. **Every day** `deck-review.service` runs `deck patches
 scan pending` before the reviews, so an update is mostly scanned before it is wanted. Blocked
 updates show on the maintenance tile. One scan runs at a time.
@@ -256,11 +269,13 @@ come. The verdicts are the user's files: whoever controls the account could mark
 Two services record usage; `deck patches usage` and the Usage tab merge them per package.
 
 - `deck-usaged` ([systemd/deck-usaged.service](systemd/deck-usaged.service)), a root service:
-  CPU, memory and a CPU profile per package, hour by hour, into `/var/lib/deck/usage.db`.
-  `systemctl enable --now deck-usaged`.
+  CPU, memory and a CPU profile per package, hour by hour, into `/var/lib/deck/usage.db`
+  (readable by every user, as `deck patches usage` reads it). Rows older than 400 days are
+  dropped, at its start and once a day. `systemctl enable --now deck-usaged`.
 - `deck-focusd` ([systemd/deck-focusd.service](systemd/deck-focusd.service)), a user service in
   the graphical session: time each program was actively used, into
-  `$XDG_STATE_HOME/deck/focus.db`. `systemctl --user enable --now deck-focusd`.
+  `$XDG_STATE_HOME/deck/focus.db`, written every minute and when the session ends.
+  `systemctl --user enable --now deck-focusd`.
 
 **CPU.** Each process's CPU counter (`/proc/<pid>/stat`, all threads) is read once a second
 and the increase credited to its package. Only processes in cgroups whose CPU total moved are
@@ -271,7 +286,9 @@ older than the daemon is counted from the daemon's start.
 
 **Which package.** The program's path (`/proc/<pid>/exe`) looked up among every file in
 `/var/db/pkg/*/*/CONTENTS`, with directories resolved (`/bin` is `/usr/bin` here). For an
-interpreter (python, perl, ruby, sh, bash, lua, node) the script it runs is looked up instead.
+interpreter (python, perl, ruby, sh, bash, lua, node) the script it runs is looked up instead,
+with the file access of the process's user (the unit's `CAP_SETUID` and `CAP_SETGID`; without
+them the daemon says so once and the interpreter is credited).
 Programs no package owns get a label from where they live: `user:claude`, `user:rustup:rustc`,
 `user:build:<crate>` (cargo's `target/`), `local:<file>` (`/usr/local`), `tmp:`, and
 `container:<cgroup>` for a program from another root filesystem. Kernel threads are

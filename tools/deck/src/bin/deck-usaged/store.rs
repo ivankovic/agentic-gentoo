@@ -43,6 +43,10 @@ CREATE TABLE IF NOT EXISTS libs (
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ";
 
+/// How long rows are kept: a year and a month, so that this month can be set against last
+/// year's. The Usage tab shows at most the last 30 days; `--days` takes any number.
+pub const KEEP_DAYS: i64 = 400;
+
 #[derive(Default, Clone)]
 pub struct Agg {
     pub cpu_us: u64,
@@ -77,6 +81,18 @@ impl Store {
         db.busy_timeout(std::time::Duration::from_secs(5))?;
         db.execute_batch(SCHEMA)?;
         Ok(Store { db })
+    }
+
+    /// Drops what is older than KEEP_DAYS: hourly rows, profiler samples and spikes. The file
+    /// keeps its size; the freed pages are written again.
+    pub fn prune(&mut self, now: i64) -> Result<usize> {
+        let before = now - KEEP_DAYS * 86400;
+        let tx = self.db.transaction()?;
+        let n = tx.execute("DELETE FROM usage WHERE hour < ?1", [before])?
+            + tx.execute("DELETE FROM libs WHERE hour < ?1", [before])?
+            + tx.execute("DELETE FROM spikes WHERE start < ?1", [before])?;
+        tx.commit()?;
+        Ok(n)
     }
 
     pub fn meta(&self, key: &str, value: &str) -> Result<()> {
@@ -158,5 +174,41 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prune_drops_only_what_is_older_than_it_keeps() {
+        let mut s = Store { db: Connection::open_in_memory().unwrap() };
+        s.db.execute_batch(SCHEMA).unwrap();
+        let now = 1_800_000_000;
+        let old = now - (KEEP_DAYS + 1) * 86400;
+        let kept = now - (KEEP_DAYS - 1) * 86400;
+        let spike = |start| Spike { start, secs: 2, pkg: "a/b".into(), ctx: "user", cpu_us: 1, peak_cores: 1.0, rss_peak_kb: 1 };
+        let a = Agg::default();
+        s.flush(
+            [(old, "a/b", "user", &a), (kept, "a/b", "user", &a)].into_iter(),
+            [(old, "a/lib", "a/b", "user", 1), (kept, "a/lib", "a/b", "user", 1)].into_iter(),
+            &[spike(old), spike(kept)],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(s.prune(now).unwrap(), 3);
+        for (table, col) in [("usage", "hour"), ("libs", "hour"), ("spikes", "start")] {
+            let left: Vec<i64> = s
+                .db
+                .prepare(&format!("SELECT {col} FROM {table}"))
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            assert_eq!(left, [kept], "{table}");
+        }
+        assert_eq!(s.prune(now).unwrap(), 0);
     }
 }

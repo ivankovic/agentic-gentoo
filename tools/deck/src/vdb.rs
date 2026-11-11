@@ -2,6 +2,8 @@
 
 use anyhow::{Context, Result};
 use clap::ValueEnum;
+pub use deck::pkgmap::split_pf;
+use deck::pkgmap::strip_rev;
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::Read;
@@ -81,25 +83,6 @@ impl Pkg {
     pub fn p(&self) -> String {
         format!("{}-{}", self.pn, strip_rev(&self.pvr))
     }
-}
-
-fn strip_rev(v: &str) -> &str {
-    match v.rfind("-r") {
-        Some(i) if i + 2 < v.len() && v[i + 2..].bytes().all(|b| b.is_ascii_digit()) => &v[..i],
-        _ => v,
-    }
-}
-
-/// Splits `PN-PV[-rN]` into PN and the version with its revision. Package names may hold a dash
-/// followed by a digit (`font-adobe-100dpi`), versions never hold a dash other than the revision's,
-/// so the version starts after the last dash followed by a digit.
-pub fn split_pf(pf: &str) -> Option<(&str, &str)> {
-    let base = strip_rev(pf);
-    let i = base
-        .match_indices('-')
-        .map(|(i, _)| i)
-        .rfind(|&i| base[i + 1..].starts_with(|c: char| c.is_ascii_digit()))?;
-    Some((&pf[..i], &pf[i + 1..]))
 }
 
 pub fn dirs_sorted(dir: &Path) -> Vec<(String, PathBuf)> {
@@ -277,35 +260,5 @@ impl Filter {
             Filter::Overlay => p.repo != "gentoo",
             Filter::World => p.world,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn splits_pf() {
-        assert_eq!(split_pf("chess-tui-2.7.1"), Some(("chess-tui", "2.7.1")));
-        assert_eq!(
-            split_pf("kramdown-parser-gfm-1.1.0-r1"),
-            Some(("kramdown-parser-gfm", "1.1.0-r1"))
-        );
-        assert_eq!(
-            split_pf("font-adobe-100dpi-1.0.4"),
-            Some(("font-adobe-100dpi", "1.0.4"))
-        );
-        assert_eq!(
-            split_pf("intel-microcode-20260812_p20260813"),
-            Some(("intel-microcode", "20260812_p20260813"))
-        );
-        assert_eq!(split_pf("acct-group"), None);
-    }
-
-    #[test]
-    fn strips_revision_only() {
-        assert_eq!(strip_rev("1.1.0-r1"), "1.1.0");
-        assert_eq!(strip_rev("1.1.0"), "1.1.0");
-        assert_eq!(strip_rev("0-r"), "0-r");
     }
 }

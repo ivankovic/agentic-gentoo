@@ -463,14 +463,23 @@ fn review_cmd(host_dir: &std::path::Path, cmd: &ReviewCmd) -> Result<()> {
                 })
                 .count();
             let mut left = cfg.budget.auto_per_day.saturating_sub(done_today);
+            // One that fails doesn't stop the rest: it would be first again tomorrow, and nothing
+            // behind it would ever be reviewed. It still counts against the day's budget.
+            let mut failed = vec![];
             for i in board()? {
                 if left == 0 {
                     break;
                 }
                 if i.subject.tier().is_some() && matches!(i.security, review::Need::Delta { .. }) {
-                    run_review(&cfg, &repo, &i, Kind::Security, None, false, true, false, &usage_db)?;
+                    if let Err(e) = run_review(&cfg, &repo, &i, Kind::Security, None, false, true, false, &usage_db) {
+                        eprintln!("deck-patches: {e:#}");
+                        failed.push(i.subject.name());
+                    }
                     left -= 1;
                 }
+            }
+            if !failed.is_empty() {
+                anyhow::bail!("{} of today's reviews failed: {}", failed.len(), failed.join(", "));
             }
             Ok(())
         }

@@ -31,6 +31,8 @@ pub enum Msg {
     Niri(Value),
     NiriGone,
     Idle(bool),
+    /// SIGTERM or SIGINT: the session is ending.
+    Stop,
 }
 
 const SCHEMA: &str = "
@@ -227,6 +229,22 @@ fn main() -> Result<()> {
     )?;
 
     let (tx, rx) = mpsc::channel();
+    // SIGTERM (the session ends) and SIGINT are taken by a thread of their own, blocked in all
+    // the others, and stop the loop below, which writes what it has counted.
+    let signals = unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGTERM);
+        libc::sigaddset(&mut set, libc::SIGINT);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+        set
+    };
+    let t = tx.clone();
+    std::thread::spawn(move || {
+        let mut sig = 0;
+        unsafe { libc::sigwait(&signals, &mut sig) };
+        let _ = t.send(Msg::Stop);
+    });
     let t = tx.clone();
     std::thread::spawn(move || niri(t));
     let t = tx.clone();
@@ -267,6 +285,7 @@ fn main() -> Result<()> {
                 idle = false;
                 next = Instant::now() + Duration::from_secs(1);
             }
+            Ok(Msg::Stop) => break,
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }

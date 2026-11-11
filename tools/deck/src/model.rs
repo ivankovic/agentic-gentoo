@@ -177,23 +177,24 @@ impl Model {
         Ok(())
     }
 
+    /// Both change upstream.toml as it is now, not as it was loaded: what was added to it
+    /// meanwhile (another `deck patches`, a hand edit) is kept, and shows from here on.
     pub fn record(&mut self, id: &str, state: State, url: String, note: String) -> Result<()> {
         self.known(id)?;
-        self.tracking.entry(id).events.push(Event {
+        let event = Event {
             at: now(),
             state,
             url,
             note,
-        });
-        self.tracking.save(&self.track_path)?;
+        };
+        self.tracking = Tracking::add_event(&self.track_path, id, &event)?;
         self.rebuild_rows();
         Ok(())
     }
 
     pub fn set_upstream(&mut self, id: &str, url: String) -> Result<()> {
         self.known(id)?;
-        self.tracking.entry(id).upstream = url;
-        self.tracking.save(&self.track_path)?;
+        self.tracking = Tracking::set_upstream(&self.track_path, id, &url)?;
         self.rebuild_rows();
         Ok(())
     }

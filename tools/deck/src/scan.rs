@@ -98,6 +98,11 @@ pub struct Verdict {
     /// The owner's, with `allow`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
+    /// What the verdict is of: `ebuild_hash` of the ebuild and its files when it was scanned. A
+    /// version whose ebuild changed since, without a new revision, is scanned again. Empty in
+    /// verdicts from before it was recorded, and when the ebuild was not in the repository.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ebuild: String,
 }
 
 fn state_dir() -> PathBuf {
@@ -162,9 +167,12 @@ pub fn allow(cpv: &str, note: &str) -> Result<()> {
         unpatched: false,
         findings: vec![],
         note: String::new(),
+        ebuild: String::new(),
     });
     v.why = format!("allowed by the owner, was {}: {}", v.status.label(), v.why);
     v.status = Status::Allowed;
+    // Allowed as the ebuild is now: one that changes later is scanned again.
+    v.ebuild = review::find_ebuild(cpv).and_then(|e| ebuild_hash(&e)).unwrap_or_default();
     v.note = note.trim().into();
     v.when = chrono::Local::now().timestamp();
     v.save()
@@ -181,8 +189,13 @@ pub struct Pending {
     /// The installed version to compare with: the same slot's, else the newest installed.
     pub old: Option<String>,
     pub ebuild: Option<PathBuf>,
-    /// This very version is installed: a rebuild, nothing new.
+    /// This very version is installed, built from the ebuild the repository has now: a rebuild,
+    /// nothing new. Not when the ebuild was changed in place since: that one has not run here.
     pub installed: bool,
+    /// Portage could not tell package and version apart in what emerge listed: nothing to scan,
+    /// so it does not pass.
+    #[serde(default)]
+    pub unresolved: bool,
 }
 
 /// Resolves `cat/pkg-ver` (a binary package's may end in a build id, `-1`) for the scan.
@@ -192,24 +205,38 @@ from portage.versions import cpv_getkey, catpkgsplit
 db = portage.db[portage.root]
 port, vdb = db["porttree"].dbapi, db["vartree"].dbapi
 slot = lambda d, c: d.aux_get(c, ["SLOT"])[0].split("/")[0]
+def lines(path):
+    with open(path, errors="replace") as f:
+        return [l for l in f if l.strip() and not l.lstrip().startswith(('#', 'KEYWORDS='))]
+def built_from(cpv, ebuild):
+    # The installed package was built from the ebuild the repository has now (comments and
+    # keywords aside), or the repository has none to build another from.
+    try:
+        return not ebuild or lines(ebuild) == lines(vdb.findname(cpv))
+    except (OSError, TypeError):
+        return False
 out = []
 for cpv in sys.argv[1:]:
+    listed = cpv
     if not port.cpv_exists(cpv):
         m = re.fullmatch(r"(.+)-\d+", cpv)
-        if m and port.cpv_exists(m.group(1)):
+        if m and (port.cpv_exists(m.group(1)) or not catpkgsplit(cpv)):
             cpv = m.group(1)
     if not catpkgsplit(cpv):
+        out.append({"cpv": listed, "cp": "", "version": "", "old": None, "ebuild": None,
+                    "installed": False, "unresolved": True})
         continue
     cp = cpv_getkey(cpv)
     inst = vdb.match(cp)
     try:
         same = [c for c in inst if slot(vdb, c) == slot(port, cpv)]
-    except KeyError:
+    except (KeyError, portage.exception.PortageException):
         same = []
     old = portage.best([c for c in (same or inst) if c != cpv]) or None
     ver = lambda c: c[len(cp) + 1:]
+    ebuild = port.findname(cpv) or None
     out.append({"cpv": cpv, "cp": cp, "version": ver(cpv), "old": old and ver(old),
-                "ebuild": port.findname(cpv) or None, "installed": cpv in inst})
+                "ebuild": ebuild, "installed": cpv in inst and built_from(cpv, ebuild)})
 print(json.dumps(out))
 "#;
 
@@ -229,22 +256,64 @@ pub fn resolve(cpvs: &[String]) -> Result<Vec<Pending>> {
     Ok(serde_json::from_slice(&o.stdout)?)
 }
 
+/// Text without terminal escape sequences (colours): `ESC [ … letter`.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+        } else if chars.clone().next() == Some('[') {
+            chars.next();
+            // Parameters, then one final character.
+            for c in chars.by_ref() {
+                if ('\x40'..='\x7e').contains(&c) {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Whether a line of emerge's list is a package to merge, colours and indentation aside.
+fn merge_line(l: &str) -> bool {
+    l.starts_with("[ebuild") || l.starts_with("[binary")
+}
+
 /// The packages `emerge --pretend ARGS` lists for merging: `[ebuild  U ] cat/pkg-1.2 [1.1]`,
 /// `[binary  N ] cat/pkg-1.2-1`.
 pub fn parse_pretend(out: &str) -> Vec<String> {
-    out.lines()
-        .filter(|l| l.starts_with("[ebuild") || l.starts_with("[binary"))
+    strip_ansi(out)
+        .lines()
+        .map(str::trim_start)
+        .filter(|l| merge_line(l))
         .filter_map(|l| l.split_once("] ")?.1.split_whitespace().next())
         .map(|a| a.split(':').next().unwrap_or(a).to_string())
         .collect()
 }
 
-/// What emerge would merge with these arguments, asked as this user (`--ask` dropped).
+/// How many packages emerge's output says it would merge, however the lines are laid out: what
+/// `parse_pretend` must account for.
+fn merges_mentioned(out: &str) -> usize {
+    strip_ansi(out).lines().filter(|l| l.contains("[ebuild") || l.contains("[binary")).count()
+}
+
+/// emerge's arguments for the question: the caller's, without those that wait for an answer
+/// (`--ask`) or lay the list out differently (`--columns`), then the gate's own. Last, so that
+/// they hold whatever the caller's say: with colours or without `--pretend` there is no list.
+fn pretend_args(args: &[String]) -> Vec<String> {
+    args.iter()
+        .filter(|a| !matches!(a.as_str(), "--ask" | "-a" | "--columns"))
+        .map(|a| unbundle_ask(a))
+        .chain(["--pretend", "--quiet", "--color=n", "--nospinner"].map(String::from))
+        .collect()
+}
+
+/// What emerge would merge with these arguments, asked as this user.
 pub fn pending(args: &[String]) -> Result<Vec<String>> {
-    let args: Vec<&String> = args.iter().filter(|a| *a != "--ask" && *a != "-a").collect();
     let o = Command::new("emerge")
-        .args(["--pretend", "--quiet", "--color=n", "--nospinner"])
-        .args(args.iter().map(|a| unbundle_ask(a)))
+        .args(pretend_args(args))
         .stdin(Stdio::null())
         .output()
         .context("running emerge --pretend")?;
@@ -252,7 +321,12 @@ pub fn pending(args: &[String]) -> Result<Vec<String>> {
     if !o.status.success() {
         bail!("emerge --pretend failed:\n{}{}", text, String::from_utf8_lossy(&o.stderr));
     }
-    Ok(parse_pretend(&text))
+    let list = parse_pretend(&text);
+    // A list that can't be read is not an empty one: nothing would be scanned.
+    if list.len() != merges_mentioned(&text) {
+        bail!("emerge --pretend listed {} packages to merge, {} could be read:\n{text}", merges_mentioned(&text), list.len());
+    }
+    Ok(list)
 }
 
 /// `-avuDN` → `-vuDN`: a bundled --ask would wait for an answer nobody gives.
@@ -268,9 +342,17 @@ fn unbundle_ask(a: &str) -> String {
 /// Packages with a security advisory affecting this machine, as the daily sync recorded them
 /// (gentoo-sync.service): `202610-01 [N] ca-certificates: ... ( app-misc/ca-certificates )`.
 pub fn glsa_affected() -> HashSet<String> {
-    let text = std::fs::read_to_string("/var/lib/gentoo-security/affected").unwrap_or_default();
+    parse_glsa(&std::fs::read_to_string("/var/lib/gentoo-security/affected").unwrap_or_default())
+}
+
+/// The packages in the last parentheses of each line; a line without a pair names none.
+fn parse_glsa(text: &str) -> HashSet<String> {
     text.lines()
-        .filter_map(|l| Some(&l[l.rfind('(')? + 1..l.rfind(')')?]))
+        .filter_map(|l| {
+            let close = l.rfind(')')?;
+            let open = l[..close].rfind('(')?;
+            Some(&l[open + 1..close])
+        })
         .flat_map(|inside| inside.split_whitespace().filter(|w| w.contains('/')).map(String::from).collect::<Vec<_>>())
         .collect()
 }
@@ -473,6 +555,9 @@ pub fn triage_diff(diff: &str) -> Triage {
     let mut added: Vec<&str> = vec![];
     let (mut plus, mut minus) = (0usize, 0usize);
     let mut after_minus_header = false;
+    // Lines of the old and the new file the current hunk still holds, from its `@@` line: inside
+    // a hunk every line is the file's content, whatever it looks like once it has its sign.
+    let (mut old_left, mut new_left) = (0usize, 0usize);
     let finish = |file: &Option<(String, usize)>, end: usize, added: &mut Vec<&str>, plus: usize, minus: usize, t: &mut Triage| {
         if let Some((path, start)) = file {
             check_lines(path, added.drain(..), &mut t.signals);
@@ -488,6 +573,38 @@ pub fn triage_diff(diff: &str) -> Triage {
         let start = pos;
         pos += line.len();
         let l = line.trim_end_matches('\n');
+        if old_left > 0 || new_left > 0 {
+            match l.as_bytes().first() {
+                Some(b'+') if new_left > 0 => {
+                    added.push(&l[1..]);
+                    plus += 1;
+                    new_left -= 1;
+                    continue;
+                }
+                Some(b'-') if old_left > 0 => {
+                    minus += 1;
+                    old_left -= 1;
+                    continue;
+                }
+                // An empty line stands for an empty line of context.
+                Some(b' ') | None if old_left > 0 && new_left > 0 => {
+                    old_left -= 1;
+                    new_left -= 1;
+                    continue;
+                }
+                // "\ No newline at end of file" belongs to the line before it.
+                Some(b'\\') => continue,
+                // Not what the hunk announced: read on as outside one.
+                _ => (old_left, new_left) = (0, 0),
+            }
+        } else if l.starts_with('\\') {
+            continue;
+        }
+        if let Some(counts) = hunk_counts(l) {
+            (old_left, new_left) = counts;
+            after_minus_header = false;
+            continue;
+        }
         if l.starts_with("diff ") || l.starts_with("Binary files ") || l.starts_with("Only in ") {
             finish(&file, start, &mut added, plus, minus, &mut t);
             (plus, minus) = (0, 0);
@@ -514,7 +631,8 @@ pub fn triage_diff(diff: &str) -> Triage {
         }
         if after_minus_header && let Some(p) = l.strip_prefix("+++ ") {
             after_minus_header = false;
-            if let Some(f) = file.as_mut() {
+            // Once per file: its part of the difference has one such line.
+            if let Some(f) = file.as_mut().filter(|f| f.0.is_empty()) {
                 f.0 = strip(p.split('\t').next().unwrap_or(p));
             }
             continue;
@@ -531,10 +649,22 @@ pub fn triage_diff(diff: &str) -> Triage {
     t
 }
 
-/// A change worth reading: not just an ebuild's KEYWORDS.
+/// The lines a hunk holds of the old and of the new file: `@@ -3,7 +3,8 @@` → (7, 8), one where
+/// no count is given.
+fn hunk_counts(l: &str) -> Option<(usize, usize)> {
+    let mut parts = l.strip_prefix("@@ -")?.split(' ');
+    let count = |range: &str| range.split_once(',').map_or(Some(1), |(_, n)| n.parse().ok());
+    let old = count(parts.next()?)?;
+    let new = count(parts.next()?.strip_prefix('+')?)?;
+    Some((old, new))
+}
+
+/// A change worth reading: not just an ebuild's KEYWORDS. PART is one file's part of the
+/// difference: after its first `@@` every line with a sign is the file's.
 fn meaningful(path: &str, part: &str) -> bool {
     part.lines()
-        .filter(|l| (l.starts_with('+') && !l.starts_with("+++ ")) || (l.starts_with('-') && !l.starts_with("--- ")))
+        .skip_while(|l| !l.starts_with("@@ "))
+        .filter(|l| l.starts_with('+') || l.starts_with('-'))
         .any(|l| !(path.starts_with("ebuild/") && l[1..].trim_start().starts_with("KEYWORDS=")))
 }
 
@@ -892,6 +1022,47 @@ fn is_live(version: &str) -> bool {
     version.split('-').next().is_some_and(|v| v.starts_with("9999") || v.ends_with(".9999"))
 }
 
+/// What a verdict is of, beside the version: a SHA-256 over the ebuild and its `files/`, which
+/// change without the version changing when a maintainer edits them in place. A KEYWORDS line
+/// that holds only keywords is left out: stabilising a version changes nothing that runs.
+/// None when it can't be had; a verdict then holds as one from before hashes were recorded.
+fn ebuild_hash(ebuild: &Path) -> Option<String> {
+    fn files(dir: &Path, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            match e.file_type() {
+                Ok(t) if t.is_dir() => files(&e.path(), out),
+                Ok(t) if t.is_file() => out.push(e.path()),
+                _ => {}
+            }
+        }
+    }
+    let keywords = |l: &[u8]| {
+        std::str::from_utf8(l).ok().and_then(|l| l.trim().strip_prefix("KEYWORDS=\"")?.strip_suffix('"')).is_some_and(|k| {
+            k.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b' ' | b'~' | b'-' | b'_' | b'*'))
+        })
+    };
+    let text = std::fs::read(ebuild).ok()?;
+    let mut data: Vec<u8> = text.split_inclusive(|b| *b == b'\n').filter(|l| !keywords(l)).flatten().copied().collect();
+    let dir = ebuild.with_file_name("files");
+    let mut rest = vec![];
+    files(&dir, &mut rest);
+    rest.sort();
+    for f in rest {
+        let bytes = std::fs::read(&f).ok()?;
+        // Each file under its name and length, so that no two sets of files read the same.
+        data.extend(format!("\n{}\0{}\n", f.strip_prefix(&dir).unwrap_or(&f).display(), bytes.len()).bytes());
+        data.extend(bytes);
+    }
+    let mut child = Command::new("sha256sum").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let mut stdin = child.stdin.take()?;
+    // Written from a thread: sha256sum reads as it is fed, and prints only at the end.
+    let writer = std::thread::spawn(move || stdin.write_all(&data));
+    let o = child.wait_with_output().ok()?;
+    writer.join().ok()?.ok()?;
+    let hash = String::from_utf8_lossy(&o.stdout).split_whitespace().next()?.to_string();
+    (o.status.success() && hash.len() == 64).then_some(hash)
+}
+
 /// Scans one version and records the verdict.
 pub fn scan(cfg: &Config, agent: &Agent, p: &Pending, log: &mut dyn Write) -> Verdict {
     let now = chrono::Local::now().timestamp();
@@ -908,6 +1079,8 @@ pub fn scan(cfg: &Config, agent: &Agent, p: &Pending, log: &mut dyn Write) -> Ve
         unpatched: false,
         findings: vec![],
         note: String::new(),
+        // Before anything is read: an ebuild that changes during the scan no longer matches.
+        ebuild: p.ebuild.as_deref().and_then(ebuild_hash).unwrap_or_default(),
     };
     if let Err(e) = scan_into(cfg, agent, p, &mut v, log) {
         v.status = Status::Failed;
@@ -982,20 +1155,37 @@ fn scan_into(cfg: &Config, agent: &Agent, p: &Pending, v: &mut Verdict, log: &mu
     review::run_agent(agent, &base, &prompt(p, from.as_deref(), &packet_name), out, err)
         .with_context(|| format!("its errors are in {}", report.with_extension("log").display()))?;
     let text = std::fs::read_to_string(&report)?;
-    if !text.contains("```findings") {
-        bail!("the agent's report has no findings block: {}", report.display());
-    }
-    v.findings = review::parse_findings(&text);
-    let serious: Vec<&review::Finding> = v.findings.iter().filter(|f| f.rank() <= 1).collect();
-    if let Some(f) = serious.first() {
+    let (findings, flagged) = judge(&text).with_context(|| format!("the agent's report is {}", report.display()))?;
+    v.findings = findings;
+    if let Some(why) = flagged {
         v.status = Status::Flagged;
-        v.why = format!("{} ({}, {}){}", f.title, f.severity, f.place, if serious.len() > 1 { format!(" and {} more", serious.len() - 1) } else { String::new() });
+        v.why = why;
     } else {
         v.status = if prebuilt { Status::Prebuilt } else { Status::Clean };
         v.why = format!("{} read {} signals and {} build files: nothing deliberate", agent.name, t.signals.len(), t.build_files.len());
         prune(&p.cp, &keep);
     }
     Ok(())
+}
+
+/// What the agent's report says: its findings, and why the version is flagged if any is high or
+/// medium. An error, so the scan failed, when the report says nothing that can be relied on: no
+/// findings block, one that is not the JSON asked for, or a finding whose severity is none of
+/// high, medium and low.
+fn judge(report: &str) -> Result<(Vec<review::Finding>, Option<String>)> {
+    if !report.contains("```findings") {
+        bail!("the agent's report has no findings block");
+    }
+    let findings = review::parse_findings(report)?;
+    if let Some(f) = findings.iter().find(|f| !f.severity_known() || f.is_fix()) {
+        bail!("a finding has the severity \"{}\", none of high, medium, low: {}", f.severity, f.title);
+    }
+    let serious: Vec<&review::Finding> = findings.iter().filter(|f| f.rank() <= 1).collect();
+    let why = serious.first().map(|f| {
+        let more = if serious.len() > 1 { format!(" and {} more", serious.len() - 1) } else { String::new() };
+        format!("{} ({}, {}){more}", f.title, f.severity, f.place)
+    });
+    Ok((findings, why))
 }
 
 // ---- The gate ----
@@ -1025,24 +1215,64 @@ pub fn gate(cfg: &Config, agent: &Agent, pending: &[Pending], rescan: bool, log:
     // One scan at a time (the daily one and an emerge's): they would prepare the same trees.
     let _lock = lock(log);
     let glsa = glsa_affected();
-    let mut out = vec![];
-    for p in pending {
-        if p.installed {
-            out.push(Decision { cpv: p.cpv.clone(), pass: true, label: "installed".into(), why: "this version is installed: a rebuild".into() });
-            continue;
-        }
-        let v = match Verdict::load(&p.cpv) {
-            Some(v) if !rescan || v.status == Status::Allowed => v,
-            _ => scan(cfg, agent, p, log),
+    pending
+        .iter()
+        .map(|p| {
+            let hash = p.ebuild.as_deref().and_then(ebuild_hash).unwrap_or_default();
+            decide(cfg, p, &glsa, rescan, Verdict::load(&p.cpv), &hash, &mut |p| scan(cfg, agent, p, log))
+        })
+        .collect()
+}
+
+/// The gate's decision for one package: from the verdict KNOWN if it still holds, else from SCAN.
+/// EBUILD is `ebuild_hash` of the ebuild as it is now.
+fn decide(
+    cfg: &Config,
+    p: &Pending,
+    glsa: &HashSet<String>,
+    rescan: bool,
+    known: Option<Verdict>,
+    ebuild: &str,
+    scan: &mut dyn FnMut(&Pending) -> Verdict,
+) -> Decision {
+    let allowed = known.as_ref().is_some_and(|v| v.status == Status::Allowed);
+    if p.unresolved {
+        // Nothing to scan and no package name for a security fix: only the owner lets it through.
+        return match known {
+            Some(v) if allowed => Decision { cpv: p.cpv.clone(), pass: true, label: v.status.label().into(), why: v.why },
+            _ => Decision {
+                cpv: p.cpv.clone(),
+                pass: false,
+                label: Status::Failed.label().into(),
+                why: "Portage cannot tell its package and version apart: not scanned".into(),
+            },
         };
-        let security_fix = glsa.contains(&p.cp);
-        let (pass, label) = match v.status {
-            Status::Failed if security_fix => (true, "failed, but a security fix".to_string()),
-            s => (s.passes(), s.label().to_string()),
-        };
-        out.push(Decision { cpv: p.cpv.clone(), pass, label, why: v.why.clone() });
     }
-    out
+    let trusted = cfg.scan.trusted.contains(&p.cp);
+    // A live ebuild builds whatever its branch holds now: installed or not, it is never "a
+    // rebuild, nothing new". Ours pass as trusted, another only when the owner allowed it.
+    // Nor is a version whose verdict was made of another ebuild or other files beside it (they
+    // are not kept with the installed package, so only a verdict tells).
+    let moved = known.as_ref().is_some_and(|v| !v.ebuild.is_empty() && v.ebuild != ebuild);
+    if p.installed && !is_live(&p.version) && !moved {
+        return Decision { cpv: p.cpv.clone(), pass: true, label: "installed".into(), why: "this version is installed: a rebuild".into() };
+    }
+    // A verdict holds for the ebuild it was made of (one allowed before that was recorded: for
+    // any), and "trusted" only while review.toml says so.
+    let holds = |v: &Verdict| {
+        (v.ebuild == ebuild || (v.status == Status::Allowed && v.ebuild.is_empty()))
+            && (v.status != Status::Trusted || trusted)
+    };
+    let v = match known {
+        Some(v) if holds(&v) && (!rescan || allowed) => v,
+        _ => scan(p),
+    };
+    let security_fix = glsa.contains(&p.cp);
+    let (pass, label) = match v.status {
+        Status::Failed if security_fix => (true, "failed, but a security fix".to_string()),
+        s => (s.passes(), s.label().to_string()),
+    };
+    Decision { cpv: p.cpv.clone(), pass, label, why: v.why }
 }
 
 #[cfg(test)]
@@ -1139,6 +1369,243 @@ diff -ruN --no-dereference -x .git 1.0/ebuild/x.ebuild 1.1/ebuild/x.ebuild
         assert_eq!(unbundle_ask("-avuDN"), "-vuDN");
         assert_eq!(unbundle_ask("-a"), "--verbose");
         assert_eq!(unbundle_ask("--update"), "--update");
+    }
+
+    #[test]
+    fn pretend_lines_in_colour_and_indented() {
+        let out = "\x1b[32;01m[ebuild  \x1b[0m N    ] \x1b[32mdev-libs/foo-1.2\x1b[39;49;00m:0/1::gentoo  USE=\"-x\"\n\
+                   \x1b[35m[binary\x1b[m   U  ] app-misc/bar-2-r1-3 [1]\n\
+                   [nomerge       ] sys-apps/qux-1\n\
+                   \x20[ebuild   R   ]  dev-libs/baz-3\r\n\
+                   \n\x1b\n[ebuild\n";
+        assert_eq!(parse_pretend(out), ["dev-libs/foo-1.2", "app-misc/bar-2-r1-3", "dev-libs/baz-3"]);
+        // The line cut short is counted, so the list is known to be incomplete.
+        assert_eq!(merges_mentioned(out), 4);
+        assert_eq!(merges_mentioned("Calculating dependencies... done!\n"), 0);
+        assert_eq!(strip_ansi("a\x1b[1;31mb\x1b[0mc\x1b["), "abc");
+    }
+
+    #[test]
+    fn the_gates_options_come_last() {
+        let args = ["-av", "--color=y", "--ask", "--columns", "@world"].map(String::from);
+        assert_eq!(pretend_args(&args), ["-v", "--color=y", "@world", "--pretend", "--quiet", "--color=n", "--nospinner"]);
+    }
+
+    #[test]
+    fn glsa_lines() {
+        let text = "202610-01 [N] ca-certificates: x ( app-misc/ca-certificates )\n\
+                    202610-02 [N] two (old note): y ( dev-libs/a dev-libs/b )\n\
+                    202610-03 [N] odd ) then ( dev-libs/c\n\
+                    no parentheses\n)(\n";
+        let got = parse_glsa(text);
+        assert_eq!(got.len(), 3, "{got:?}");
+        assert!(got.contains("app-misc/ca-certificates") && got.contains("dev-libs/a") && got.contains("dev-libs/b"));
+    }
+
+    #[test]
+    fn triage_reads_hunk_lines_as_content() {
+        // A removed line `-- x` and an added line `++ y` look like a file's header once signed.
+        let diff = "\
+diff -ruN --no-dereference -x .git 1.0/work/x/configure 1.1/work/x/configure
+--- 1.0/work/x/configure\t2026-01-01
++++ 1.1/work/x/configure\t2026-01-02
+@@ -1,3 +1,4 @@
+ set -e
+--- 1.0/work/x/README
++++ 1.1/work/x/README
++wget https://example.org/x
+ exit 0
+\\ No newline at end of file
+diff -ruN --no-dereference -x .git 1.0/work/x/README 1.1/work/x/README
+--- 1.0/work/x/README\t2026-01-01
++++ 1.1/work/x/README\t2026-01-02
+@@ -1 +1 @@
+-old
++new
+";
+        let t = triage_diff(diff);
+        assert_eq!(t.build_files, [("work/x/configure".to_string(), 2, 1)]);
+        let signals: Vec<(&str, &str)> = t.signals.iter().map(|s| (s.rule, s.file.as_str())).collect();
+        assert_eq!(signals, [("network-at-build", "work/x/configure")]);
+        assert!(t.build_diff.contains("wget") && !t.build_diff.contains("+new"));
+        assert_eq!(hunk_counts("@@ -3,7 +3,8 @@ fn x()"), Some((7, 8)));
+        assert_eq!(hunk_counts("@@ -0,0 +1 @@"), Some((0, 1)));
+        assert_eq!(hunk_counts("@@ text"), None);
+    }
+
+    #[test]
+    fn a_build_file_changed_only_in_header_like_lines_is_a_change() {
+        let part = "diff -ruN 1.0/work/x/a.m4 1.1/work/x/a.m4\n--- 1.0/work/x/a.m4\n+++ 1.1/work/x/a.m4\n@@ -1 +1 @@\n--- a\n+++ b\n";
+        assert!(meaningful("work/x/a.m4", part));
+        let keywords = "diff -ruN 1.0/ebuild/x.ebuild 1.1/ebuild/x.ebuild\n--- 1.0/ebuild/x.ebuild\n+++ 1.1/ebuild/x.ebuild\n@@ -1 +1 @@\n-KEYWORDS=\"~amd64\"\n+KEYWORDS=\"amd64\"\n";
+        assert!(!meaningful("ebuild/x.ebuild", keywords));
+    }
+
+    fn report(block: &str) -> String {
+        format!("# Scan\n\nRead it all.\n\n```findings\n{block}\n```\n")
+    }
+
+    #[test]
+    fn a_report_is_judged_by_its_findings() {
+        let (f, why) = judge(&report("[]")).unwrap();
+        assert!(f.is_empty() && why.is_none());
+        let (f, why) = judge(&report(r#"[{"severity": "low", "title": "odd", "where": "a:1"}]"#)).unwrap();
+        assert!(f.len() == 1 && why.is_none());
+        let (_, why) = judge(&report(r#"[{"severity": "low", "title": "odd"}, {"severity": "Medium", "title": "reads keys", "where": "b:2"}]"#)).unwrap();
+        assert_eq!(why.as_deref(), Some("reads keys (Medium, b:2)"));
+    }
+
+    #[test]
+    fn a_report_that_cannot_be_read_fails_the_scan() {
+        assert!(judge("# Scan\n\nNothing found.\n").is_err());
+        assert!(judge(&report("[{\"severity\": \"high\", \"title\": \"cut")).is_err());
+        assert!(judge(&report("nothing")).is_err());
+    }
+
+    #[test]
+    fn a_finding_with_an_unknown_severity_fails_the_scan() {
+        for severity in ["", "info", "none", "fix"] {
+            let r = report(&format!(r#"[{{"severity": "{severity}", "title": "t", "where": "a:1"}}]"#));
+            assert!(judge(&r).is_err(), "{severity}");
+        }
+        assert!(judge(&report(r#"[{"title": "no severity at all"}]"#)).is_err());
+    }
+
+    fn pending_of(cpv: &str, cp: &str, installed: bool) -> Pending {
+        Pending { cpv: cpv.into(), cp: cp.into(), version: cpv[cp.len() + 1..].into(), old: None, ebuild: None, installed, unresolved: false }
+    }
+
+    fn verdict(cpv: &str, status: Status, ebuild: &str) -> Verdict {
+        Verdict {
+            cpv: cpv.into(),
+            from: None,
+            when: 1,
+            status,
+            why: status.label().into(),
+            signals: 0,
+            build_files: 0,
+            agent: String::new(),
+            report: None,
+            unpatched: false,
+            findings: vec![],
+            note: String::new(),
+            ebuild: ebuild.into(),
+        }
+    }
+
+    /// `decide` with a scan that only counts its calls and returns a verdict of STATUS.
+    fn decided(cfg: &Config, p: &Pending, known: Option<Verdict>, ebuild: &str, scans_as: Status) -> (Decision, usize) {
+        let mut scans = 0;
+        let d = decide(cfg, p, &HashSet::new(), false, known, ebuild, &mut |p| {
+            scans += 1;
+            verdict(&p.cpv, scans_as, ebuild)
+        });
+        (d, scans)
+    }
+
+    #[test]
+    fn an_unresolved_package_is_blocked() {
+        let cfg = Config::default();
+        let mut p = pending_of("sys-apps/sed-4.9-1", "sys-apps/sed", false);
+        (p.cp, p.version, p.unresolved) = (String::new(), String::new(), true);
+        let (d, scans) = decided(&cfg, &p, None, "", Status::Clean);
+        assert!(!d.pass && d.label == "failed" && scans == 0, "{}: {}", d.label, d.why);
+        // Not even as a security fix: there is no package name to look up.
+        let d = decide(&cfg, &p, &HashSet::from([String::new()]), false, None, "", &mut |p| verdict(&p.cpv, Status::Clean, ""));
+        assert!(!d.pass);
+        // The owner can still allow it.
+        let (d, _) = decided(&cfg, &p, Some(verdict(&p.cpv, Status::Allowed, "")), "", Status::Clean);
+        assert!(d.pass && d.label == "allowed");
+        // What Portage does resolve is told apart from what it doesn't.
+        let listed: Vec<Pending> = serde_json::from_str(
+            r#"[{"cpv": "a/b-1-1", "cp": "", "version": "", "old": null, "ebuild": null, "installed": false, "unresolved": true},
+                {"cpv": "a/c-1", "cp": "a/c", "version": "1", "old": null, "ebuild": null, "installed": true}]"#,
+        )
+        .unwrap();
+        assert!(listed[0].unresolved && !listed[1].unresolved);
+    }
+
+    #[test]
+    fn an_installed_live_ebuild_is_not_a_rebuild() {
+        let mut cfg = Config::default();
+        let p = pending_of("app-misc/theirs-9999", "app-misc/theirs", true);
+        // It reaches the scan, which fails a live ebuild.
+        let (d, scans) = decided(&cfg, &p, None, "", Status::Failed);
+        assert!(!d.pass && scans == 1);
+        // An installed release is a rebuild.
+        let (d, scans) = decided(&cfg, &pending_of("app-misc/theirs-1.2", "app-misc/theirs", true), None, "", Status::Failed);
+        assert!(d.pass && d.label == "installed" && scans == 0);
+        // Not when its verdict was of another ebuild than the one there now.
+        let was = verdict("app-misc/theirs-1.2", Status::Clean, "one");
+        let (d, scans) = decided(&cfg, &pending_of("app-misc/theirs-1.2", "app-misc/theirs", true), Some(was), "two", Status::Failed);
+        assert!(!d.pass && scans == 1);
+        // Ours passes as trusted; once it is off the list, the old verdict no longer holds.
+        cfg.scan.trusted = vec!["app-misc/ours".into()];
+        let ours = pending_of("app-misc/ours-9999", "app-misc/ours", true);
+        let (d, _) = decided(&cfg, &ours, None, "", Status::Trusted);
+        assert!(d.pass && d.label == "trusted");
+        cfg.scan.trusted.clear();
+        let (d, scans) = decided(&cfg, &ours, Some(verdict(&ours.cpv, Status::Trusted, "")), "", Status::Failed);
+        assert!(!d.pass && scans == 1);
+    }
+
+    #[test]
+    fn the_live_rule_fails_the_scan_itself() {
+        let agent = Agent { name: "none".into(), command: vec![], default: false };
+        let mut v = verdict("app-misc/theirs-9999", Status::Clean, "");
+        let p = pending_of("app-misc/theirs-9999", "app-misc/theirs", true);
+        assert!(scan_into(&Config::default(), &agent, &p, &mut v, &mut std::io::sink()).is_err());
+    }
+
+    #[test]
+    fn a_verdict_holds_for_the_ebuild_it_was_made_of() {
+        let cfg = Config::default();
+        let p = pending_of("dev-libs/foo-1.2", "dev-libs/foo", false);
+        let known = |status, ebuild| Some(verdict(&p.cpv, status, ebuild));
+        // The same ebuild: the verdict stands.
+        let (d, scans) = decided(&cfg, &p, known(Status::Clean, "aa"), "aa", Status::Flagged);
+        assert!(d.pass && scans == 0);
+        // The ebuild changed, or the verdict is from before hashes were recorded: scanned again.
+        let (d, scans) = decided(&cfg, &p, known(Status::Clean, "aa"), "bb", Status::Flagged);
+        assert!(!d.pass && scans == 1);
+        let (_, scans) = decided(&cfg, &p, known(Status::Clean, ""), "bb", Status::Clean);
+        assert_eq!(scans, 1);
+        // Allowed before hashes were recorded stays allowed; allowed as another ebuild does not.
+        let (d, scans) = decided(&cfg, &p, known(Status::Allowed, ""), "bb", Status::Flagged);
+        assert!(d.pass && scans == 0);
+        let (d, scans) = decided(&cfg, &p, known(Status::Allowed, "aa"), "bb", Status::Flagged);
+        assert!(!d.pass && scans == 1);
+        // A failed scan passes only as a security fix.
+        let d = decide(&cfg, &p, &HashSet::from(["dev-libs/foo".to_string()]), false, None, "", &mut |p| verdict(&p.cpv, Status::Failed, ""));
+        assert!(d.pass && d.label == "failed, but a security fix");
+    }
+
+    #[test]
+    fn the_ebuild_hash_follows_what_runs() {
+        let dir = std::env::temp_dir().join(format!("deck-scan-hash-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("files")).unwrap();
+        let ebuild = dir.join("foo-1.ebuild");
+        let write = |text: &str| std::fs::write(&ebuild, text).unwrap();
+        write("EAPI=8\nKEYWORDS=\"~amd64\"\nsrc_install() { default; }\n");
+        std::fs::write(dir.join("files/a.patch"), "a\n").unwrap();
+        let first = ebuild_hash(&ebuild).unwrap();
+        assert_eq!(first.len(), 64);
+        // Stabilised: the same.
+        write("EAPI=8\nKEYWORDS=\"amd64 ~arm64\"\nsrc_install() { default; }\n");
+        assert_eq!(ebuild_hash(&ebuild).unwrap(), first);
+        // A KEYWORDS line that holds more than keywords counts.
+        write("EAPI=8\nKEYWORDS=\"amd64\"; true\nsrc_install() { default; }\n");
+        assert_ne!(ebuild_hash(&ebuild).unwrap(), first);
+        // Its phases changed, or one of its files.
+        write("EAPI=8\nKEYWORDS=\"amd64\"\nsrc_install() { default; true; }\n");
+        assert_ne!(ebuild_hash(&ebuild).unwrap(), first);
+        write("EAPI=8\nKEYWORDS=\"amd64\"\nsrc_install() { default; }\n");
+        assert_eq!(ebuild_hash(&ebuild).unwrap(), first);
+        std::fs::write(dir.join("files/a.patch"), "b\n").unwrap();
+        assert_ne!(ebuild_hash(&ebuild).unwrap(), first);
+        assert!(ebuild_hash(&dir.join("gone.ebuild")).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
