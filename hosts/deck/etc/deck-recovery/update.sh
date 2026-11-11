@@ -143,6 +143,13 @@ if [[ -n $ESP ]]; then
   [[ -s $ROOT/etc/dracut.conf.d/90-cmdline.conf ]] ||
     { echo "update.sh: no 90-cmdline.conf yet (install.sh writes it); not building the UKI" >&2; exit 1; }
   kver=$(ls "$ROOT/lib/modules" | sort -V | tail -1)
-  "${nspawn[@]}" --bind="$ESP:/efi" dracut --force --uefi --kver "$kver" "/efi/EFI/Linux/$RECOVERY_LABEL.efi"
+  # Built next to the UKI in use and moved over it only once it is whole (a kernel and an initramfs
+  # in it), so a build that fails or is cut short leaves the recovery that worked.
+  uki=EFI/Linux/$RECOVERY_LABEL.efi
+  rm -f "$ESP/$uki.new"
+  "${nspawn[@]}" --bind="$ESP:/efi" dracut --force --uefi --kver "$kver" "/efi/$uki.new"
+  sections=$(objdump -h "$ESP/$uki.new" 2>/dev/null) && [[ $sections == *.linux* && $sections == *.initrd* ]] ||
+    { rm -f "$ESP/$uki.new"; echo "update.sh: the new UKI is incomplete; $ESP/$uki is unchanged" >&2; exit 1; }
+  mv -f "$ESP/$uki.new" "$ESP/$uki"
   echo "update.sh: $ESP/EFI/Linux/$RECOVERY_LABEL.efi for $kver"
 fi
