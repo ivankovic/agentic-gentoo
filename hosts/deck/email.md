@@ -95,6 +95,9 @@ From deck (aerc: `d` delete, `a` archive; `home/.config/aerc/binds.conf`):
 - If Gmail can't be reached, the whole sync waits (the hook would otherwise put `inbox` and
   `deleted` back as the folders say). A tag changed while a sync runs can still be undone by
   it; do it again.
+- A message Gmail refuses to act on, or doesn't have, is tried at five syncs and then left as it
+  is there, with one notification (`~/.local/state/deck-mail/push.json` counts the tries); an
+  account where Gmail refused something isn't synced that time, the others are.
 
 ### Finding what to clean up
 
@@ -120,6 +123,8 @@ a Nextcloud tag), and keeps a copy in `~/Documents/Archive`. `deck-mail sync` ru
   only: the senders are personal; `sender regex | file regex | category | name`, `{1}` for a
   group) only fill in `t`'s form, so a known bill is `t`, Enter. Choices are `sha256:` lines
   in the same file, at the top; a tag `noarchive` keeps a whole message out.
+- **Categories**: `~/.config/deck-mail/categories`, one a line, at most 12 (on deck only); without
+  it a general built-in list.
 - **Once each**: a message done is tagged `archived`; the PDFs sent are remembered by their
   SHA-256 (`~/.local/state/deck-mail/archive.json`), so the same PDF in two messages or two
   accounts goes once. Nothing in Nextcloud is overwritten: a name taken gets " (2)".

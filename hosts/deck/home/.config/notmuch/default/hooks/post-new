@@ -14,7 +14,10 @@ changed=
 state=${XDG_STATE_HOME:-$HOME/.local/state}/deck-mail/pre-new
 read -r uuid _ < <(notmuch count --lastmod '*' | cut -f2,3) || true
 if [[ -r $state ]] && read -r was_uuid was_rev <"$state" && [[ $was_uuid == "$uuid" ]]; then
-	changed="lastmod:$((was_rev + 1)).. and "
+	# Or still `new`: indexed earlier without this hook having tagged it (a `notmuch new
+	# --no-hooks`, as mmm runs after sending, or a run of this hook that died), so never yet
+	# tagged from its folder.
+	changed="(lastmod:$((was_rev + 1)).. or tag:new) and "
 fi
 rm -f "$state"
 inbox=() sent=() drafts=() trash=() spam=()

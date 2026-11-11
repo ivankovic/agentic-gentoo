@@ -15,6 +15,7 @@
                      there only suggest. --dry-run lists every PDF and its name. `sync` runs it.
   deck-mail review    a TUI over those PDFs: which go to Nextcloud, in which folder, as what;
                      which are left out; and which mail to delete. It writes archive-names.
+                     Its categories: ~/.config/deck-mail/categories, one a line (at most 12).
   deck-mail pdfs ID…  mmm's view of these messages' PDFs, as JSON
   deck-mail file SHA256 CATEGORY NAME | SHA256 - | SHA256 --forget
                      mmm's choice for one PDF: to Nextcloud as this, left out, or undecided
@@ -76,7 +77,6 @@ import json
 import os
 import pathlib
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -118,7 +118,8 @@ def accounts():
     return out
 
 
-def write(path, text, mode=0o600):
+def write(path, text, mode=0o600, quiet=False):
+    """Writes the file whole or not at all: beside it, then renamed over it."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
@@ -126,7 +127,8 @@ def write(path, text, mode=0o600):
         f.write(text)
     os.chmod(tmp, mode)
     os.replace(tmp, path)
-    print(f"deck-mail: wrote {path}")
+    if not quiet:
+        print(f"deck-mail: wrote {path}")
 
 
 HEADER = "# Written by `deck-mail config` from {} (addresses stay off the repo). Edit that instead.\n"
@@ -291,58 +293,181 @@ def pending(query):
     return json.loads(out.stdout)
 
 
+def message_files(mid):
+    """Every file of a message."""
+    out = subprocess.run(["notmuch", "search", "--exclude=false", "--output=files", nm_id(mid)],
+                         capture_output=True, text=True, check=True).stdout
+    return [f for f in out.split("\n") if f]
+
+
+def far_uids(folder):
+    """mbsync's record of one maildir folder (its .mbsyncstate): Gmail's UIDVALIDITY there and
+    {the file's number: Gmail's UID}. mbsync numbers the files itself (,U= in their names);
+    Gmail's numbers are only in that record. (None, {}) when there's none to trust: unreadable,
+    or mbsync stopped halfway through it (its journal is still there)."""
+    if any((folder / f".mbsyncstate.{x}").exists() for x in ("journal", "new")):
+        return None, {}
+    try:
+        lines = (folder / ".mbsyncstate").read_text().splitlines()
+    except (OSError, ValueError):
+        return None, {}
+    validity, uids, head = None, {}, True
+    for line in lines:
+        parts = line.split()
+        if head:
+            if not parts:
+                head = False
+            elif parts[0] in ("FarUidValidity", "MasterUidValidity") and parts[1:2] \
+                    and parts[1].isdigit():
+                validity = int(parts[1])
+        elif len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit() \
+                and int(parts[0]) and int(parts[1]):
+            uids[int(parts[1])] = int(parts[0])
+    return validity, uids
+
+
+def file_uids(paths, folder, uids):
+    """Gmail's UIDs of the files among `paths` that are in this maildir folder, by far_uids'
+    {file's number: Gmail's UID}."""
+    out = set()
+    for p in map(pathlib.Path, paths):
+        m = re.search(r",U=(\d+)", p.name)
+        if m and p.parent.parent == folder and int(m[1]) in uids:
+            out.add(uids[int(m[1])])
+    return sorted(out)
+
+
+def push_queries(n):
+    """What was done on deck that Gmail hasn't heard of, as notmuch searches. Never mail that
+    notmuch new has only just added (`new`): its tags come from its folders, in the post-new
+    hook, and until then the ones it lacks say nothing."""
+    return {
+        "archive": f'folder:"{n}/INBOX" and not tag:inbox and not tag:new',
+        # Spam wins over delete: both move the message, and Spam is what trains Gmail.
+        "delete": f'tag:deleted and not tag:spam and not tag:new and path:"{n}/**"'
+                  f' and not folder:"{n}/Trash"',
+        "spam": f'tag:spam and not tag:new and path:"{n}/**" and not folder:"{n}/Spam"'
+                f' and not folder:"{n}/Trash"',
+        "unspam": f'folder:"{n}/Spam" and not tag:spam and not tag:new',
+    }
+
+
+# How many syncs try one message's archive, delete or spam report in Gmail before giving up on
+# it, with one notification. The counts, per account, of the ones still failing: push.json.
+PUSH_TRIES = 5
+PUSH_DONE = {"archive": "archived", "delete": "moved to the Bin", "spam": "reported as spam",
+             "unspam": "back from Spam"}
+
+
+def push_tries():
+    try:
+        tries = json.loads((STATE / "push.json").read_text())
+        return tries if isinstance(tries, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
 def push(a):
     """Archive, delete and report spam in Gmail as was done on deck, and take out of Spam what
-    deck says isn't. False if it failed."""
+    deck says isn't. False if it failed, or Gmail refused one of them: then the account isn't
+    synced this time, and it's tried again. A message that fails or isn't found PUSH_TRIES times
+    is given up on (it stays as it is in Gmail), and a notification says so once."""
     n = a["name"]
-    archive = pending(f'folder:"{n}/INBOX" and not tag:inbox')
-    # Spam wins over delete: both move the message, and Spam is what trains Gmail.
-    delete = pending(f'tag:deleted and not tag:spam and path:"{n}/**" and not folder:"{n}/Trash"')
-    spam = pending(f'tag:spam and path:"{n}/**" and not folder:"{n}/Spam" and not folder:"{n}/Trash"')
-    unspam = pending(f'folder:"{n}/Spam" and not tag:spam')
-    if not archive and not delete and not spam and not unspam:
-        return True
+    todo = {kind: pending(q) for kind, q in push_queries(n).items()}
+    tries = push_tries()
+    was = tries.get(n) if isinstance(tries.get(n), dict) else {}
+    waiting = {f"{kind} {mid}" for kind, ids in todo.items() for mid in ids}
+    count = {k: v for k, v in was.items() if k in waiting}  # the rest is done, or undone on deck
+    todo = {kind: [m for m in ids if count.get(f"{kind} {m}", 0) < PUSH_TRIES]
+            for kind, ids in todo.items()}
+    done = {kind: 0 for kind in todo}
+    held, gave_up = False, []
+
+    def found(answer):
+        if answer[0] != "OK":
+            raise imaplib.IMAP4.error(f"SEARCH: {answer[1]}")
+        return answer[1][0].decode().split() if answer[1] and answer[1][0] else []
+
+    def each(imap, kind, box, search, *command):
+        """One command for each message of this kind, in the Gmail folder that's selected: found
+        by mbsync's record of its files in `box` when that's of this UIDVALIDITY, else by its
+        Message-ID."""
+        nonlocal held
+        if not todo[kind]:
+            return
+        valid = imap.response("UIDVALIDITY")[1][0]
+        validity, record = far_uids(MAIL / n / box)
+        if valid is None or validity != int(valid):
+            record = {}
+        for mid in todo[kind]:
+            key, refused = f"{kind} {mid}", None
+            try:
+                try:
+                    uids = [str(u) for u in file_uids(message_files(mid), MAIL / n / box, record)]
+                except (OSError, subprocess.CalledProcessError):
+                    uids = []
+                uids = uids or found(search(mid))
+                if uids:
+                    typ, data = imap.uid(command[0], ",".join(uids), *command[1:])
+                    if typ != "OK":
+                        raise imaplib.IMAP4.error(f"{command[0]}: {data}")
+            except imaplib.IMAP4.abort:  # the connection: nothing more can be done on it
+                raise
+            except (imaplib.IMAP4.error, ValueError) as e:
+                refused = e
+            if uids and refused is None:
+                done[kind] += 1
+                count.pop(key, None)
+                continue
+            count[key] = count.get(key, 0) + 1
+            print(f"deck-mail: {n}: {kind} {mid}: "
+                  + (f"Gmail refused ({refused})" if refused else "not found in Gmail")
+                  + f", try {count[key]} of {PUSH_TRIES}")
+            if count[key] >= PUSH_TRIES:
+                gave_up.append(mid)
+            elif refused:
+                held = True
+
     try:
-        imap = login(a)
-        names = special(imap)
-
-        # Both from All Mail: with INBOX selected, Gmail answers that the label is gone, and keeps it.
-        if imap.select(quote(names[r"\All"]))[0] != "OK":
-            raise imaplib.IMAP4.error(f"can't open {names[r'\All']}")
-
-        def each(ids, *command):
-            for mid in ids:
-                uids = imap.uid("SEARCH", "X-GM-RAW", quote(f"rfc822msgid:{mid}"))[1][0].split()
-                if uids:
-                    typ, data = imap.uid(command[0], b",".join(uids).decode(), *command[1:])
-                    if typ != "OK":
-                        raise imaplib.IMAP4.error(f"{command[0]} {mid}: {data}")
-
-        each(archive, "STORE", "-X-GM-LABELS", r"(\Inbox)")
-        each(delete, "MOVE", quote(names[r"\Trash"]))
-        # Moving to Spam is Gmail's "Report spam": it learns from it.
-        each(spam, "MOVE", quote(names[r"\Junk"]))
-        imap.close()
-        if unspam:
-            # Out of Spam: found by its header there (Gmail's own search leaves Spam out).
-            if imap.select(quote(names[r"\Junk"]))[0] != "OK":
-                raise imaplib.IMAP4.error(f"can't open {names[r'\Junk']}")
-            for mid in unspam:
-                uids = imap.uid("SEARCH", "HEADER", "Message-ID", quote(f"<{mid}>"))[1][0].split()
-                if uids:
-                    typ, data = imap.uid("MOVE", b",".join(uids).decode(), "INBOX")
-                    if typ != "OK":
-                        raise imaplib.IMAP4.error(f"MOVE {mid}: {data}")
+        if any(todo.values()):
+            imap = login(a)
+            names = special(imap)
+            # From All Mail: with INBOX selected, Gmail answers that the label is gone, and keeps it.
+            if imap.select(quote(names[r"\All"]))[0] != "OK":
+                raise imaplib.IMAP4.error(f"can't open {names[r'\All']}")
+            by_id = lambda mid: imap.uid("SEARCH", "X-GM-RAW", quote(f"rfc822msgid:{mid}"))
+            each(imap, "archive", "All", by_id, "STORE", "-X-GM-LABELS", r"(\Inbox)")
+            each(imap, "delete", "All", by_id, "MOVE", quote(names[r"\Trash"]))
+            # Moving to Spam is Gmail's "Report spam": it learns from it.
+            each(imap, "spam", "All", by_id, "MOVE", quote(names[r"\Junk"]))
             imap.close()
-        imap.logout()
+            if todo["unspam"]:
+                # Out of Spam: found by its header there (Gmail's own search leaves Spam out).
+                if imap.select(quote(names[r"\Junk"]))[0] != "OK":
+                    raise imaplib.IMAP4.error(f"can't open {names[r'\Junk']}")
+                each(imap, "unspam", "Spam",
+                     lambda mid: imap.uid("SEARCH", "HEADER", "Message-ID", quote(f"<{mid}>")),
+                     "MOVE", "INBOX")
+                imap.close()
+            imap.logout()
     except (OSError, imaplib.IMAP4.error, ValueError, AttributeError, IndexError) as e:
         print(f"deck-mail: {n}: archiving, deleting and reporting spam in Gmail failed: {e}")
-        return False
-    done = [f"{len(archive)} archived", f"{len(delete)} moved to the Bin"]
-    done += [f"{len(spam)} reported as spam"] if spam else []
-    done += [f"{len(unspam)} back from Spam"] if unspam else []
-    print(f"deck-mail: {n}: {', '.join(done)} in Gmail")
-    return True
+        held = True
+    finally:
+        if count != was:
+            tries = {k: v for k, v in tries.items() if k != n}
+            if count:
+                tries[n] = count
+            write(STATE / "push.json", json.dumps(tries, indent=1), quiet=True)
+    if any(done.values()):
+        print(f"deck-mail: {n}: "
+              + ", ".join(f"{k} {PUSH_DONE[kind]}" for kind, k in done.items() if k) + " in Gmail")
+    if gave_up:
+        tell("Mail: not done in Gmail",
+             f"{n}: {len(gave_up)} message(s) couldn't be archived, deleted or moved in Gmail "
+             f"after {PUSH_TRIES} tries; they stay as they are there. The journal names them: "
+             "journalctl --user -u deck-mail")
+    return not held
 
 
 def config():
@@ -424,6 +549,10 @@ def unlocked(accts, interactive):
     return r.returncode == 0
 
 
+def tell(summary, body):
+    subprocess.run(["notify-send", "--app-name=deck-mail", summary, body], capture_output=True)
+
+
 def notify(summary, body):
     stamp = STATE / "notified"
     try:
@@ -431,7 +560,7 @@ def notify(summary, body):
             return
     except OSError:
         pass
-    subprocess.run(["notify-send", "--app-name=deck-mail", summary, body], capture_output=True)
+    tell(summary, body)
     stamp.touch()
 
 
@@ -454,12 +583,17 @@ def sync(interactive):
         return 75
     (STATE / "notified").unlink(missing_ok=True)
     env = dict(os.environ, PASSWORD_STORE_GPG_OPTS="--pinentry-mode=error")
-    # Archives and deletes go first. If they can't (offline), nothing else runs: notmuch new's
-    # hook sets `inbox` and `deleted` from the folders, and would undo them.
-    if not all([push(a) for a in accts]):
-        return 1
+    # What's queued goes out first, whatever fails below.
+    if any((STATE / "queue").glob("*.mail")):
+        subprocess.run([f"{MSMTPQ}/msmtpq", "--q-mgmt", "-r"], env=dict(env, **QUEUE_ENV))
+    # Archives and deletes go before fetching. An account they can't reach (offline) isn't
+    # fetched this time: notmuch new's hook sets `inbox` and `deleted` from the folders of what
+    # changed, and would undo them. The other accounts go on.
+    held = [a["name"] for a in accts if not push(a)]
     failed = []
     for a in accts:  # one account failing doesn't hold up the others
+        if a["name"] in held:
+            continue
         quiet = [] if interactive else ["-q"]  # in a terminal: progress
         r = subprocess.run(["mbsync", "-c", str(ISYNCRC), *quiet, a["name"]], env=env)
         if r.returncode:
@@ -471,15 +605,18 @@ def sync(interactive):
         except (OSError, subprocess.CalledProcessError) as e:
             print(f"deck-mail: filter: teaching bogofilter failed: {e}")
     # Only once the archive config is filled in: the example's placeholders would fail every sync.
-    if ARCHIVE.exists() and "example" not in ARCHIVE.read_text():
-        try:
+    archived = True
+    try:
+        if ARCHIVE.exists() and "example" not in ARCHIVE.read_text():
             archive(dry_run=False, quiet=not interactive)
-        except (OSError, SystemExit, subprocess.CalledProcessError) as e:
-            print(f"deck-mail: archive: {e}")
-    if any((STATE / "queue").glob("*.mail")):
-        subprocess.run([f"{MSMTPQ}/msmtpq", "--q-mgmt", "-r"], env=dict(env, **QUEUE_ENV))
+    except (Exception, SystemExit) as e:  # whatever it is, the sync's own work above is done
+        print(f"deck-mail: archive: {type(e).__name__}: {e}")
+        archived = False
+    if held:
+        print("deck-mail: not fetched, Gmail hasn't taken deck's changes: " + ", ".join(held))
     if failed:
         print("deck-mail: mbsync failed for " + ", ".join(failed))
+    if held or failed or not archived:
         return 1
     (STATE / "synced").touch()
     return 0
@@ -519,6 +656,10 @@ def archive_config(upload=True):
     return conf
 
 
+# The fewest hex digits a sha256: line may have: fewer would be many PDFs' line, none every PDF's.
+SHA_MIN = 12
+
+
 def archive_names():
     """archive-names' lines as (sender regex or sha256 prefix, file regex, category, name)."""
     names = []
@@ -531,7 +672,13 @@ def archive_names():
             raise SystemExit(f"deck-mail: {ARCHIVE_NAMES}:{n}: not sender | file | category | name")
         sender, fname, category, name = parts
         try:
-            if not sender.startswith("sha256:"):
+            if sender.startswith("sha256:"):
+                sender = sender.lower()
+                if not re.fullmatch(r"sha256:[0-9a-f]{%d,64}" % SHA_MIN, sender):
+                    print(f"deck-mail: {ARCHIVE_NAMES}:{n}: ignored: sha256: takes {SHA_MIN} to 64"
+                          " hex digits", file=sys.stderr)
+                    continue
+            else:
                 sender = re.compile(sender, re.I)
             names.append((sender, re.compile(fname, re.I), category, name))
         except re.error as e:
@@ -651,8 +798,8 @@ def webdav(conf, password):
             raise OSError(f"{label}: PROPFIND {path} failed ({status})")
         return ET.fromstring(xml).findall("d:response", ns)
 
-    def call(method, rel, data=None):
-        return request(method, files + urllib.parse.quote(rel), data)[0]
+    def call(method, rel, data=None, headers=None):
+        return request(method, files + urllib.parse.quote(rel), data, headers)[0]
 
     def put(rel, data):
         parts = rel.split("/")
@@ -666,24 +813,37 @@ def webdav(conf, password):
             status, _, body = request("GET", files + urllib.parse.quote(rel))
             return status == 200 and body == data
 
-        stem, n = rel.removesuffix(".pdf"), 1
-        while call("HEAD", rel) == 200:
-            if same(rel):
-                return rel
-            n += 1
-            rel = f"{stem}-{n}.pdf" if conf.get("style") == "hyphens" else f"{stem} ({n}).pdf"
-        for attempt in range(4):
+        def there(rel):  # only a plain "no such file" means the name is free
+            status = call("HEAD", rel)
+            if status not in (200, 404):
+                raise OSError(f"{label}: can't tell whether {rel} is there ({status})")
+            return status == 200
+
+        stem, n, status, tries = rel.removesuffix(".pdf"), 1, None, 0
+        while True:
+            # Also after a failed PUT: a gateway timeout often comes after Nextcloud has stored
+            # the file.
+            if there(rel):
+                if same(rel):
+                    return rel
+                n += 1
+                rel = f"{stem}-{n}.pdf" if conf.get("style") == "hyphens" else f"{stem} ({n}).pdf"
+                continue
+            if tries == 4:
+                raise OSError(f"{label}: uploading {rel} failed ({status})")
+            tries += 1
             try:
-                status = call("PUT", rel, data)
+                # Only as a new file: the server refuses (412) one that has appeared since.
+                status = call("PUT", rel, data, {"If-None-Match": "*"})
             except OSError:  # a timeout or a dropped connection
                 status = None
-            # A gateway timeout often comes after Nextcloud has stored the file.
-            if status in (201, 204) or call("HEAD", rel) == 200 and same(rel):
+            if status in (201, 204):
                 return rel
+            if status == 412:  # there now: looked at again above
+                continue
             if status is not None and status < 500:
-                break
-            time.sleep(10 * (attempt + 1))
-        raise OSError(f"{label}: uploading {rel} failed ({status})")
+                raise OSError(f"{label}: uploading {rel} failed ({status})")
+            time.sleep(10 * tries)
 
     def tag(rel, name):
         nonlocal tags
@@ -722,7 +882,7 @@ def nm_id(mid):
 
 
 ARCHIVE_QUERY = ("(mimetype:application/pdf or attachment:pdf)"
-                 " and not tag:spam and not tag:noarchive and not tag:archived")
+                 " and not tag:spam and not tag:noarchive and not tag:archived and not tag:new")
 
 
 def mark_waiting(waiting):
@@ -822,14 +982,14 @@ def archive(dry_run, quiet=False, limit=None):
                 out.parent.mkdir(parents=True, exist_ok=True)
                 out.write_bytes(data)
             seen[digest] = rel
-            seen_file.write_text(json.dumps(seen, indent=1))
+            write(seen_file, json.dumps(seen, indent=1), quiet=True)
             sent += 1
             try:
                 tag(inside(rel), name[0])
             except OSError as e:  # the file is there; only its tag is missing
                 print(f"deck-mail: archive: {e}")
         if not dry_run and all(d in seen for _, _, d, _ in named):  # --limit can stop halfway
-            seen_file.write_text(json.dumps(seen, indent=1))
+            write(seen_file, json.dumps(seen, indent=1), quiet=True)
             subprocess.run(["notmuch", "tag", "+archived", "--", mid], check=True)
     if not dry_run and limit is None:  # --limit stops before it has looked at every message
         mark_waiting(waiting)
@@ -846,8 +1006,29 @@ def archive(dry_run, quiet=False, limit=None):
     return 0
 
 
-CATEGORIES = ("Računi", "Kuća", "Djeca", "Zdravlje", "Financije", "Porezi", "Osiguranja", "Auto",
-              "Putovanja", "Posao", "Obrazovanje", "Dokumenti")
+# The archive's categories: on deck, one a line; without the file, the built-in ones. At most
+# twelve: review picks one with a key (1-9, 0, -, =).
+CATEGORIES = CONFIG / "deck-mail/categories"
+CATEGORIES_DEFAULT = ("Bills", "Home", "Family", "Health", "Finance", "Taxes", "Insurance", "Car",
+                      "Travel", "Work", "Education", "Documents")
+
+
+def categories():
+    try:
+        text = CATEGORIES.read_text()
+    except OSError:
+        return CATEGORIES_DEFAULT
+    found = []
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line and safe(line, 40) not in found:
+            found.append(safe(line, 40))
+    if len(found) > len(CATEGORIES_DEFAULT):
+        print(f"deck-mail: {CATEGORIES}: only the first {len(CATEGORIES_DEFAULT)} categories are"
+              " used", file=sys.stderr)
+    return tuple(found[:len(CATEGORIES_DEFAULT)]) or CATEGORIES_DEFAULT
+
+
 REVIEW_START = "# --- Chosen in deck-mail review: first, so they win over the lines below"
 REVIEW_END = "# --- end of review choices"
 
@@ -914,9 +1095,24 @@ def review_save(chosen):
     section = [REVIEW_START]
     section += [f"sha256:{d} | . | {c} | {n}" for d, (c, n) in chosen.items()]
     section += [REVIEW_END, ""]
-    tmp = ARCHIVE_NAMES.with_suffix(".tmp")
-    tmp.write_text("\n".join(lines[:at] + section + lines[at:]) + "\n")
-    tmp.replace(ARCHIVE_NAMES)
+    write(ARCHIVE_NAMES, "\n".join(lines[:at] + section + lines[at:]) + "\n", 0o644, quiet=True)
+
+
+def review_update(changes):
+    """Makes these choices, {sha256 prefix: (category, name), or None to forget it}, in the
+    review section as it is in the file now, and returns the whole section. One writer at a
+    time: review and `deck-mail file` (mmm) both write it, and neither loses the other's."""
+    STATE.mkdir(parents=True, exist_ok=True)
+    with open(STATE / "archive-names.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        chosen = review_overrides()
+        for digest, choice in changes.items():
+            if choice is None:
+                chosen.pop(digest, None)
+            else:
+                chosen[digest] = choice
+        review_save(chosen)
+    return chosen
 
 
 def review():
@@ -930,6 +1126,7 @@ def review():
     print("deck-mail: reading the PDFs in mail…", file=sys.stderr)
     rows, deleted = review_load()
     chosen = review_overrides()
+    cats = categories()
     key = lambda r: r["digest"][:16]
     for r in rows:
         if key(r) in chosen:
@@ -955,10 +1152,15 @@ def review():
             texts[key(r)] = [l.strip() for l in t.splitlines() if l.strip()]
         return texts[key(r)]
 
+    def save(changes):
+        chosen.clear()
+        chosen.update(review_update(changes))
+        for r in rows:  # what mmm chose meanwhile shows too
+            if key(r) in chosen:
+                r["choice"] = chosen[key(r)]
+
     def choose(r, choice):
-        r["choice"] = choice
-        chosen[key(r)] = choice
-        review_save(chosen)
+        save({key(r): choice})
 
     def set_deleted(r, on):
         # As id: terms: a bare Message-ID is a query, and the sender picks it (<*> is every mail).
@@ -1041,7 +1243,7 @@ def review():
                     pos += 1
 
         def pick_category(current):
-            options = [f"{i + 1 if i < 9 else '0-='[i - 9]} {c}" for i, c in enumerate(CATEGORIES)]
+            options = [f"{i + 1 if i < 9 else '0-='[i - 9]} {c}" for i, c in enumerate(cats)]
             h, w = scr.getmaxyx()
             line = "  ".join(options)
             scr.move(h - 1, 0)
@@ -1053,12 +1255,13 @@ def review():
                     return None
                 if not isinstance(ch, str):
                     continue
-                if ch in "123456789":
-                    return CATEGORIES[int(ch) - 1]
-                if ch in "0-=":
-                    return CATEGORIES[9 + "0-=".index(ch)]
-                if ch in ("\n", "\r") and current in CATEGORIES:
-                    return current
+                if ch in ("\n", "\r"):
+                    if current in cats:
+                        return current
+                    continue
+                i = "1234567890-=".find(ch)
+                if 0 <= i < len(cats):
+                    return cats[i]
 
         def transfer(r, rename=False, recategorise=False):
             c = r["choice"] or r["suggestion"]
@@ -1179,10 +1382,7 @@ def review():
                 if ch == "T" and len(todo) < len(vis):
                     what += f" ({len(vis) - len(todo)} with no name skipped)"
                 if ask(f"All {len(todo)} shown {what}? [y/N] ") in ("y", "Y"):
-                    for x in todo:
-                        x["choice"] = ("-", "-") if ch == "X" else named(x)
-                        chosen[key(x)] = x["choice"]
-                    review_save(chosen)
+                    save({key(x): ("-", "-") if ch == "X" else named(x) for x in todo})
                     state["msg"] = f"{len(todo)} changed"
 
     try:
@@ -1241,14 +1441,17 @@ def pdfs(mids):
             if choice and choice != ("-", "-"):
                 pdf.update(category=choice[0], name=choice[1])
             out.append(pdf)
-    print(json.dumps({"categories": CATEGORIES, "pdfs": out}, ensure_ascii=False))
+    print(json.dumps({"categories": categories(), "pdfs": out}, ensure_ascii=False))
     return 0
 
 
 def file_pdf(args):
     """`file SHA256 CATEGORY NAME`, `file SHA256 -` (leave out), `file SHA256 --forget`: the
     choice for one PDF, as review makes it. The next sync sends it."""
-    if len(args) not in (2, 3) or len(args) == 2 and args[1] not in ("-", "--forget"):
+    flags, args = operands(args, ("--forget",))
+    forget = bool(flags)
+    if not (forget and len(args) == 1 or not forget and (len(args) == 2 and args[1] == "-"
+                                                         or len(args) == 3)):
         print("deck-mail file SHA256 CATEGORY NAME | SHA256 - | SHA256 --forget", file=sys.stderr)
         return 2
     digest = args[0].removeprefix("sha256:").lower()
@@ -1260,16 +1463,13 @@ def file_pdf(args):
         print("deck-mail: file: already " + ("left out" if done == "-" else f"in Nextcloud: {done}"),
               file=sys.stderr)
         return 1
-    chosen = review_overrides()
-    key = digest[:16]
-    if args[1] == "--forget":
-        chosen.pop(key, None)
-    elif args[1] == "-":
-        chosen[key] = ("-", "-")
+    if forget:
+        choice = None
+    elif len(args) == 2:
+        choice = ("-", "-")
     else:
-        category, name = safe(args[1], 40), safe(args[2], 90)
-        chosen[key] = (category, name)
-    review_save(chosen)
+        choice = (safe(args[1], 40), safe(args[2], 90))
+    review_update({digest[:16]: choice})
     refresh_waiting()
     return 0
 
@@ -1279,9 +1479,10 @@ def top(args):
     import collections
     import email.utils
     import re
+    args = operands(args)[1]
     n = int(args.pop(0)) if args and args[0].isdigit() else 50
     out = subprocess.run(["notmuch", "show", "--format=json", "--body=false", "--entire-thread=false",
-                          *(args or ["not", "tag:sent"])], capture_output=True, check=True).stdout
+                          "--", *(args or ["not", "tag:sent"])], capture_output=True, check=True).stdout
 
     def messages(x):
         if isinstance(x, dict):
@@ -1374,8 +1575,7 @@ def rule_for(rules, addr):
 def screener_start():
     f = STATE / "screener-start"
     if not f.exists():
-        STATE.mkdir(parents=True, exist_ok=True)
-        f.write_text(f"{int(time.time())}\n")
+        write(f, f"{int(time.time())}\n", quiet=True)
     return int(f.read_text())
 
 
@@ -1602,7 +1802,7 @@ def train(force=False):
 
     spam = files("tag:spam")
     ham = files("not tag:spam and not tag:deleted and not tag:screener and not tag:suspect"
-                " and not tag:sent and not tag:draft")
+                " and not tag:sent and not tag:draft and not tag:new")
     tmp = WORDLIST.with_name("bogofilter.new")
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir(parents=True)
@@ -1623,9 +1823,37 @@ def train(force=False):
     return 0
 
 
+def sent_by(who, sender):
+    """Whether a From header is this address, or an address at this @domain: exactly, as the
+    filter compares them."""
+    import email.utils
+    addr = email.utils.parseaddr(sender or "")[1].lower()
+    return addr.rpartition("@")[2] == who[1:] if who.startswith("@") else addr == who
+
+
+def from_sender(who, query):
+    """The query's messages (ids) that `who` sent. notmuch's from: finds the words anywhere in
+    From, in longer addresses, other domains and names too: each mail's own From decides."""
+    out = subprocess.run(["notmuch", "show", "--format=json", "--body=false", "--entire-thread=false",
+                          "--exclude=false", query], capture_output=True, text=True,
+                         check=True).stdout
+
+    def walk(node):
+        if isinstance(node, dict):
+            if node.get("match"):
+                yield node
+        elif isinstance(node, list):
+            for n in node:
+                yield from walk(n)
+
+    return [m["id"] for m in walk(json.loads(out or "[]"))
+            if sent_by(who, m.get("headers", {}).get("From", ""))]
+
+
 def screener(args):
     """`screener allow|block|forget ADDRESS`: the sender's line in the senders file, and their mail
     tagged to match. Prints what it tagged as JSON ([change, [ids]] pairs), for mmm's undo."""
+    args = operands(args)[1]
     if len(args) != 2 or args[0] not in ("allow", "block", "forget") or "@" not in args[1] \
             or re.search(r'[\s"()]', args[1]):
         sys.exit("deck-mail: screener allow|block|forget ADDRESS|@DOMAIN")
@@ -1634,8 +1862,7 @@ def screener(args):
     lines = [l for l in lines if l.split("#", 1)[0].split()[1:2] != [who]]
     if kind != "forget":
         lines.append(f"{kind} {who}")
-    SENDERS.parent.mkdir(parents=True, exist_ok=True)
-    SENDERS.write_text("\n".join(lines) + "\n")
+    write(SENDERS, "\n".join(lines) + "\n", 0o644, quiet=True)
     q = f"from:{who.lstrip('@')}" if who.startswith("@") else f"from:{who}"
     changes = []
     if kind == "allow":
@@ -1644,7 +1871,7 @@ def screener(args):
         changes = [("+deleted", f"{q} and tag:inbox and not tag:deleted")]
     done = []
     for change, query in changes:
-        ids = pending(query)
+        ids = from_sender(who, query)
         if ids:
             subprocess.run(["notmuch", "tag", "--batch"], text=True, check=True,
                            input="".join(f"{change} -- {nm_id(m)}\n" for m in ids))
@@ -1655,6 +1882,7 @@ def screener(args):
 
 def why(mids):
     """mmm's view of why these messages were screened or are suspect, as JSON."""
+    mids = operands(mids)[1]
     log = filter_log()
     rules = sender_rules()
     out = []
@@ -1674,8 +1902,7 @@ def unsubscribe(args):
     mail to write), link (a page to open) or none."""
     import urllib.parse
     import urllib.request
-    check = "--check" in args
-    args = [a for a in args if a != "--check"]
+    check, args = operands(args, ("--check",))
     if len(args) != 1:
         sys.exit("deck-mail: unsubscribe [--check] MESSAGE-ID")
     path = message_file(args[0])
@@ -1719,6 +1946,14 @@ def unsubscribe(args):
     return 0
 
 
+def operands(args, flags=()):
+    """A subcommand's arguments as (which of its flags were given, the rest). After `--` nothing
+    is a flag: message ids, addresses and names come from mail, and may start with a dash."""
+    cut = args.index("--") if "--" in args else len(args)
+    return ([a for a in args[:cut] if a in flags],
+            [a for a in args[:cut] if a not in flags] + args[cut + 1:])
+
+
 def main():
     cmd = sys.argv[1:]
     if cmd == ["config"]:
@@ -1728,16 +1963,17 @@ def main():
     if cmd[:1] == ["send"]:  # mmm gives the recipients as arguments, the mail on stdin
         # Addresses come from mail: after --, so none is an msmtp option (--passwordeval,
         # --host), and none with whitespace, which msmtpq's queue splits when it sends later.
-        bad = [a for a in cmd[1:] if a.startswith("-") or re.search(r"[\s\x00-\x1f\x7f]", a)]
+        to = cmd[2:] if cmd[1:2] == ["--"] else cmd[1:]
+        bad = [a for a in to if a.startswith("-") or re.search(r"[\s\x00-\x1f\x7f]", a)]
         if bad:
             sys.exit(f"deck-mail send: not an address: {bad[0]!r}")
-        os.execve(f"{MSMTPQ}/msmtpq", ["msmtpq", "--read-envelope-from", "--", *cmd[1:]],
+        os.execve(f"{MSMTPQ}/msmtpq", ["msmtpq", "--read-envelope-from", "--", *to],
                   dict(os.environ, **QUEUE_ENV))
     if cmd == ["unlock"]:
         return 0 if unlocked(accounts(), True) else 1
     if cmd[:1] == ["archive"]:
         if not ARCHIVE.exists():
-            ARCHIVE.write_text(ARCHIVE_EXAMPLE)
+            write(ARCHIVE, ARCHIVE_EXAMPLE, 0o644, quiet=True)
             print(f"deck-mail: wrote an example {ARCHIVE}: fill it in, then deck-mail archive --dry-run")
             return 1
         limit = int(cmd[cmd.index("--limit") + 1]) if "--limit" in cmd else None
@@ -1747,7 +1983,7 @@ def main():
         refresh_waiting()
         return r
     if cmd[:1] == ["pdfs"]:
-        return pdfs(cmd[1:])
+        return pdfs(operands(cmd[1:])[1])
     if cmd[:1] == ["file"]:
         return file_pdf(cmd[1:])
     if cmd[:1] == ["top"]:
