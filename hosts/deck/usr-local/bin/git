@@ -15,7 +15,20 @@
 #
 # Git commands that can change the config themselves (config, remote, branch, push, init, clone,
 # submodule, worktree, switch, checkout) record the state afterwards: what you do with host git
-# is trusted. In the jail ($JAIL) this is plain git: the jail is what it guards against.
+# is trusted. Not the hooks: when they differ after such a command (a checkout brought other
+# tracked hook files, core.hooksPath was set), nothing is recorded and the next git asks for
+# `git trust`. In the jail ($JAIL) this is plain git: the jail is what it guards against.
+#
+# Hooks that are files a jailed program can write through git (the hooks directory is in the
+# worktree, as with core.hooksPath=.githooks, or elsewhere in a work root: a jailed program can
+# commit, move a branch and write the index) only run for commit and push, which don't write the
+# worktree. Every other command there runs with hooks off (-c core.hooksPath=/dev/null): a
+# checkout, merge, pull, rebase, reset or stash can write a hook file and run a hook in one go,
+# after the check. So no post-checkout, post-merge or pre-rebase hooks in such a repository.
+#
+# In the work roots git also runs with safe.bareRepository=explicit: a directory that looks like a
+# bare repository (HEAD, objects/, refs/) is not used unless named with --git-dir or GIT_DIR, and
+# then it is checked like any other. Whatever ~/.gitconfig says.
 #
 # The check is a stat of the relevant files, compared with the last one; only when that differs is
 # the state rebuilt and compared, in ~/.local/state/git-guard.
@@ -25,24 +38,15 @@ real=/usr/bin/git
 [[ -n ${JAIL-} ]] && exec "$real" "$@"
 # No home, no ~/src to guard: system services (gentoo-sync runs git in /var/db/repos as root).
 [[ -n ${HOME-} ]] || exec "$real" "$@"
-src=$HOME/src
-# Work roots: ~/src, and the directories ~/.config/jail/roots lists (one per line, relative to the
-# home or absolute, inside the home), treated the same: writable in the jail, their repositories
-# protected, host git guarded there. The jail never sees ~/.config, so it can't add one.
-roots=("$HOME/src")
-if [[ -r ${XDG_CONFIG_HOME:-$HOME/.config}/jail/roots ]]; then
-	while read -r r; do
-		[[ -z $r || $r == '#'* ]] && continue
-		[[ $r == /* ]] || r=$HOME/$r
-		r=$(realpath -m -- "$r")
-		[[ -d $r && $r/ == "$HOME"/?* && $r != "$HOME" ]] && roots+=("$r")
-	done <"${XDG_CONFIG_HOME:-$HOME/.config}/jail/roots"
+# The work roots (roots, in_roots), from the file jail reads them from too:
+# /usr/local/share/jail/roots.sh. Without it there is nothing to check against: no git.
+self=${BASH_SOURCE[0]}
+[[ $self == */* ]] || self=./$self
+# shellcheck source=../share/jail/roots.sh
+if ! . "${self%/*}/../share/jail/roots.sh" || ! declare -F in_roots >/dev/null; then
+	echo "git: ${self%/*}/../share/jail/roots.sh is missing: the guard can't tell what to check; not running" >&2
+	exit 128
 fi
-in_roots() { # PATH: inside one of the roots? Prints which.
-	local r
-	for r in "${roots[@]}"; do [[ $1/ == "$r"/* ]] && { printf '%s' "$r"; return 0; }; done
-	return 1
-}
 store=${XDG_STATE_HOME:-$HOME/.local/state}/git-guard
 
 # The directory git will work in, from the leading -C options (git's own order), and the
@@ -92,8 +96,22 @@ stamp() {
 	local files=("$wt/.git" "$gd/config" "$gd/config.worktree" "$gd/commondir" "$gd/hooks"
 		"$gd/modules" "$gd/worktrees")
 	local f
+	# The hooks directory also while it doesn't exist (a core.hooksPath not made yet): one that
+	# appears must be seen.
+	recorded_hooks
+	[[ -n $rhooks ]] && files+=("$rhooks")
 	while IFS= read -r f; do files+=("$f"); done < <(extra_files)
 	stat -L -c '%n %i %s %z' -- "${files[@]}" 2>&1 | sort
+}
+
+# Sets rhooks: the hooks directory of the recorded state (its "hooks" line), empty without one.
+recorded_hooks() {
+	local l
+	rhooks=
+	[[ -f $record.state ]] || return 0
+	while IFS= read -r l; do
+		[[ $l == 'hooks '* ]] && { rhooks=${l#hooks }; return 0; }
+	done <"$record.state"
 }
 
 # What the last full check found worth watching: the hooks directory and its files, included
@@ -154,6 +172,57 @@ save() {
 	stamp >"$record.stamp"
 }
 
+# The part of a state (on stdin) that is the hooks: where they are and each file there.
+hook_lines() {
+	awk '/^hooks / { if (h == "") { h = substr($0, 7); print }; next }
+		h != "" && ($1 == "dir" || $1 == "file" || $1 == "link") &&
+			($0 == $1 " " h || index($0, $1 " " h "/") == 1 || index($0, $1 " " h " ") == 1) { print }'
+}
+
+# After a host git command that may have changed the config: record what it left, unless the hooks
+# are no longer the recorded ones. Those host git didn't write on your word (a checkout wrote
+# tracked files, a config command named a directory): the record stays, and the next git refuses
+# until `git trust`.
+save_unless_hooks_changed() {
+	mkdir -p -- "$store"
+	state >"$record.state.$$"
+	if [[ -f $record.state && $(hook_lines <"$record.state") == "$(hook_lines <"$record.state.$$")" ]]; then
+		mv -- "$record.files.$$" "$record.files"
+		mv -- "$record.state.$$" "$record.state"
+		stamp >"$record.stamp"
+	else
+		rm -f -- "$record.files.$$" "$record.state.$$"
+		echo "git: ${wt#"$HOME"/}: its hooks are not the trusted ones any more (this command changed them); look at them, then: git -C '$wt' trust" >&2
+	fi
+}
+
+# True when the recorded hooks directory is one a jailed program can change through git: not inside
+# the git directory, and in the worktree or a work root. Unknown counts as that.
+hooks_writable() {
+	local p common=$gd
+	recorded_hooks
+	[[ -n $rhooks ]] || return 0
+	# The usual case, without a process: .git/hooks itself.
+	[[ $rhooks == "$gd/hooks" && ! -L $rhooks && ! -L $gd && ! -e $gd/commondir ]] && return 1
+	[[ -f $gd/commondir ]] && common=$gd/$(head -n1 "$gd/commondir")
+	mapfile -t p < <(realpath -m -- "$rhooks" "$gd" "$common" "$wt" 2>/dev/null)
+	((${#p[@]} == 4)) || return 0
+	[[ ${p[0]}/ == "${p[1]}"/* || ${p[0]}/ == "${p[2]}"/* ]] && return 1
+	[[ ${p[0]}/ == "${p[3]}"/* ]] || in_roots "${p[0]}" >/dev/null
+}
+
+# The git command a subcommand stands for: itself, or what an alias for it starts with (as git
+# reads aliases: never for a name git has a command for).
+command_of() {
+	local a
+	cmd=$1
+	a=$("$real" --git-dir="$gd" config --get "alias.$1" 2>/dev/null) || return 0
+	read -r a _ <<<"$a"
+	case $a in
+	commit | push) "$real" --list-cmds=main,others 2>/dev/null | grep -qxF -- "$1" || cmd=$a ;;
+	esac
+}
+
 # Sets wt, gd and record for a directory; false when it isn't a repository in a work root.
 guarded() {
 	if [[ -n $gitdir_opt ]]; then
@@ -196,11 +265,10 @@ if [[ $sub = trust ]]; then
 	exit
 fi
 
-# A new repository made by host git is trusted as it comes out.
+# A new repository made by host git is trusted as it comes out. Only a new one: where the command
+# found a repository already there (init again, a bare one made inside another), nothing is
+# recorded, and the next git checks it as ever.
 if [[ $sub = clone || $sub = init ]]; then
-	"$real" "$@"
-	rc=$?
-	((rc == 0)) || exit "$rc"
 	pos=()
 	for a in "${args[@]:i+1}"; do [[ $a = -* ]] || pos+=("$a"); done
 	# (${pos[-1]} is an error on an empty array, default or not.)
@@ -216,11 +284,21 @@ if [[ $sub = clone || $sub = init ]]; then
 	fi
 	[[ $target = /* ]] || target=$dir/$target
 	gitdir_opt=
-	guarded "$target" && save
+	before=
+	guarded "$target" && before=$gd
+	"$real" "$@"
+	rc=$?
+	((rc == 0)) || exit "$rc"
+	guarded "$target" && [[ $gd != "$before" ]] && save
 	exit 0
 fi
 
-guarded "$dir" || exec "$real" "$@"
+# In a work root, a bare repository is only used when named (see the top).
+safe=(-c safe.bareRepository=explicit)
+if ! guarded "$dir"; then
+	d=$(realpath -m -- "$dir" 2>/dev/null) && in_roots "$d" >/dev/null && exec "$real" "${safe[@]}" "$@"
+	exec "$real" "$@"
+fi
 
 # What git reads must be plain files: a FIFO, a device or a socket would hang or feed git.
 for f in "$gd/config" "$gd/config.worktree" "$gd/commondir" "$wt/.git"; do
@@ -249,13 +327,23 @@ else
 	exit 128
 fi
 
+# Hooks a jailed program can change through git run for commit and push only (see the top). The
+# options go first: a -c core.hooksPath of your own on the command line still counts.
+if hooks_writable; then
+	command_of "$sub"
+	case $cmd in
+	commit | push) ;;
+	*) safe+=(-c core.hooksPath=/dev/null) ;;
+	esac
+fi
+
 case $sub in
 config | remote | branch | push | submodule | worktree | switch | checkout) ;;
-*) exec "$real" "$@" ;;
+*) exec "$real" "${safe[@]}" "$@" ;;
 esac
 
 # A command that may change the config: run it, then record what host git left.
-"$real" "$@"
+"$real" "${safe[@]}" "$@"
 rc=$?
-((rc == 0)) && save
+((rc == 0)) && save_unless_hooks_changed
 exit "$rc"

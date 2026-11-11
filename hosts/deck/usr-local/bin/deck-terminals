@@ -24,7 +24,9 @@ What was running comes back through ~/.bashrc (DECK_RESTORE_CMD):
                    (Claude Code's title for it) in ~/.claude/projects/<directory>/; when no title
                    matches, `claude --continue`
   jail ...         back in the jail (/usr/local/bin/jail), by the same rules for what it ran;
-                   a jailed claude's sessions are in the jail's home
+                   a jailed claude's sessions are in the jail's home. Only the jail command as
+                   you typed it: what runs inside a jail (an editor started from its shell)
+                   is never what comes back, in the jail or out of it
   anything else    not run, but on ↑ in that shell's history
 
 Not restored: scrollback, shell variables, programs mid-run, windows other than foot, and foot
@@ -92,6 +94,49 @@ def foreground(shell):
     return tpgid if tpgid > 0 and tpgid != shell else None
 
 
+def parent(pid):
+    try:
+        status = pathlib.Path(f"/proc/{pid}/status").read_text()
+    except OSError:
+        return 0
+    m = re.search(r"^PPid:\s*(\d+)", status, re.M)
+    return int(m.group(1)) if m else 0
+
+
+def in_jail(pid):
+    """Whether the process is a jailed one: in jail.slice, where /usr/local/bin/jail puts all it
+    starts (the jail script itself stays outside). One that can't be looked at counts as jailed."""
+    try:
+        return "/jail.slice/" in pathlib.Path(f"/proc/{pid}/cgroup").read_text()
+    except OSError:
+        return True
+
+
+def is_jail(cmd):
+    """Whether an argv is the jail script's: "bash /usr/local/bin/jail ..."."""
+    return len(cmd) > 1 and pathlib.Path(cmd[0]).name in SHELLS and pathlib.Path(cmd[1]).name == "jail"
+
+
+def host_command(fg, shell):
+    """The process whose command line stands for the terminal's foreground program, and that
+    command line. For a host program, itself. A jailed program shares the terminal and can be its
+    foreground (the jail's shell hands it over to what it starts), with a command line of its own
+    choosing: for one, the jail script that holds it, the outermost on the way up to the shell and
+    outside the jail itself, is what counts; when there is none, nothing."""
+    if not in_jail(fg):
+        return fg, argv(fg)
+    outer, pid = None, fg
+    for _ in range(64):
+        pid = parent(pid)
+        if pid == shell:
+            return (outer, argv(outer)) if outer else (fg, [])
+        if pid <= 1:
+            break
+        if not in_jail(pid) and is_jail(argv(pid)):
+            outer = pid
+    return fg, []
+
+
 _sessions = {}
 
 
@@ -129,9 +174,9 @@ def terminal(window):
     cmd, run = None, False
     fg = foreground(shell)
     if fg:
-        cmd = argv(fg)
+        fg, cmd = host_command(fg, shell)
         # jail is a script: its process is "bash /usr/local/bin/jail ...".
-        if len(cmd) > 1 and pathlib.Path(cmd[0]).name in SHELLS and pathlib.Path(cmd[1]).name == "jail":
+        if is_jail(cmd):
             cmd = cmd[1:]
         jailed = bool(cmd) and pathlib.Path(cmd[0]).name == "jail"
         if jailed:
@@ -190,11 +235,7 @@ def descends(pid, ancestor):
     while pid > 1:
         if pid == ancestor:
             return True
-        try:
-            status = pathlib.Path(f"/proc/{pid}/status").read_text()
-        except OSError:
-            return False
-        pid = int(re.search(r"^PPid:\s*(\d+)", status, re.M).group(1))
+        pid = parent(pid)
     return False
 
 
