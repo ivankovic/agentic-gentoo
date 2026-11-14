@@ -27,7 +27,7 @@ mmm from:hep date:1y..  # one notmuch query
   read/unread, `!` spam (Gmail's Spam at the next sync, which teaches Gmail; in the Spam tab, `!`
   takes it out). `u` undoes the last, on exactly the messages it changed. Opening a thread marks
   it read. `deck-mail sync` carries all of it to Gmail, as before.
-- **PDFs to the family archive in Nextcloud**: under each PDF, what became of it: in Nextcloud
+- **PDFs to the family archive**: under each PDF, what became of it: in the archive
   (and where), going at the next sync, left out, or waiting. Nothing goes until it's chosen:
   `t` files it (a form with the category and name, filled in from deck-mail's rules when they
   know the sender, so a known bill is `t`, Enter), `x` leaves it out, `u` undoes. Both act on

@@ -34,7 +34,7 @@ pub struct ThreadView {
     shas: HashMap<(String, u64), String>,
 }
 
-/// `t` on a PDF: where in Nextcloud it goes, before it's chosen.
+/// `t` on a PDF: where in the archive it goes, before it's chosen.
 pub struct FileForm {
     pub sha: String,
     pub file: String,
@@ -61,7 +61,7 @@ pub enum Mode {
     },
     /// `?` twice: every key.
     Help,
-    /// `t`: filing a PDF in Nextcloud.
+    /// `t`: filing a PDF in the archive.
     File(FileForm),
     /// A draft back from the editor: a look before it goes. `discard` asks y/n to throw it away.
     Review {
@@ -1057,11 +1057,11 @@ impl App {
 
     fn start_file(&mut self) {
         let Some((Target::Attachment { name: file, msg, .. }, p)) = self.pdf_target() else {
-            self.status = "t files a PDF in Nextcloud: Tab to one first".into();
+            self.status = "t files a PDF in the archive: Tab to one first".into();
             return;
         };
         if p.state == State::Sent {
-            self.status = format!("already in Nextcloud: {}", p.r#where.as_deref().unwrap_or(""));
+            self.status = format!("already in the archive: {}", p.r#where.as_deref().unwrap_or(""));
             return;
         }
         let v = self.view.as_ref().expect("a PDF is in a thread");
@@ -1182,12 +1182,12 @@ impl App {
 
     fn leave_out(&mut self) {
         let Some((Target::Attachment { name: file, .. }, p)) = self.pdf_target() else {
-            self.status = "x leaves a PDF out of Nextcloud: Tab to one first".into();
+            self.status = "x leaves a PDF out of the archive: Tab to one first".into();
             return;
         };
         match p.state {
             State::Sent => {
-                self.status = format!("already in Nextcloud: {}", p.r#where.as_deref().unwrap_or(""));
+                self.status = format!("already in the archive: {}", p.r#where.as_deref().unwrap_or(""));
             }
             State::LeftOut => self.status = format!("{file} is left out already"),
             _ => {
@@ -1203,8 +1203,8 @@ impl App {
             return;
         }
         let done = match &choice {
-            Choice::To(c, n) => format!("{file}: to Nextcloud at the next sync, as {c} / {n} · u undoes"),
-            Choice::Out => format!("{file}: left out of Nextcloud · u undoes"),
+            Choice::To(c, n) => format!("{file}: to the archive at the next sync, as {c} / {n} · u undoes"),
+            Choice::Out => format!("{file}: left out of the archive · u undoes"),
             Choice::Forget => format!("{file}: waits again"),
         };
         self.undo.push(Undo::File { sha, file, before });

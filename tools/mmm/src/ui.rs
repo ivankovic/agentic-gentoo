@@ -44,9 +44,9 @@ const HELP: &[&str] = &[
     "  Tab                 in the editor, on To Cc Bcc: complete the address (again: the next)",
     "                      Signatures: ~/.config/mmm/signatures/hr, en, de, used as written",
     "",
-    "PDFs and Nextcloud (on the focused PDF, or the thread's only one waiting)",
-    "  t                   file it in Nextcloud: category and name, suggested from the rules; Enter",
-    "  x                   leave it out of Nextcloud;  u undoes either, until the next sync sends it",
+    "PDFs and the archive (on the focused PDF, or the thread's only one waiting)",
+    "  t                   file it in the archive: category and name, suggested from the rules; Enter",
+    "  x                   leave it out of the archive;  u undoes either, until the next sync sends it",
     "                      Until then its mail is in the Waiting tab, ☁ in the list",
     "",
     "Screener (deck-mail filter: new mail from senders you don't know, and mail that looks like spam)",
@@ -165,7 +165,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                     Span::raw(format!("{name} ({ctype})")),
                     Span::raw(match app.pdf_target().map(|(_, p)| &p.state) {
                         Some(State::Waiting | State::Chosen) => {
-                            "   Enter open · t file in Nextcloud · x leave out · w save"
+                            "   Enter open · t file in the archive · x leave out · w save"
                         }
                         _ => "   Enter open · w save · y copy name",
                     })
@@ -174,7 +174,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             },
             None if app.pdf_target().is_some_and(|(_, p)| p.state == State::Waiting) => Line::from(vec![
                 Span::raw("☁ a PDF waits: ").yellow(),
-                Span::raw("t file it in Nextcloud · x leave it out · Tab links · ? explain · q back").dark_gray(),
+                Span::raw("t file it in the archive · x leave it out · Tab links · ? explain · q back").dark_gray(),
             ]),
             None => Line::from(if app.view.is_some() {
                 "? explain · Tab links · r reply · R all · f forward · n/p message · a archive · d delete · q back"
@@ -458,11 +458,11 @@ fn draw_review(f: &mut Frame, d: &Draft, scroll: usize, foot: Rect) {
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
-/// `t`: the category and name a PDF goes to Nextcloud as.
+/// `t`: the category and name a PDF goes to the archive as.
 fn draw_file(f: &mut Frame, form: &FileForm) {
     let area = centered(f.area(), 90, 13);
     f.render_widget(Clear, area);
-    let block = Block::bordered().title(" File in Nextcloud ");
+    let block = Block::bordered().title(" File in the archive ");
     let inner = block.inner(area).inner(Margin::new(1, 0));
     f.render_widget(block, area);
     let on = |row: usize, s: Span<'static>| if form.row == row { s.reversed() } else { s };
@@ -502,7 +502,7 @@ fn draw_file(f: &mut Frame, form: &FileForm) {
         Line::from(name),
         Line::from(""),
         Line::from(
-            "The next sync puts it in Nextcloud, in a folder by the mail's date, with the category as its tag.",
+            "The next sync puts it in the archive, in a folder by the mail's date, with the category as its tag.",
         )
         .dark_gray(),
         Line::from(""),
@@ -704,25 +704,25 @@ pub fn explain_thread(app: &App, v: &ThreadView) -> Mode {
                     body.push(Line::from(""));
                     body.push(Line::from(match p.state {
                         State::Sent => format!(
-                            "It is in Nextcloud, in the family archive: {}.",
+                            "It is in the family archive: {}.",
                             p.r#where.as_deref().unwrap_or("")
                         ),
-                        State::LeftOut => "It is left out of Nextcloud.".into(),
+                        State::LeftOut => "It is left out of the archive.".into(),
                         State::Chosen => format!(
-                            "It goes to Nextcloud at the next sync, as {} / {}. t changes that, x leaves it out, u undoes.",
+                            "It goes to the archive at the next sync, as {} / {}. t changes that, x leaves it out, u undoes.",
                             p.category.as_deref().unwrap_or(""),
                             p.name.as_deref().unwrap_or("")
                         ),
                         State::Waiting => match &p.suggested {
                             Some((c, n)) if c != "-" => format!(
-                                "It waits for you: nothing goes to Nextcloud until you choose. The rules suggest {c} / {n}; t shows that to confirm or change. x leaves it out."
+                                "It waits for you: nothing goes to the archive until you choose. The rules suggest {c} / {n}; t shows that to confirm or change. x leaves it out."
                             ),
-                            Some(_) => "It waits for you: nothing goes to Nextcloud until you choose. The rules suggest leaving it out: x does. t files it after all.".into(),
-                            None => "It waits for you: nothing goes to Nextcloud until you choose. t files it, as a category and name; x leaves it out.".into(),
+                            Some(_) => "It waits for you: nothing goes to the archive until you choose. The rules suggest leaving it out: x does. t files it after all.".into(),
+                            None => "It waits for you: nothing goes to the archive until you choose. t files it, as a category and name; x leaves it out.".into(),
                         },
                     }));
                     if matches!(p.state, State::Waiting | State::Chosen) {
-                        keys.splice(1..1, [("t", "file in Nextcloud"), ("x", "leave out")]);
+                        keys.splice(1..1, [("t", "file in the archive"), ("x", "leave out")]);
                     }
                 }
                 Mode::Explain {

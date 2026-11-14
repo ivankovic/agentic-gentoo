@@ -23,9 +23,9 @@ pub enum Kind {
     Link,
     Attachment,
     Rule,
-    /// A PDF that waits for a choice: to Nextcloud, or left out.
+    /// A PDF that waits for a choice: to the archive, or left out.
     Waiting,
-    /// A PDF chosen for, or already in, Nextcloud.
+    /// A PDF chosen for, or already in, the archive.
     Filed,
 }
 
@@ -285,20 +285,20 @@ fn filing(p: &Pdf) -> (String, Kind) {
     let as_ = |c: &str, n: &str| format!("{c} / {n}");
     match (&p.state, &p.category, &p.name) {
         (State::Sent, ..) => (
-            format!("   ☁ in Nextcloud: {}", p.r#where.as_deref().unwrap_or("")),
+            format!("   ☁ in the archive: {}", p.r#where.as_deref().unwrap_or("")),
             Kind::Meta,
         ),
-        (State::LeftOut, ..) => ("   ☁ left out of Nextcloud".into(), Kind::Meta),
+        (State::LeftOut, ..) => ("   ☁ left out of the archive".into(), Kind::Meta),
         (State::Chosen, Some(c), Some(n)) => (
             format!(
-                "   ☁ to Nextcloud at the next sync, as {} · t changes it",
+                "   ☁ to the archive at the next sync, as {} · t changes it",
                 as_(c, n)
             ),
             Kind::Filed,
         ),
         _ => match &p.suggested {
             Some((c, _)) if c == "-" => (
-                "   ☁ waiting · the rules say leave it out: x does · t files it in Nextcloud".into(),
+                "   ☁ waiting · the rules say leave it out: x does · t files it in the archive".into(),
                 Kind::Waiting,
             ),
             Some((c, n)) => (
@@ -306,7 +306,7 @@ fn filing(p: &Pdf) -> (String, Kind) {
                 Kind::Waiting,
             ),
             None => (
-                "   ☁ waiting · t files it in Nextcloud · x leaves it out".into(),
+                "   ☁ waiting · t files it in the archive · x leaves it out".into(),
                 Kind::Waiting,
             ),
         },

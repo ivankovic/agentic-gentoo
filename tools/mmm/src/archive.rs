@@ -1,4 +1,4 @@
-//! The family archive in Nextcloud, through deck-mail: what became of each PDF in mail, and the
+//! The family archive, through deck-mail: what became of each PDF in mail, and the
 //! choice of where one goes. mmm only chooses; deck-mail's sync does the sending.
 
 use anyhow::{Context, Result, bail};
@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 #[derive(Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum State {
-    /// In Nextcloud already.
+    /// In the archive already.
     Sent,
     /// Chosen; the next sync sends it.
     Chosen,
@@ -28,7 +28,7 @@ pub struct Pdf {
     pub category: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
-    /// Where it is in Nextcloud, once sent.
+    /// Where it is in the archive, once sent.
     #[serde(default)]
     pub r#where: Option<String>,
     /// What the sender and file name rules make of it: a guess to confirm. ("-", "-") is "leave
