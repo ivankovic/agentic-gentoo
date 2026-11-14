@@ -1,9 +1,0 @@
-category = "services"
-task = [
-  "${D_NAME}.service fails to start since I tidied up /etc/conf.d. Fix it.",
-  "${D_NAME} stopped working after some cleanup in /etc. Get it running again, keep its settings.",
-]
-
-[vars]
-D = "@daemons"
-KIND = ["bak", "conf", "moved"]

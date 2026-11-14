@@ -1,8 +1,0 @@
-category = "config"
-task = [
-  "The clock shows the wrong time; we're in ${CITY}. Set the timezone so it stays that way after reboots.",
-  "Log timestamps are off by hours. This machine is in ${CITY}; fix the timezone.",
-]
-
-[vars]
-CITY = ["Zagreb", "New York", "Tokyo", "Berlin", "Sao Paulo"]

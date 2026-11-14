@@ -1,9 +1,0 @@
-category = "auth"
-task = [
-  "${U_NAME} can't log in with the SSH key any more; ssh asks for a password instead. Fix it without weakening sshd's checks.",
-  "Key login for ${U_NAME} stopped working after someone 'fixed' permissions in the home directory. Make it work again, securely.",
-]
-
-[vars]
-U = "@users"
-KIND = ["home-777", "ssh-777", "keys-666", "ssh-owner"]

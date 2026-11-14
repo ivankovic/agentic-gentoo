@@ -1,9 +1,0 @@
-category = "services"
-task = [
-  "${SVC_NAME}.service won't start. Fix it.",
-  "The ${SVC_DESC} is down and systemctl start ${SVC_NAME} fails. Get it back.",
-  "Port ${SVC_PORT} should serve the ${SVC_DESC}, but I get some other page, and ${SVC_NAME}.service is failed. Fix it.",
-]
-
-[vars]
-SVC = "@services"

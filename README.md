@@ -13,12 +13,8 @@ Records of real installs, kept as reference for the installer:
 - [tools/deck](tools/deck/) — a TUI listing installed packages by origin (binhost, compiled here,
   prebuilt, noarch), the local patches each carries, and each patch's way upstream, timestamped in
   the host's `upstream.toml`.
-- [tools/drills](tools/drills/) — breakage drills for a sysadmin model: a throwaway Gentoo VM is
-  broken in a known way, a model repairs it over a root shell, and a script checks the result.
 - [tools/mmm](tools/mmm/) — a terminal mail reader over notmuch: threads, a screener for new
   senders, composing with a minute to take a mail back.
-- [tools/fix](tools/fix/) — an offline sysadmin model's tools: `fix-shadow` asks the local model,
-  at each of the main agent's sysadmin commands, what it would have run, and records both.
 
 ## Deploying
 

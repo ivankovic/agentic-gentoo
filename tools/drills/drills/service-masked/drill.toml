@@ -1,9 +1,0 @@
-category = "services"
-task = [
-  "systemctl start ${SVC_NAME}.service fails and I don't understand the message. Get it running, and make sure it also starts on boot.",
-  "The ${SVC_DESC} won't start, systemd says something about the unit. It came with the system. Get it running permanently.",
-]
-reboot_before_check = true
-
-[vars]
-SVC = "@services"

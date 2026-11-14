@@ -1,9 +1,0 @@
-category = "auth"
-task = [
-  "${U_NAME} says the password is rejected, and is sure it's the right one. Fix it, but don't reset the password.",
-  "${U_NAME} can't log in since Monday, 'Authentication failure'. The password hasn't changed. Sort it out without setting a new one.",
-]
-
-[vars]
-U = "@users"
-KIND = ["locked", "expired"]
